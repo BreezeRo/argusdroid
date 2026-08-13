@@ -22,6 +22,7 @@ class WifiScanner(
         @Suppress("DEPRECATION")
         val results = wifiManager.scanResults ?: emptyList()
         val now = System.currentTimeMillis()
+        val location = LocationSnapshotProvider.read(context)
 
         return results.map { result ->
             Encounter(
@@ -31,8 +32,8 @@ class WifiScanner(
                 secondaryId = result.SSID,
                 rssiDbm = result.level,
                 frequencyMhz = result.frequency,
-                lat = null,
-                lon = null,
+                lat = location?.lat,
+                lon = location?.lon,
                 rawPayloadJson = buildWifiPayload(result)
             )
         }

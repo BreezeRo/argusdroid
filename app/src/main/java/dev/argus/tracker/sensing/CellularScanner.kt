@@ -26,8 +26,9 @@ class CellularScanner(
 
         val allCells = runCatching { telephonyManager.allCellInfo }.getOrNull() ?: return emptyList()
         val now = System.currentTimeMillis()
+        val location = LocationSnapshotProvider.read(context)
 
-        return allCells.mapNotNull { info -> info.toEncounter(now, telephonyManager) }
+        return allCells.mapNotNull { info -> info.toEncounter(now, telephonyManager, location) }
     }
 
     private fun hasCellPermissions(): Boolean {
@@ -37,7 +38,11 @@ class CellularScanner(
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun CellInfo.toEncounter(now: Long, telephonyManager: TelephonyManager): Encounter? {
+    private fun CellInfo.toEncounter(
+        now: Long,
+        telephonyManager: TelephonyManager,
+        location: DetectionLocation?
+    ): Encounter? {
         val payload = JSONObject()
             .put("registered", isRegistered)
             .put("timestampMillis", timestampMillis)
@@ -68,8 +73,8 @@ class CellularScanner(
                     secondaryId = "LTE",
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
-                    lat = null,
-                    lon = null,
+                    lat = location?.lat,
+                    lon = location?.lon,
                     rawPayloadJson = payload.toString()
                 )
             }
@@ -147,8 +152,8 @@ class CellularScanner(
                     secondaryId = "NR",
                     rssiDbm = if (dbm == Int.MIN_VALUE) null else dbm,
                     frequencyMhz = null,
-                    lat = null,
-                    lon = null,
+                    lat = location?.lat,
+                    lon = location?.lon,
                     rawPayloadJson = payload.toString()
                 )
             }
@@ -173,8 +178,8 @@ class CellularScanner(
                     secondaryId = "WCDMA",
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
-                    lat = null,
-                    lon = null,
+                    lat = location?.lat,
+                    lon = location?.lon,
                     rawPayloadJson = payload.toString()
                 )
             }
@@ -199,8 +204,8 @@ class CellularScanner(
                     secondaryId = "GSM",
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
-                    lat = null,
-                    lon = null,
+                    lat = location?.lat,
+                    lon = location?.lon,
                     rawPayloadJson = payload.toString()
                 )
             }
@@ -222,8 +227,8 @@ class CellularScanner(
                     secondaryId = "CDMA",
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
-                    lat = null,
-                    lon = null,
+                    lat = location?.lat,
+                    lon = location?.lon,
                     rawPayloadJson = payload.toString()
                 )
             }

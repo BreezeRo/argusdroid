@@ -30,6 +30,7 @@ class BleScanner(
         val adapter: BluetoothAdapter = manager.adapter ?: return emptyList()
         if (!adapter.isEnabled) return emptyList()
         val scanner = adapter.bluetoothLeScanner ?: return emptyList()
+        val location = LocationSnapshotProvider.read(context)
 
         return suspendCancellableCoroutine { continuation ->
             val done = AtomicBoolean(false)
@@ -38,7 +39,7 @@ class BleScanner(
 
             val callback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    val encounter = result.toEncounter()
+                    val encounter = result.toEncounter(location)
                     val existing = captured[encounter.primaryId]
                     if (existing == null || (encounter.rssiDbm ?: Int.MIN_VALUE) > (existing.rssiDbm ?: Int.MIN_VALUE)) {
                         captured[encounter.primaryId] = encounter
@@ -108,7 +109,7 @@ class BleScanner(
         }
     }
 
-    private fun ScanResult.toEncounter(): Encounter {
+    private fun ScanResult.toEncounter(location: DetectionLocation?): Encounter {
         val mac = device?.address ?: "unknown-ble"
         val name = device?.name
         return Encounter(
@@ -118,8 +119,8 @@ class BleScanner(
             secondaryId = name,
             rssiDbm = rssi,
             frequencyMhz = null,
-            lat = null,
-            lon = null,
+            lat = location?.lat,
+            lon = location?.lon,
             rawPayloadJson = buildBlePayload(this)
         )
     }
