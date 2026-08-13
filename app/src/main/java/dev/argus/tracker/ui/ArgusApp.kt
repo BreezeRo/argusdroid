@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
@@ -1310,6 +1311,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         )
                         "Backup exported: ${file.name}"
                     },
+                    onExportEncryptedBackup = { passphrase ->
+                        val file = AppBackupManager.exportEncryptedSnapshot(
+                            context = context,
+                            repository = app.container.repository,
+                            reason = "manual encrypted settings export",
+                            passphrase = passphrase
+                        )
+                        "Encrypted backup exported: ${file.name}"
+                    },
                     onImportLatestBackup = {
                         val fileName = AppBackupManager.importLatestSnapshot(
                             context = context,
@@ -1347,6 +1357,45 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         MeshForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Backup imported from $fileName"
+                    },
+                    onImportLatestEncryptedBackup = { passphrase ->
+                        val fileName = AppBackupManager.importLatestEncryptedSnapshot(
+                            context = context,
+                            repository = app.container.repository,
+                            passphrase = passphrase
+                        )
+                        sensorGateSettings = readSensorGateSettings(context)
+                        chainLinkEnabled = ScanSettings.isChainLinkEnabled(context)
+                        chainNodeId = ScanSettings.getChainNodeId(context)
+                        chainDeviceName = ScanSettings.getChainDeviceName(context)
+                        chainSharedSecret = ScanSettings.getChainSharedSecret(context)
+                        chainAutoSyncEnabled = ScanSettings.isChainAutoSyncEnabled(context)
+                        chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
+                        chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
+                        chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
+                        chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+                        evasionProfile = runCatching { EvasionProfile.valueOf(ScanSettings.getEvasionProfile(context)) }
+                            .getOrDefault(EvasionProfile.BALANCED)
+                        evasionAutoEscalateEnabled = ScanSettings.isEvasionAutoEscalateEnabled(context)
+                        evasionEscalateDurationSeconds = ScanSettings.getEvasionAutoEscalateDurationSeconds(context)
+                        evasionJitterEnabled = ScanSettings.isEvasionJitterEnabled(context)
+                        evasionJitterPercent = ScanSettings.getEvasionJitterPercent(context)
+                        evasionBurstEnabled = ScanSettings.isEvasionBurstEnabled(context)
+                        evasionBurstWatchSeconds = ScanSettings.getEvasionBurstWatchSeconds(context)
+                        evasionBurstCooldownSeconds = ScanSettings.getEvasionBurstCooldownSeconds(context)
+                        evasionActionLog = ScanSettings.getEvasionActionLog(context, 25)
+                        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
+                        sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+                        sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
+                        sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+                        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
+                        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        alertLogs = AlertLogStore.read(context)
+                        ownedDeviceKeys = OwnedDeviceRegistry.read(context)
+                        MeshForegroundServiceController.ensureState(context)
+                        viewModel.refreshSummary()
+                        "Encrypted backup imported from $fileName"
                     },
                     onSoftReset = {
                         scope.launch {
@@ -2319,7 +2368,9 @@ private fun AppSettingsPage(
     onTrackerNotificationsChanged: (Boolean) -> Unit,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onExportBackup: suspend () -> String,
+    onExportEncryptedBackup: suspend (String) -> String,
     onImportLatestBackup: suspend () -> String,
+    onImportLatestEncryptedBackup: suspend (String) -> String,
     onSoftReset: () -> Unit,
     onHardReset: () -> Unit
 ) {
@@ -2329,6 +2380,8 @@ private fun AppSettingsPage(
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
     var backupActionInProgress by remember { mutableStateOf(false) }
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
+    var backupPassphrase by rememberSaveable { mutableStateOf("") }
+    val hasStrongPassphrase = backupPassphrase.trim().length >= 8
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
     val recommendedBySource = remember(sourceScanTimings) {
         sourceScanTimings.associate { timing ->
@@ -2582,6 +2635,15 @@ private fun AppSettingsPage(
                 ) {
                     Text("Export creates an app-wide snapshot (encounters + settings/logs).")
                     Text("Import restores the latest snapshot from internal app backup storage.")
+                    Text("Encrypted backup uses AES-GCM and a passphrase-derived key.")
+                    OutlinedTextField(
+                        value = backupPassphrase,
+                        onValueChange = { backupPassphrase = it },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        label = { Text("Encryption passphrase (min 8 chars)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2612,6 +2674,46 @@ private fun AppSettingsPage(
                         ) {
                             Text("Import Latest Backup")
                         }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            enabled = !backupActionInProgress && hasStrongPassphrase,
+                            onClick = {
+                                scope.launch {
+                                    backupActionInProgress = true
+                                    backupStatusMessage = runCatching {
+                                        onExportEncryptedBackup(backupPassphrase.trim())
+                                    }.getOrElse { error ->
+                                        "Encrypted export failed: ${error.message ?: "unknown error"}"
+                                    }
+                                    backupActionInProgress = false
+                                }
+                            }
+                        ) {
+                            Text(if (backupActionInProgress) "Working..." else "Export Encrypted Backup")
+                        }
+                        Button(
+                            enabled = !backupActionInProgress && hasStrongPassphrase,
+                            onClick = {
+                                scope.launch {
+                                    backupActionInProgress = true
+                                    backupStatusMessage = runCatching {
+                                        onImportLatestEncryptedBackup(backupPassphrase.trim())
+                                    }.getOrElse { error ->
+                                        "Encrypted import failed: ${error.message ?: "unknown error"}"
+                                    }
+                                    backupActionInProgress = false
+                                }
+                            }
+                        ) {
+                            Text("Import Latest Encrypted")
+                        }
+                    }
+                    if (!hasStrongPassphrase) {
+                        Text("Set a passphrase of at least 8 characters to enable encrypted backup/export.")
                     }
                     if (backupStatusMessage != null) {
                         Text(backupStatusMessage!!)
@@ -6664,6 +6766,7 @@ private fun DeviceDetailPage(
                     primaryId = item.primaryId,
                     lat = pinnedMapLat,
                     lon = pinnedMapLon,
+                    currentLocation = currentLocation,
                     lastSeenEpochMs = item.lastSeenEpochMs,
                     realtimeEnabled = realtimeMapEnabled,
                     onRealtimeEnabledChanged = { enabled ->
@@ -6726,12 +6829,185 @@ private fun EncounterDetailPage(
             right = {
                 DetailRow("RSSI", encounter.rssiDbm?.toString() ?: "n/a")
                 DetailRow("Frequency", encounter.frequencyMhz?.toString() ?: "n/a")
+                DetailRow(
+                    "Encounter Location",
+                    if (isValidLatLon(encounter.lat, encounter.lon)) {
+                        String.format(Locale.US, "%.6f, %.6f", encounter.lat!!, encounter.lon!!)
+                    } else {
+                        "n/a"
+                    }
+                )
+                DetailRow(
+                    "My Location Snapshot",
+                    if (currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)) {
+                        String.format(Locale.US, "%.6f, %.6f", currentLocation.lat, currentLocation.lon)
+                    } else {
+                        "n/a"
+                    }
+                )
+                EncounterDetailMapSection(
+                    encounter = encounter,
+                    currentLocation = currentLocation
+                )
                 if (encounter.rawPayloadJson.isNotBlank()) {
                     SourceSpecificDetailsSection(encounter = encounter, currentLocation = currentLocation)
                 }
                 DetailRow("Payload", encounter.rawPayloadJson)
             }
         )
+    }
+}
+
+@Composable
+private fun EncounterDetailMapSection(
+    encounter: Encounter,
+    currentLocation: DetectionLocation?
+) {
+    var zoomControlsEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(true) }
+    var compassEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(true) }
+    var mapToolbarEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(false) }
+
+    val foreignBasePoint = remember(encounter.lat, encounter.lon) {
+        if (isValidLatLon(encounter.lat, encounter.lon)) LatLng(encounter.lat!!, encounter.lon!!) else null
+    }
+    val localBasePoint = remember(currentLocation) {
+        if (currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)) {
+            LatLng(currentLocation.lat, currentLocation.lon)
+        } else {
+            null
+        }
+    }
+    val separatedPoints = remember(foreignBasePoint, localBasePoint) {
+        separateOverlappingPins(
+            primary = foreignBasePoint,
+            secondary = localBasePoint,
+            overlapThresholdFeet = 6.0,
+            separationFeet = 2.5
+        )
+    }
+    val foreignPoint = separatedPoints.first
+    val localPoint = separatedPoints.second
+    val fallbackLatLng = remember { LatLng(37.4219999, -122.0840575) }
+    val mapPoints = remember(foreignPoint, localPoint) {
+        listOfNotNull(foreignPoint, localPoint)
+    }
+    val centerPoint = remember(mapPoints) {
+        when {
+            mapPoints.isEmpty() -> fallbackLatLng
+            mapPoints.size == 1 -> mapPoints.first()
+            else -> {
+                val avgLat = mapPoints.map { it.latitude }.average()
+                val avgLon = mapPoints.map { it.longitude }.average()
+                LatLng(avgLat, avgLon)
+            }
+        }
+    }
+    val zoomLevel = if (mapPoints.size <= 1) 16f else 14f
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(centerPoint, zoomLevel)
+    }
+
+    LaunchedEffect(centerPoint, zoomLevel) {
+        cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(centerPoint, zoomLevel))
+    }
+
+    fun focusMap(points: List<LatLng>) {
+        when (points.size) {
+            0 -> cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(fallbackLatLng, 12f))
+            1 -> cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(points.first(), 16f))
+            else -> {
+                val avgLat = points.map { it.latitude }.average()
+                val avgLon = points.map { it.longitude }.average()
+                cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(LatLng(avgLat, avgLon), 14f))
+            }
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Encounter Map", fontWeight = FontWeight.Bold)
+            Text("Shows foreign device encounter pin and your local snapshot pin when available.")
+            Text("When pins overlap, each is shifted by ~2.5 ft for visibility.")
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Zoom controls")
+                Switch(checked = zoomControlsEnabled, onCheckedChange = { zoomControlsEnabled = it })
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Compass")
+                Switch(checked = compassEnabled, onCheckedChange = { compassEnabled = it })
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Map toolbar")
+                Switch(checked = mapToolbarEnabled, onCheckedChange = { mapToolbarEnabled = it })
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = { foreignPoint?.let { focusMap(listOf(it)) } },
+                    enabled = foreignPoint != null
+                ) {
+                    Text("Focus Device")
+                }
+                Button(
+                    onClick = { localPoint?.let { focusMap(listOf(it)) } },
+                    enabled = localPoint != null
+                ) {
+                    Text("Focus Me")
+                }
+                Button(
+                    onClick = { focusMap(mapPoints) },
+                    enabled = mapPoints.isNotEmpty()
+                ) {
+                    Text("Focus Both")
+                }
+            }
+
+            if (foreignPoint == null && localPoint == null) {
+                Text("No valid coordinates available for either pin.")
+            } else {
+                GoogleMap(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp),
+                    cameraPositionState = cameraPositionState,
+                    uiSettings = MapUiSettings(
+                        zoomControlsEnabled = zoomControlsEnabled,
+                        compassEnabled = compassEnabled,
+                        mapToolbarEnabled = mapToolbarEnabled
+                    )
+                ) {
+                    foreignPoint?.let { point ->
+                        Marker(
+                            state = MarkerState(position = point),
+                            title = "Foreign device encounter",
+                            snippet = "${encounter.source.name} • ${encounter.primaryId}",
+                            icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                        )
+                    }
+                    localPoint?.let { point ->
+                        Marker(
+                            state = MarkerState(position = point),
+                            title = "My location snapshot",
+                            snippet = "Local observer position",
+                            icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -6776,26 +7052,66 @@ private fun DeviceDetailMapSection(
     primaryId: String,
     lat: Double?,
     lon: Double?,
+    currentLocation: DetectionLocation?,
     lastSeenEpochMs: Long,
     realtimeEnabled: Boolean,
     onRealtimeEnabledChanged: (Boolean) -> Unit
 ) {
+    var zoomControlsEnabled by rememberSaveable(source, primaryId) { mutableStateOf(true) }
+    var compassEnabled by rememberSaveable(source, primaryId) { mutableStateOf(true) }
+    var mapToolbarEnabled by rememberSaveable(source, primaryId) { mutableStateOf(false) }
+
     val hasFix = isValidLatLon(lat, lon)
-    val markerLatLng = remember(lat, lon, hasFix) {
+    val markerBaseLatLng = remember(lat, lon, hasFix) {
         if (hasFix) {
             LatLng(lat!!, lon!!)
         } else {
             null
         }
     }
+    val localBasePoint = remember(currentLocation) {
+        if (currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)) {
+            LatLng(currentLocation.lat, currentLocation.lon)
+        } else {
+            null
+        }
+    }
+    val separatedPoints = remember(markerBaseLatLng, localBasePoint) {
+        separateOverlappingPins(
+            primary = markerBaseLatLng,
+            secondary = localBasePoint,
+            overlapThresholdFeet = 6.0,
+            separationFeet = 2.5
+        )
+    }
+    val markerLatLng = separatedPoints.first
+    val localPoint = separatedPoints.second
+
     val fallbackLatLng = remember { LatLng(37.4219999, -122.0840575) }
+    val mapPoints = remember(markerLatLng, localPoint) { listOfNotNull(markerLatLng, localPoint) }
+    val hasDeviceFix = markerLatLng != null
     val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(markerLatLng ?: fallbackLatLng, if (hasFix) 16f else 12f)
+        position = CameraPosition.fromLatLngZoom(markerLatLng ?: localPoint ?: fallbackLatLng, if (hasFix) 16f else 12f)
     }
 
-    LaunchedEffect(markerLatLng) {
-        markerLatLng?.let {
-            cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(it, 16f))
+    LaunchedEffect(markerLatLng, localPoint, realtimeEnabled) {
+        if (realtimeEnabled) {
+            val target = markerLatLng ?: localPoint
+            target?.let {
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(it, 16f))
+            }
+        }
+    }
+
+    fun focusMap(points: List<LatLng>) {
+        when (points.size) {
+            0 -> cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(fallbackLatLng, 12f))
+            1 -> cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(points.first(), 16f))
+            else -> {
+                val avgLat = points.map { it.latitude }.average()
+                val avgLon = points.map { it.longitude }.average()
+                cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(LatLng(avgLat, avgLon), 14f))
+            }
         }
     }
 
@@ -6819,30 +7135,119 @@ private fun DeviceDetailMapSection(
                     "Map is pinned. Enable real-time to follow incoming updates."
                 }
             )
+            Text("When local/device pins overlap, each is shifted by ~2.5 ft for visibility.")
 
-            if (markerLatLng == null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Zoom controls")
+                Switch(checked = zoomControlsEnabled, onCheckedChange = { zoomControlsEnabled = it })
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Compass")
+                Switch(checked = compassEnabled, onCheckedChange = { compassEnabled = it })
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Map toolbar")
+                Switch(checked = mapToolbarEnabled, onCheckedChange = { mapToolbarEnabled = it })
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = { markerLatLng?.let { focusMap(listOf(it)) } },
+                    enabled = markerLatLng != null
+                ) {
+                    Text("Focus Device")
+                }
+                Button(
+                    onClick = { localPoint?.let { focusMap(listOf(it)) } },
+                    enabled = localPoint != null
+                ) {
+                    Text("Focus Me")
+                }
+                Button(
+                    onClick = { focusMap(mapPoints) },
+                    enabled = mapPoints.isNotEmpty()
+                ) {
+                    Text("Focus Both")
+                }
+            }
+
+            if (!hasDeviceFix && localPoint == null) {
                 Text("No valid device location available yet.")
             } else {
-                Text(
-                    "${String.format(Locale.US, "%.6f, %.6f", markerLatLng.latitude, markerLatLng.longitude)} • ${formatEpoch(lastSeenEpochMs)}"
-                )
+                markerLatLng?.let {
+                    Text(
+                        "${String.format(Locale.US, "%.6f, %.6f", it.latitude, it.longitude)} • ${formatEpoch(lastSeenEpochMs)}"
+                    )
+                }
                 GoogleMap(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(220.dp),
                     cameraPositionState = cameraPositionState,
-                    uiSettings = MapUiSettings(zoomControlsEnabled = false)
-                ) {
-                    Marker(
-                        state = MarkerState(position = markerLatLng),
-                        title = "$source • $primaryId",
-                        snippet = formatEpoch(lastSeenEpochMs),
-                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                    uiSettings = MapUiSettings(
+                        zoomControlsEnabled = zoomControlsEnabled,
+                        compassEnabled = compassEnabled,
+                        mapToolbarEnabled = mapToolbarEnabled
                     )
+                ) {
+                    markerLatLng?.let { point ->
+                        Marker(
+                            state = MarkerState(position = point),
+                            title = "$source • $primaryId",
+                            snippet = formatEpoch(lastSeenEpochMs),
+                            icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                        )
+                    }
+                    localPoint?.let { point ->
+                        Marker(
+                            state = MarkerState(position = point),
+                            title = "My location snapshot",
+                            snippet = "Local observer position",
+                            icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+private fun separateOverlappingPins(
+    primary: LatLng?,
+    secondary: LatLng?,
+    overlapThresholdFeet: Double,
+    separationFeet: Double
+): Pair<LatLng?, LatLng?> {
+    if (primary == null || secondary == null) return primary to secondary
+
+    val distanceMeters = FloatArray(1)
+    android.location.Location.distanceBetween(
+        primary.latitude,
+        primary.longitude,
+        secondary.latitude,
+        secondary.longitude,
+        distanceMeters
+    )
+
+    val thresholdMeters = overlapThresholdFeet * 0.3048
+    if (distanceMeters[0].toDouble() > thresholdMeters) return primary to secondary
+
+    val offsetMeters = separationFeet * 0.3048
+    val shiftedPrimary = offsetLatLng(primary, offsetMeters, 90.0)
+    val shiftedSecondary = offsetLatLng(secondary, offsetMeters, 270.0)
+    return shiftedPrimary to shiftedSecondary
 }
 
 @Composable
