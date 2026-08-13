@@ -262,10 +262,22 @@ This behavior is intentional to support short intervals while still supporting p
 ## Repository layout
 
 - app: Android application module
+- dashboard: static view-only web dashboard (map + operational summaries)
 - docs/architecture.md: architecture and data flow
 - docs/capabilities-and-limits.md: practical platform constraints
 - src: reserved for shared or non-Android code
 - tests: repository-level test assets
+
+## View-only web dashboard
+
+- Dashboard path: `dashboard/`
+- Start server on LAN: `./scripts/run-dashboard-node.ps1`
+- Optional port: `./scripts/run-dashboard-node.ps1 -Port 8090`
+- Live mesh config: `dashboard/config/mesh-config.json`
+- First run installs Node dependencies under `dashboard-server/node_modules`.
+
+When started, the script prints both localhost and LAN URLs so any device on the same Wi-Fi network can open the dashboard.
+To pull real app/mesh data, enable and configure peer IPs and shared secret in `dashboard/config/mesh-config.json`.
 
 ## Tech stack
 
@@ -289,6 +301,7 @@ Before production deployment, implement:
 
 - Architecture: docs/architecture.md
 - Capabilities and limits: docs/capabilities-and-limits.md
+- Web dashboard: docs/web-dashboard.md
 
 ## License
 

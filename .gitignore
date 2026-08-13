@@ -18,6 +18,8 @@ Thumbs.db
 dist/
 build/
 coverage/
+node_modules/
+dashboard-server/node_modules/
 
 # Android / Gradle
 .gradle/
