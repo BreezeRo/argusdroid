@@ -6,7 +6,8 @@ Argus is designed as an on-device signal encounter pipeline:
 2. Observations are normalized into a shared `Encounter` model.
 3. Encounters are persisted in a Room database for long-term historical analysis.
 4. WorkManager schedules periodic collection jobs.
-5. UI surfaces summary counts and recent encounter activity.
+5. Optional chain-link mesh synchronization exchanges recent encounters with nearby Argus peers on the same LAN using shared-passphrase request signing.
+6. UI surfaces summary counts and recent encounter activity.
 
 ## Layers
 
@@ -27,6 +28,9 @@ An encounter records:
 - Signal metadata (RSSI, frequency)
 - Optional location
 - Raw payload JSON for later feature extraction
+- Encounter fingerprint for deduplicated multi-device replication
+- Provenance metadata (local vs chain-linked peer source)
+- Authenticated sync metadata validated by timestamped signatures
 
 ## Scheduling Model
 

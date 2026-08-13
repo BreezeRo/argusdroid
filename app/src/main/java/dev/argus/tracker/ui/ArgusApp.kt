@@ -10,6 +10,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -70,7 +71,10 @@ import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.data.chain.ChainMeshSnapshot
+import dev.argus.tracker.data.chain.ChainPeerState
 import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.domain.EncounterProvenance
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.sensing.CellTowerLookupService
 import dev.argus.tracker.sensing.DetectionLocation
@@ -99,6 +103,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 private enum class DataScope {
@@ -169,6 +174,10 @@ private data class DeviceItem(
     val lastLat: Double?,
     val lastLon: Double?,
     val lastRawPayloadJson: String?,
+    val lastProvenance: EncounterProvenance,
+    val lastProvenanceNodeId: String?,
+    val hasChainLinkedData: Boolean,
+    val chainLinkedPeerCount: Int,
     val isApproaching: Boolean,
     val approachConfidence: Double?,
     val approachDeltaMeters: Double?,
@@ -205,6 +214,8 @@ private data class DeviceLocationCandidate(
     val approximateLocation: DetectionLocation? = null,
     val approximateMethod: String? = null,
     val approximateRangeMeters: Double? = null,
+    val hasChainLinkedData: Boolean = false,
+    val chainLinkedPeerCount: Int = 0,
     val approachSignal: ApproachSignal? = null,
     val trackerRisk: TrackerRiskSignal? = null,
     val isOwned: Boolean = false
@@ -327,6 +338,14 @@ fun ArgusApp() {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var chainLinkEnabled by remember { mutableStateOf(ScanSettings.isChainLinkEnabled(context)) }
+    var chainNodeId by remember { mutableStateOf(ScanSettings.getChainNodeId(context)) }
+    var chainDeviceName by remember { mutableStateOf(ScanSettings.getChainDeviceName(context)) }
+    var chainSharedSecret by remember { mutableStateOf(ScanSettings.getChainSharedSecret(context)) }
+    var chainAutoSyncEnabled by remember { mutableStateOf(ScanSettings.isChainAutoSyncEnabled(context)) }
+    var chainAutoSyncIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainAutoSyncIntervalSeconds(context)) }
+    var chainPersistentChannelEnabled by remember { mutableStateOf(ScanSettings.isChainPersistentChannelEnabled(context)) }
+    var chainHeartbeatIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainHeartbeatIntervalSeconds(context)) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
     var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
@@ -340,14 +359,41 @@ fun ArgusApp() {
     val recent100 by viewModel.recent100Encounters.collectAsState()
     val allEncounters by viewModel.allEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
+    val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
 
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
         sensorGateSettings = readSensorGateSettings(context)
+        chainLinkEnabled = ScanSettings.isChainLinkEnabled(context)
+        chainNodeId = ScanSettings.getChainNodeId(context)
+        chainDeviceName = ScanSettings.getChainDeviceName(context)
+        chainSharedSecret = ScanSettings.getChainSharedSecret(context)
+        chainAutoSyncEnabled = ScanSettings.isChainAutoSyncEnabled(context)
+        chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
+        chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
+        chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
         sensorStatuses = SensorStatusProvider.read(context)
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
+    }
+
+    LaunchedEffect(chainLinkEnabled, chainAutoSyncEnabled, chainAutoSyncIntervalSeconds, chainSharedSecret) {
+        if (!chainLinkEnabled || !chainAutoSyncEnabled) return@LaunchedEffect
+        if (chainSharedSecret.isBlank()) return@LaunchedEffect
+
+        while (true) {
+            runCatching { app.container.chainLinkCoordinator.syncNow() }
+            delay(chainAutoSyncIntervalSeconds * 1000L)
+        }
+    }
+
+    LaunchedEffect(chainLinkEnabled) {
+        if (!chainLinkEnabled) return@LaunchedEffect
+        while (true) {
+            runCatching { app.container.chainLinkCoordinator.refreshPeers() }
+            delay(5000)
+        }
     }
 
     LaunchedEffect(context) {
@@ -597,6 +643,15 @@ fun ArgusApp() {
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    chainLinkEnabled = chainLinkEnabled,
+                    chainNodeId = chainNodeId,
+                    chainDeviceName = chainDeviceName,
+                    chainSharedSecret = chainSharedSecret,
+                    chainAutoSyncEnabled = chainAutoSyncEnabled,
+                    chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
+                    chainPersistentChannelEnabled = chainPersistentChannelEnabled,
+                    chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
+                    chainMeshSnapshot = chainMesh,
                     onScanIntervalSelected = { seconds ->
                         scope.launch {
                             scanIntervalSeconds = seconds
@@ -628,6 +683,58 @@ fun ArgusApp() {
                     onTrackerNotificationsChanged = { enabled ->
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
+                    },
+                    onChainLinkChanged = { enabled ->
+                        chainLinkEnabled = enabled
+                        ScanSettings.setChainLinkEnabled(context, enabled)
+                        if (enabled) {
+                            app.container.chainLinkCoordinator.ensureServerRunning()
+                        } else {
+                            app.container.chainLinkCoordinator.stopServer()
+                        }
+                    },
+                    onChainSharedSecretChanged = { newSecret ->
+                        chainSharedSecret = newSecret.trim()
+                        ScanSettings.setChainSharedSecret(context, newSecret)
+                    },
+                    onChainDeviceNameChanged = { newName ->
+                        chainDeviceName = newName
+                        ScanSettings.setChainDeviceName(context, newName)
+                    },
+                    onChainAutoSyncChanged = { enabled ->
+                        chainAutoSyncEnabled = enabled
+                        ScanSettings.setChainAutoSyncEnabled(context, enabled)
+                    },
+                    onChainAutoSyncIntervalChanged = { seconds ->
+                        chainAutoSyncIntervalSeconds = seconds
+                        ScanSettings.setChainAutoSyncIntervalSeconds(context, seconds)
+                    },
+                    onChainPersistentChannelChanged = { enabled ->
+                        chainPersistentChannelEnabled = enabled
+                        ScanSettings.setChainPersistentChannelEnabled(context, enabled)
+                        if (enabled) {
+                            app.container.chainLinkCoordinator.ensureServerRunning()
+                        }
+                    },
+                    onChainHeartbeatIntervalChanged = { seconds ->
+                        chainHeartbeatIntervalSeconds = seconds
+                        ScanSettings.setChainHeartbeatIntervalSeconds(context, seconds)
+                    },
+                    onRefreshPeers = {
+                        app.container.chainLinkCoordinator.refreshPeers()
+                    },
+                    onSendLinkRequest = { host, message ->
+                        app.container.chainLinkCoordinator.sendLinkRequest(host, message)
+                    },
+                    onSyncNow = {
+                        val stats = app.container.chainLinkCoordinator.syncNow()
+                        if (!stats.enabled) {
+                            "Chain link is disabled."
+                        } else if (!stats.authConfigured) {
+                            "Set a shared chain passphrase on all devices before syncing."
+                        } else {
+                            "Peers ${stats.peersSynced}/${stats.peersDiscovered}, imported ${stats.importedRecords}, exported ${stats.exportedRecords}, failures ${stats.failures}."
+                        }
                     }
                 )
             }
@@ -656,12 +763,29 @@ fun ArgusApp() {
                         runCatching {
                             val batch = app.container.sensingService.collectBatch()
                             app.container.repository.insertBatch(batch)
+                            val chainStats = app.container.chainLinkCoordinator.syncNow()
                             viewModel.refreshSummary()
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
                             if (batch.isEmpty()) {
-                                "Live scan completed: no detections this cycle."
+                                if (chainStats.enabled) {
+                                    if (!chainStats.authConfigured) {
+                                        "Live scan completed: set a shared chain passphrase to enable secure peer sync."
+                                    } else {
+                                        "Live scan completed: no local detections. Chain imported ${chainStats.importedRecords} from ${chainStats.peersSynced} peers."
+                                    }
+                                } else {
+                                    "Live scan completed: no detections this cycle."
+                                }
                             } else {
-                                "Live scan added ${batch.size} detections."
+                                if (chainStats.enabled) {
+                                    if (!chainStats.authConfigured) {
+                                        "Live scan added ${batch.size} local detections. Configure a shared chain passphrase to sync peers."
+                                    } else {
+                                        "Live scan added ${batch.size} local detections and ${chainStats.importedRecords} chain detections."
+                                    }
+                                } else {
+                                    "Live scan added ${batch.size} detections."
+                                }
                             }
                         }.getOrElse { error ->
                             "Live scan failed: ${error.message ?: "unknown error"}"
@@ -909,12 +1033,43 @@ private fun AppSettingsPage(
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    chainLinkEnabled: Boolean,
+    chainNodeId: String,
+    chainDeviceName: String,
+    chainSharedSecret: String,
+    chainAutoSyncEnabled: Boolean,
+    chainAutoSyncIntervalSeconds: Long,
+    chainPersistentChannelEnabled: Boolean,
+    chainHeartbeatIntervalSeconds: Long,
+    chainMeshSnapshot: ChainMeshSnapshot,
     onScanIntervalSelected: (Long) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
-    onTrackerNotificationsChanged: (Boolean) -> Unit
+    onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onChainLinkChanged: (Boolean) -> Unit,
+    onChainDeviceNameChanged: (String) -> Unit,
+    onChainSharedSecretChanged: (String) -> Unit,
+    onChainAutoSyncChanged: (Boolean) -> Unit,
+    onChainAutoSyncIntervalChanged: (Long) -> Unit,
+    onChainPersistentChannelChanged: (Boolean) -> Unit,
+    onChainHeartbeatIntervalChanged: (Long) -> Unit,
+    onRefreshPeers: suspend () -> Unit,
+    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
+    onSyncNow: suspend () -> String
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var chainIntervalExpanded by remember { mutableStateOf(false) }
+    var heartbeatExpanded by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var syncInProgress by remember { mutableStateOf(false) }
+    var syncMessage by remember { mutableStateOf<String?>(null) }
+    var refreshInProgress by remember { mutableStateOf(false) }
+    var linkRequestInProgress by remember { mutableStateOf(false) }
+    var linkHostInput by remember { mutableStateOf("") }
+    var linkMessageInput by remember { mutableStateOf("") }
+
+    val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
+    val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -997,6 +1152,323 @@ private fun AppSettingsPage(
                 }
             }
         }
+        item {
+            Text("Chain Linking", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable chain linking")
+                        Switch(
+                            checked = chainLinkEnabled,
+                            onCheckedChange = onChainLinkChanged
+                        )
+                    }
+                    Text("Node ID: $chainNodeId")
+                    OutlinedTextField(
+                        value = chainDeviceName,
+                        onValueChange = onChainDeviceNameChanged,
+                        label = { Text("This Device Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Text("Shares and syncs detections with other Argus devices on the same LAN.")
+                    OutlinedTextField(
+                        value = chainSharedSecret,
+                        onValueChange = onChainSharedSecretChanged,
+                        label = { Text("Chain Shared Passphrase") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Text("Use the exact same passphrase on every linked device.")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            enabled = chainLinkEnabled && !refreshInProgress,
+                            onClick = {
+                                scope.launch {
+                                    refreshInProgress = true
+                                    runCatching { onRefreshPeers() }
+                                    refreshInProgress = false
+                                }
+                            }
+                        ) {
+                            Text(if (refreshInProgress) "Refreshing..." else "Refresh Peers")
+                        }
+                        Text(
+                            "Connected $connectedCount | Unconnected $unconnectedCount",
+                            modifier = Modifier.padding(top = 10.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auto sync")
+                        Switch(
+                            checked = chainAutoSyncEnabled,
+                            onCheckedChange = onChainAutoSyncChanged,
+                            enabled = chainLinkEnabled
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Persistent channel")
+                        Switch(
+                            checked = chainPersistentChannelEnabled,
+                            onCheckedChange = onChainPersistentChannelChanged,
+                            enabled = chainLinkEnabled && chainSharedSecret.isNotBlank()
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Heartbeat interval")
+                        Button(
+                            enabled = chainLinkEnabled && chainPersistentChannelEnabled,
+                            onClick = { heartbeatExpanded = true }
+                        ) {
+                            Text(ScanSettings.formatInterval(chainHeartbeatIntervalSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = heartbeatExpanded,
+                            onDismissRequest = { heartbeatExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
+                                    onClick = {
+                                        onChainHeartbeatIntervalChanged(seconds)
+                                        heartbeatExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auto sync interval")
+                        Button(
+                            enabled = chainLinkEnabled && chainAutoSyncEnabled,
+                            onClick = { chainIntervalExpanded = true }
+                        ) {
+                            Text(ScanSettings.formatInterval(chainAutoSyncIntervalSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = chainIntervalExpanded,
+                            onDismissRequest = { chainIntervalExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
+                                    onClick = {
+                                        onChainAutoSyncIntervalChanged(seconds)
+                                        chainIntervalExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Button(
+                        enabled = chainLinkEnabled && chainSharedSecret.isNotBlank() && !syncInProgress,
+                        onClick = {
+                            scope.launch {
+                                syncInProgress = true
+                                syncMessage = onSyncNow()
+                                syncInProgress = false
+                            }
+                        }
+                    ) {
+                        Text(if (syncInProgress) "Syncing..." else "Sync Now")
+                    }
+
+                    Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = linkHostInput,
+                        onValueChange = { linkHostInput = it },
+                        label = { Text("Peer Host (e.g. 192.168.1.24)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    OutlinedTextField(
+                        value = linkMessageInput,
+                        onValueChange = { linkMessageInput = it },
+                        label = { Text("Optional message") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Button(
+                        enabled = chainLinkEnabled && linkHostInput.isNotBlank() && !linkRequestInProgress,
+                        onClick = {
+                            scope.launch {
+                                linkRequestInProgress = true
+                                val sent = onSendLinkRequest(linkHostInput.trim(), linkMessageInput.trim().ifBlank { null })
+                                syncMessage = if (sent) {
+                                    "Link request sent to ${linkHostInput.trim()}"
+                                } else {
+                                    "Link request failed for ${linkHostInput.trim()}"
+                                }
+                                linkRequestInProgress = false
+                            }
+                        }
+                    ) {
+                        Text(if (linkRequestInProgress) "Sending..." else "Send Link Request")
+                    }
+
+                    if (chainMeshSnapshot.peers.isNotEmpty()) {
+                        Text("Peers", fontWeight = FontWeight.SemiBold)
+                        chainMeshSnapshot.peers.take(24).forEach { peer ->
+                            val canRequestPeerLink = peer.state != ChainPeerState.CONNECTED &&
+                                peer.state != ChainPeerState.REQUESTED
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                                    Text("$peerDisplay @ ${peer.host}")
+                                    if (!peer.deviceName.isNullOrBlank()) {
+                                        Text("Node: ${peer.nodeId}")
+                                    }
+                                    Text("State: ${peer.state.name}")
+                                    Text("Last seen: ${formatEpoch(peer.lastSeenEpochMs)}")
+                                    if (peer.lastSuccessfulSyncEpochMs != null) {
+                                        Text("Last sync: ${formatEpoch(peer.lastSuccessfulSyncEpochMs)}")
+                                    }
+                                    if (!peer.lastFailure.isNullOrBlank()) {
+                                        Text("Failure: ${peer.lastFailure}", color = Color(0xFFB3261E))
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            enabled = chainLinkEnabled && canRequestPeerLink && !linkRequestInProgress,
+                                            onClick = {
+                                                scope.launch {
+                                                    linkRequestInProgress = true
+                                                    val sent = onSendLinkRequest(peer.host, "Link with $chainNodeId")
+                                                    syncMessage = if (sent) {
+                                                        "Link request sent to ${peer.host}"
+                                                    } else {
+                                                        "Link request failed for ${peer.host}"
+                                                    }
+                                                    linkRequestInProgress = false
+                                                }
+                                            }
+                                        ) {
+                                            Text("Link Request")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (chainMeshSnapshot.incomingRequests.isNotEmpty()) {
+                        Text("Incoming Link Requests", fontWeight = FontWeight.SemiBold)
+                        chainMeshSnapshot.incomingRequests.take(12).forEach { request ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    val requesterDisplay = request.requesterDeviceName?.takeIf { it.isNotBlank() } ?: request.requesterNodeId
+                                    Text("$requesterDisplay @ ${request.requesterHost}")
+                                    if (!request.requesterDeviceName.isNullOrBlank()) {
+                                        Text("Node: ${request.requesterNodeId}")
+                                    }
+                                    if (!request.message.isNullOrBlank()) {
+                                        Text("Msg: ${request.message}")
+                                    }
+                                    Text(formatEpoch(request.timestampEpochMs))
+                                }
+                            }
+                        }
+                    }
+
+                    ChainMeshVisualizer(snapshot = chainMeshSnapshot)
+                    if (syncMessage != null) {
+                        Text(syncMessage!!)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChainMeshVisualizer(snapshot: ChainMeshSnapshot) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Mesh Visualizer", fontWeight = FontWeight.SemiBold)
+            if (snapshot.peers.isNotEmpty()) {
+                Text("Peer Labels", fontWeight = FontWeight.Medium)
+                snapshot.peers.take(12).forEach { peer ->
+                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                    Text("Name: $peerDisplay")
+                    Text("IP: ${peer.host}")
+                }
+            }
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+            ) {
+                val centerX = size.width / 2f
+                val centerY = size.height / 2f
+                val radius = (size.minDimension * 0.35f)
+                val peers = snapshot.peers.take(24)
+
+                drawCircle(
+                    color = Color(0xFF1565C0),
+                    radius = 14f,
+                    center = androidx.compose.ui.geometry.Offset(centerX, centerY)
+                )
+
+                if (peers.isEmpty()) return@Canvas
+                val step = (2.0 * Math.PI) / peers.size.toDouble()
+                peers.forEachIndexed { index, peer ->
+                    val angle = step * index
+                    val px = centerX + (radius * cos(angle).toFloat())
+                    val py = centerY + (radius * sin(angle).toFloat())
+                    val peerColor = when (peer.state) {
+                        ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
+                        ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
+                        ChainPeerState.REQUESTED -> Color(0xFF1565C0)
+                        ChainPeerState.FAILED -> Color(0xFFB3261E)
+                    }
+
+                    drawLine(
+                        color = peerColor.copy(alpha = 0.7f),
+                        start = androidx.compose.ui.geometry.Offset(centerX, centerY),
+                        end = androidx.compose.ui.geometry.Offset(px, py),
+                        strokeWidth = 2f
+                    )
+                    drawCircle(
+                        color = peerColor,
+                        radius = 10f,
+                        center = androidx.compose.ui.geometry.Offset(px, py)
+                    )
+                }
+            }
+            Text("Blue center is this device (${snapshot.localDeviceName}). Green nodes are connected peers.")
+            if (snapshot.peers.isNotEmpty()) {
+                snapshot.peers.take(8).forEach { peer ->
+                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                    Text("$peerDisplay (${peer.state.name})")
+                }
+            }
+        }
     }
 }
 
@@ -1028,10 +1500,11 @@ private fun DetectionPage(
                 if (!isValidLatLon(lat, lon)) {
                     null
                 } else {
+                    val provenanceBadge = provenanceBadge(encounter.provenance, encounter.provenanceNodeId)
                     MapPin(
                         position = LatLng(lat!!, lon!!),
-                        title = "${encounter.source} • ${encounter.primaryId}",
-                        snippet = formatEpoch(encounter.timestampEpochMs),
+                        title = "${encounter.source} • ${encounter.primaryId}$provenanceBadge",
+                        snippet = "${formatEpoch(encounter.timestampEpochMs)}$provenanceBadge",
                         timestampEpochMs = encounter.timestampEpochMs,
                         source = encounter.source.name,
                         primaryId = encounter.primaryId,
@@ -1062,6 +1535,8 @@ private fun DetectionPage(
                     latestTimestampEpochMs = latest.timestampEpochMs,
                     seenCount = deviceEncounters.size,
                     encounters = deviceEncounters,
+                    hasChainLinkedData = deviceEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
+                    chainLinkedPeerCount = deviceEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
                     isOwned = owned,
                     approachSignal = approachSignal,
                     trackerRisk = analyzeTrackerRisk(
@@ -1184,6 +1659,11 @@ private fun DetectionPage(
             } else {
                 ""
             }
+            val chainSnippet = if (candidate.hasChainLinkedData) {
+                " • CHAIN x${candidate.chainLinkedPeerCount.coerceAtLeast(1)}"
+            } else {
+                ""
+            }
             val trackerSnippet = when (candidate.trackerRisk?.level) {
                 TrackerRiskLevel.HIGH -> " • Tracker Risk HIGH"
                 TrackerRiskLevel.MEDIUM -> " • Tracker Risk MEDIUM"
@@ -1194,7 +1674,7 @@ private fun DetectionPage(
             MapPin(
                 position = LatLng(location.lat, location.lon),
                 title = "${listSourceLabel(candidate.source, candidate.secondaryId)} • ${candidate.primaryId}",
-                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet$ownershipSnippet$trackerSnippet",
+                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet$ownershipSnippet$chainSnippet$trackerSnippet",
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
@@ -1808,6 +2288,20 @@ private fun listSourceLabel(source: String, secondaryId: String?): String {
         return "CELL TOWER"
     }
     return source
+}
+
+private fun provenanceLabel(provenance: EncounterProvenance, nodeId: String?): String = when (provenance) {
+    EncounterProvenance.LOCAL -> "Local device"
+    EncounterProvenance.CHAIN_LINKED -> {
+        if (nodeId.isNullOrBlank()) "Chain-linked peer" else "Chain-linked peer ($nodeId)"
+    }
+}
+
+private fun provenanceBadge(provenance: EncounterProvenance, nodeId: String?): String = when (provenance) {
+    EncounterProvenance.LOCAL -> ""
+    EncounterProvenance.CHAIN_LINKED -> {
+        if (nodeId.isNullOrBlank()) " • CHAIN" else " • CHAIN:$nodeId"
+    }
 }
 
 private fun readJsonFields(
@@ -2556,6 +3050,18 @@ private fun DevicesPage(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
+                        if (device.hasChainLinkedData) {
+                            val label = if (device.chainLinkedPeerCount > 1) {
+                                "CHAIN-LINKED (${device.chainLinkedPeerCount} peers)"
+                            } else {
+                                "CHAIN-LINKED"
+                            }
+                            Text(
+                                text = label,
+                                color = Color(0xFF1565C0),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         if (device.isOwned) {
                             Text(
                                 text = "Marked as My Device",
@@ -2716,6 +3222,14 @@ private fun EncountersPage(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("${listSourceLabel(encounter.source.name, encounter.secondaryId)} • ${encounter.primaryId}")
+                        val provenanceLabel = provenanceBadge(encounter.provenance, encounter.provenanceNodeId)
+                        if (provenanceLabel.isNotBlank()) {
+                            Text(
+                                provenanceLabel.trimStart(' ', '-', '•'),
+                                color = Color(0xFF1565C0),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         if (
                             showSecondaryIds &&
                             supportsSecondaryIdInList(encounter.source.name) &&
@@ -2770,6 +3284,10 @@ private fun buildDeviceItems(
                 lastLat = latest.lat,
                 lastLon = latest.lon,
                 lastRawPayloadJson = latest.rawPayloadJson,
+                lastProvenance = latest.provenance,
+                lastProvenanceNodeId = latest.provenanceNodeId,
+                hasChainLinkedData = groupedEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
+                chainLinkedPeerCount = groupedEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
                 isApproaching = approachSignal?.isApproaching == true,
                 approachConfidence = approachSignal?.confidence,
                 approachDeltaMeters = approachSignal?.deltaMeters,
@@ -2878,6 +3396,7 @@ private fun DeviceDetailPage(
             return
         }
         DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
+        DetailRow("Data Origin", provenanceLabel(item.lastProvenance, item.lastProvenanceNodeId))
         DetailRow("Primary ID", item.primaryId)
         DetailRow("Secondary ID", item.secondaryId ?: "n/a")
         Row(
@@ -2980,6 +3499,7 @@ private fun EncounterDetailPage(
             return
         }
         DetailRow("Source", encounter.source.name)
+        DetailRow("Data Origin", provenanceLabel(encounter.provenance, encounter.provenanceNodeId))
         DetailRow("Primary ID", encounter.primaryId)
         DetailRow("Secondary ID", encounter.secondaryId ?: "n/a")
         DetailRow("Timestamp", formatEpoch(encounter.timestampEpochMs))

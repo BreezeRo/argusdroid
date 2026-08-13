@@ -16,6 +16,11 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Encounter normalization into a shared model with timestamp, IDs, signal metadata, optional location, and raw payload JSON.
 - Room-backed local persistence for historical analysis.
 - Configurable scan interval with WorkManager-based scheduling.
+- Optional Chain Linking across devices on the same LAN, including deduplicated peer synchronization.
+- Encounter provenance tracking for local vs chain-linked observations.
+- Secure chain-link authentication using a shared passphrase across participating devices.
+- Configurable chain auto-sync interval for periodic peer data pulls while chain linking is enabled.
+- Optional persistent channel heartbeat mode for near-live peer connectivity state when enabled on both devices.
 
 ### Home and readiness
 
@@ -50,6 +55,10 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Optional distance display.
 - Optional distance-based sorting.
 - Device list sorting by last seen or most seen.
+- Chain-linked detections are clearly marked in map pins, list cards, and detail pages with peer attribution.
+- Chain settings now support manual Sync Now and background auto-sync.
+- Chain settings include peer refresh, link requests, connected vs unconnected peer counts, and a mesh visualizer.
+- Chain peers can be assigned human-readable device names, propagated across the mesh.
 
 ### Cellular enrichment
 
@@ -160,6 +169,15 @@ This behavior is intentional to support short intervals while still supporting p
 - Confirm "Tracker suspicion alerts" is ON in Settings.
 - Confirm target device is not marked as owned in Device Details.
 - Confirm detections include diverse locations over time; static single-location data will not reach high tracker risk.
+
+### Chain peers remain 0/0
+
+- Confirm both devices are on the same Wi-Fi LAN/subnet and not on a guest-isolated network.
+- Confirm Chain Linking is enabled on both devices.
+- Confirm both devices use the exact same Chain Shared Passphrase.
+- Use Settings > Refresh Peers to force discovery.
+- If using persistent channel, enable it on both devices and verify heartbeat interval is set.
+- Try sending a Link Request using peer host IP from one device to the other.
 
 ## Repository layout
 
