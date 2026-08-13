@@ -7,9 +7,13 @@ import dev.argus.tracker.data.chain.LocalMeshChainLinkCoordinator
 import dev.argus.tracker.data.db.ArgusDatabase
 import dev.argus.tracker.sensing.ArgusSensingService
 import dev.argus.tracker.sensing.BleScanner
+import dev.argus.tracker.sensing.BluetoothClassicScanner
 import dev.argus.tracker.sensing.CellularScanner
+import dev.argus.tracker.sensing.ExternalFeedScanner
 import dev.argus.tracker.sensing.RemoteIdScanner
 import dev.argus.tracker.sensing.WifiScanner
+import dev.argus.tracker.sensing.WifiDirectScanner
+import dev.argus.tracker.domain.EncounterSource
 
 interface AppContainer {
     val repository: EncounterRepository
@@ -44,9 +48,13 @@ class DefaultAppContainer(
             context = context,
             scanners = listOf(
                 WifiScanner(context),
+                WifiDirectScanner(context),
                 BleScanner(context),
+                BluetoothClassicScanner(context),
                 CellularScanner(context),
-                RemoteIdScanner(context)
+                RemoteIdScanner(context),
+                ExternalFeedScanner(context, EncounterSource.UWB, "uwb"),
+                ExternalFeedScanner(context, EncounterSource.SDR, "sdr")
             )
         )
     }

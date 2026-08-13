@@ -53,9 +53,12 @@ class ArgusSensingService(
 
     private fun scannerSourceType(scanner: SignalScanner): String = when (scanner) {
         is WifiScanner -> "wifi"
+        is WifiDirectScanner -> "wifi_direct"
         is BleScanner -> "ble"
+        is BluetoothClassicScanner -> "bt_classic"
         is CellularScanner -> "cellular"
         is RemoteIdScanner -> "remote_id"
+        is ExternalFeedScanner -> scanner.sourceTypeKey
         else -> scanner::class.java.simpleName.lowercase()
     }
 }
