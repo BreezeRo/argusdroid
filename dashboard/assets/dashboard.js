@@ -245,22 +245,30 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 function renderAll() {
-  const encounters = getFilteredEncounters();
-  renderKpis(encounters, state.data.mesh);
+  const allMatchingEncounters = getFilteredEncountersUncapped();
+  const encounters = applyEncounterLimit(allMatchingEncounters);
+  renderKpis(encounters, allMatchingEncounters, state.data.mesh);
   renderLatestTable(encounters);
   renderHotspots(encounters);
   renderSourceBars(encounters);
   renderPeers(state.data.mesh);
 }
 
-function getFilteredEncounters() {
-  const filtered = state.data.encounters
+function getFilteredEncountersUncapped() {
+  return state.data.encounters
     .filter((e) => state.enabledSources.has(e.source))
     .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+}
+
+function applyEncounterLimit(filtered) {
   if (state.encounterLimit === 0) {
     return filtered;
   }
   return filtered.slice(0, state.encounterLimit);
+}
+
+function getFilteredEncounters() {
+  return applyEncounterLimit(getFilteredEncountersUncapped());
 }
 
 function renderDashboardControls() {
@@ -313,18 +321,19 @@ function renderFilters() {
   });
 }
 
-function renderKpis(encounters, mesh) {
+function renderKpis(encounters, allMatchingEncounters, mesh) {
   const now = Date.now();
   const oneDayMs = 24 * 60 * 60 * 1000;
-  const recentCount = encounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
+  const visibleRecentCount = encounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
+  const totalRecentCount = allMatchingEncounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
   const strongSignal = encounters.filter((e) => e.signalDbm >= -65).length;
   const nearest = encounters.length
     ? Math.min(...encounters.map((e) => e.distanceMeters))
     : 0;
 
   const cards = [
-    { label: "Visible Encounters", value: encounters.length },
-    { label: "Last 24 Hours", value: recentCount },
+    { label: "Visible Encounters", value: `${encounters.length} / ${allMatchingEncounters.length}` },
+    { label: "Last 24 Hours", value: `${visibleRecentCount} / ${totalRecentCount}` },
     { label: "Strong Signals", value: strongSignal },
     { label: "Nearest Range", value: `${nearest.toFixed(1)} m` },
     { label: "Peers Connected", value: mesh.connectedPeers },
