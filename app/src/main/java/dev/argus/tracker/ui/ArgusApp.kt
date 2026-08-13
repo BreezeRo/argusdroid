@@ -9,10 +9,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -72,6 +75,16 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 
+private enum class DataScope {
+    RECENT_100,
+    ALL
+}
+
+private enum class DeviceSortMode {
+    LAST_SEEN,
+    MOST_SEEN
+}
+
 private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
@@ -106,29 +119,15 @@ fun ArgusApp() {
     var trackingActive by remember { mutableStateOf(false) }
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
-    var scanIntervalMinutes by remember { mutableStateOf(ScanSettings.getScanIntervalMinutes(context)) }
+    var scanIntervalSeconds by remember { mutableStateOf(ScanSettings.getScanIntervalSeconds(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
 
     val recent by viewModel.recentEncounters.collectAsState()
+    val recent100 by viewModel.recent100Encounters.collectAsState()
+    val allEncounters by viewModel.allEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
-    val devices = remember(recent) {
-        recent.groupBy { it.source.name to it.primaryId }
-            .map { (key, encounters) ->
-                val latest = encounters.maxByOrNull { it.timestampEpochMs } ?: encounters.first()
-                DeviceItem(
-                    source = key.first,
-                    primaryId = key.second,
-                    secondaryId = latest.secondaryId,
-                    seenCount = encounters.size,
-                    lastSeenEpochMs = latest.timestampEpochMs,
-                    lastRssiDbm = latest.rssiDbm,
-                    lastFrequencyMhz = latest.frequencyMhz
-                )
-            }
-            .sortedByDescending { it.lastSeenEpochMs }
-    }
 
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
@@ -249,23 +248,23 @@ fun ArgusApp() {
 
             composable(SETTINGS_ROUTE) {
                 AppSettingsPage(
-                    scanIntervalMinutes = scanIntervalMinutes,
-                    onScanIntervalSelected = { minutes ->
+                    scanIntervalSeconds = scanIntervalSeconds,
+                    onScanIntervalSelected = { seconds ->
                         scope.launch {
-                            scanIntervalMinutes = minutes
-                            ScanSettings.setScanIntervalMinutes(context, minutes)
+                            scanIntervalSeconds = seconds
+                            ScanSettings.setScanIntervalSeconds(context, seconds)
                             if (trackingActive) {
                                 WorkScheduler.stop(context)
                                 val restartResult = WorkScheduler.startAndVerify(context)
                                 trackingStartMessage = if (restartResult.success) {
-                                    "Scan interval updated to $minutes min and tracking restarted."
+                                    "Scan interval updated to ${ScanSettings.formatInterval(seconds)} and tracking restarted."
                                 } else {
                                     "Scan interval saved, but restart failed: ${restartResult.message}"
                                 }
                                 trackingStartMessageIsError = !restartResult.success
                                 trackingActive = WorkScheduler.isTrackingActive(context)
                             } else {
-                                trackingStartMessage = "Scan interval updated to $minutes min."
+                                trackingStartMessage = "Scan interval updated to ${ScanSettings.formatInterval(seconds)}."
                                 trackingStartMessageIsError = false
                             }
                         }
@@ -309,7 +308,8 @@ fun ArgusApp() {
 
             composable(DEVICES_ROUTE) {
                 DevicesPage(
-                    devices = devices,
+                    recentEncounters = recent100,
+                    allEncounters = allEncounters,
                     onDeviceClick = { device ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
@@ -320,7 +320,8 @@ fun ArgusApp() {
 
             composable(ENCOUNTERS_ROUTE) {
                 EncountersPage(
-                    encounters = recent,
+                    recentEncounters = recent100,
+                    allEncounters = allEncounters,
                     onEncounterClick = { encounter ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
@@ -332,7 +333,8 @@ fun ArgusApp() {
             composable(DEVICE_DETAIL_ROUTE) { entry ->
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
-                val item = devices.firstOrNull { it.source == source && it.primaryId == primaryId }
+                val item = buildDeviceItems(allEncounters)
+                    .firstOrNull { it.source == source && it.primaryId == primaryId }
                 DeviceDetailPage(item = item, onBack = { navController.popBackStack() })
             }
 
@@ -460,7 +462,7 @@ private fun HomePage(
 
 @Composable
 private fun AppSettingsPage(
-    scanIntervalMinutes: Long,
+    scanIntervalSeconds: Long,
     onScanIntervalSelected: (Long) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -476,18 +478,21 @@ private fun AppSettingsPage(
             Text("Scan interval")
         }
         item {
-            Text("Current: every $scanIntervalMinutes minutes", fontWeight = FontWeight.Medium)
+            Text(
+                "Current: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
+                fontWeight = FontWeight.Medium
+            )
         }
         item {
             Button(onClick = { expanded = true }) {
                 Text("Change interval")
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                ScanSettings.ALLOWED_INTERVALS_MINUTES.forEach { minutes ->
+                ScanSettings.ALLOWED_INTERVALS_SECONDS.forEach { seconds ->
                     DropdownMenuItem(
-                        text = { Text("Every $minutes minutes") },
+                        text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
                         onClick = {
-                            onScanIntervalSelected(minutes)
+                            onScanIntervalSelected(seconds)
                             expanded = false
                         }
                     )
@@ -495,7 +500,7 @@ private fun AppSettingsPage(
             }
         }
         item {
-            Text("Note: WorkManager minimum periodic interval is 15 minutes.")
+            Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
         }
     }
 }
@@ -509,7 +514,49 @@ private fun DetectionPage(
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("Readiness", "Map")
+    var encounterPinLimit by rememberSaveable { mutableStateOf(100) }
+    var devicePinLimit by rememberSaveable { mutableStateOf(100) }
+    val tabs = listOf("Readiness", "Encounters Map", "Devices Map")
+
+    val encounterPins = remember(encounters) {
+        encounters
+            .asSequence()
+            .mapNotNull { encounter ->
+                val lat = encounter.lat
+                val lon = encounter.lon
+                if (!isValidLatLon(lat, lon)) {
+                    null
+                } else {
+                    MapPin(
+                        position = LatLng(lat!!, lon!!),
+                        title = "${encounter.source} • ${encounter.primaryId}",
+                        snippet = formatEpoch(encounter.timestampEpochMs),
+                        timestampEpochMs = encounter.timestampEpochMs
+                    )
+                }
+            }
+            .sortedByDescending { it.timestampEpochMs }
+            .toList()
+    }
+
+    val devicePins = remember(encounters) {
+        encounters
+            .groupBy { "${it.source.name}|${it.primaryId}" }
+            .mapNotNull { (_, deviceEncounters) ->
+                val latestWithLocation = deviceEncounters
+                    .filter { isValidLatLon(it.lat, it.lon) }
+                    .maxByOrNull { it.timestampEpochMs }
+                    ?: return@mapNotNull null
+
+                MapPin(
+                    position = LatLng(latestWithLocation.lat!!, latestWithLocation.lon!!),
+                    title = "${latestWithLocation.source} • ${latestWithLocation.primaryId}",
+                    snippet = "Seen ${deviceEncounters.size} times • Last ${formatEpoch(latestWithLocation.timestampEpochMs)}",
+                    timestampEpochMs = latestWithLocation.timestampEpochMs
+                )
+            }
+            .sortedByDescending { it.timestampEpochMs }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -563,9 +610,22 @@ private fun DetectionPage(
                     }
                 }
             }
+        } else if (selectedTab == 1) {
+            DetectionMapPage(
+                mapTitle = "Encounters Map",
+                mapDescription = "Pins show individual encounter points.",
+                pins = encounterPins,
+                pinLimit = encounterPinLimit,
+                onPinLimitChange = { encounterPinLimit = it },
+                onLiveCollect = onLiveCollect
+            )
         } else {
             DetectionMapPage(
-                encounters = encounters,
+                mapTitle = "Devices Map",
+                mapDescription = "Pins show latest known location per unique device.",
+                pins = devicePins,
+                pinLimit = devicePinLimit,
+                onPinLimitChange = { devicePinLimit = it },
                 onLiveCollect = onLiveCollect
             )
         }
@@ -574,35 +634,28 @@ private fun DetectionPage(
 
 @Composable
 private fun DetectionMapPage(
-    encounters: List<Encounter>,
+    mapTitle: String,
+    mapDescription: String,
+    pins: List<MapPin>,
+    pinLimit: Int,
+    onPinLimitChange: (Int) -> Unit,
     onLiveCollect: suspend () -> String
 ) {
+    val pinLimitOptions = listOf(100, 250, 500, 1000)
     val context = LocalContext.current
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
     val mapsApiKeyDiagnostic = remember(context) { getMapsApiKeyDiagnostic(context) }
     val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
     val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
+    var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var pinLimitExpanded by remember { mutableStateOf(false) }
+    var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(false) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
     var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
-    val pins = remember(encounters) {
-        encounters
-            .mapNotNull { encounter ->
-                val lat = encounter.lat
-                val lon = encounter.lon
-                if (!isValidLatLon(lat, lon)) {
-                    null
-                } else {
-                    Triple(
-                        LatLng(lat!!, lon!!),
-                        "${encounter.source} • ${encounter.primaryId}",
-                        formatEpoch(encounter.timestampEpochMs)
-                    )
-                }
-            }
-    }
+    val visiblePins = remember(pins, pinLimit) { pins.take(pinLimit) }
 
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var autoPositioned by rememberSaveable { mutableStateOf(false) }
@@ -611,13 +664,13 @@ private fun DetectionMapPage(
         position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 2f)
     }
 
-    LaunchedEffect(currentLocation, pins, hasMapsApiKey, autoPositioned) {
+    LaunchedEffect(currentLocation, visiblePins, hasMapsApiKey, autoPositioned) {
         if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
 
         when {
-            pins.size > 1 && mapLoaded -> {
+            visiblePins.size > 1 && mapLoaded -> {
                 val boundsBuilder = LatLngBounds.Builder()
-                pins.forEach { pin -> boundsBuilder.include(pin.first) }
+                visiblePins.forEach { pin -> boundsBuilder.include(pin.position) }
                 val bounds = boundsBuilder.build()
                 runCatching {
                     cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
@@ -626,10 +679,10 @@ private fun DetectionMapPage(
                 }
             }
 
-            pins.size == 1 -> {
+            visiblePins.size == 1 -> {
                 runCatching {
                     cameraPositionState.move(
-                        CameraUpdateFactory.newLatLngZoom(pins.first().first, 13f)
+                        CameraUpdateFactory.newLatLngZoom(visiblePins.first().position, 13f)
                     )
                 }.onFailure {
                     mapError = "Failed to center on pin: ${it.message ?: "unknown error"}"
@@ -695,8 +748,22 @@ private fun DetectionMapPage(
     }
 
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Map of Detections", fontWeight = FontWeight.Bold)
-        Text("Pins show where encounters were recorded.")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(mapTitle, fontWeight = FontWeight.Bold)
+                Text(mapDescription)
+            }
+            Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                Text("Panels")
+                Switch(
+                    checked = controlsVisible,
+                    onCheckedChange = { controlsVisible = it }
+                )
+            }
+        }
         if (!hasMapsApiKey) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -705,46 +772,98 @@ private fun DetectionMapPage(
                 }
             }
         } else {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
-                        Switch(
-                            checked = liveModeEnabled,
-                            onCheckedChange = { liveModeEnabled = it }
-                        )
-                    }
-                    Text("Runs a foreground scan every 5 seconds while this tab is open.")
-                    Text(
-                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
-                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
-                    )
-                }
-            }
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Map Diagnostics", fontWeight = FontWeight.Bold)
-                    Text("Loaded: ${if (mapLoaded) "yes" else "no"}")
-                    Text("API key: $mapsApiKeyDiagnostic")
-                    Text("Play Services: $playServicesDiagnostic")
-                    Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
-                    Text("Pins: ${pins.size}")
-                    Text(
-                        text = if (currentLocation != null) {
-                            "Current location: ${"%.5f".format(currentLocation.lat)}, ${"%.5f".format(currentLocation.lon)}"
-                        } else {
-                            "Current location: unavailable"
+            if (controlsVisible) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(IntrinsicSize.Min),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Pin Limit", fontWeight = FontWeight.Bold)
+                                Button(onClick = { pinLimitExpanded = true }) {
+                                    Text("$pinLimit")
+                                }
+                            }
+                            Text("Showing ${visiblePins.size}/${pins.size}")
+                            DropdownMenu(expanded = pinLimitExpanded, onDismissRequest = { pinLimitExpanded = false }) {
+                                pinLimitOptions.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.toString()) },
+                                        onClick = {
+                                            onPinLimitChange(option)
+                                            pinLimitExpanded = false
+                                        }
+                                    )
+                                }
+                            }
                         }
-                    )
-                    if (mapError != null) {
+                    }
+                    Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Live Map Updates", fontWeight = FontWeight.Bold)
+                                Switch(
+                                    checked = liveModeEnabled,
+                                    onCheckedChange = { liveModeEnabled = it }
+                                )
+                            }
+                            Text("Foreground scan every 5s while open.")
+                            Text(
+                                text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
+                                color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
+                            )
+                        }
+                    }
+                }
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Map Diagnostics", fontWeight = FontWeight.Bold)
+                            Switch(
+                                checked = diagnosticsVisible,
+                                onCheckedChange = { diagnosticsVisible = it }
+                            )
+                        }
                         Text(
-                            text = "Error: ${mapError}",
-                            color = Color(0xFFB3261E),
-                            fontWeight = FontWeight.Medium
+                            if (diagnosticsVisible) {
+                                "Diagnostics are enabled."
+                            } else {
+                                "Diagnostics are hidden."
+                            }
                         )
+                        if (diagnosticsVisible) {
+                            Text("Loaded: ${if (mapLoaded) "yes" else "no"}")
+                            Text("API key: $mapsApiKeyDiagnostic")
+                            Text("Play Services: $playServicesDiagnostic")
+                            Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
+                            Text("Pins rendered: ${visiblePins.size}/${pins.size}")
+                            Text(
+                                text = if (currentLocation != null) {
+                                    "Current location: ${"%.5f".format(currentLocation.lat)}, ${"%.5f".format(currentLocation.lon)}"
+                                } else {
+                                    "Current location: unavailable"
+                                }
+                            )
+                            if (mapError != null) {
+                                Text(
+                                    text = "Error: ${mapError}",
+                                    color = Color(0xFFB3261E),
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -765,11 +884,11 @@ private fun DetectionMapPage(
                         myLocationButtonEnabled = false
                     )
                 ) {
-                    pins.forEach { pin ->
+                    visiblePins.forEach { pin ->
                         Marker(
-                            state = MarkerState(position = pin.first),
-                            title = pin.second,
-                            snippet = pin.third
+                            state = MarkerState(position = pin.position),
+                            title = pin.title,
+                            snippet = pin.snippet
                         )
                     }
                 }
@@ -777,6 +896,13 @@ private fun DetectionMapPage(
         }
     }
 }
+
+private data class MapPin(
+    val position: LatLng,
+    val title: String,
+    val snippet: String,
+    val timestampEpochMs: Long
+)
 
 private fun isValidLatLon(lat: Double?, lon: Double?): Boolean {
     if (lat == null || lon == null) return false
@@ -832,11 +958,16 @@ private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
 
 @Composable
 private fun DevicesPage(
-    devices: List<DeviceItem>,
+    recentEncounters: List<Encounter>,
+    allEncounters: List<Encounter>,
     onDeviceClick: (DeviceItem) -> Unit
 ) {
+    var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
+    var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
+    val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
+    val devices = remember(selectedEncounters, sortMode) { buildDeviceItems(selectedEncounters, sortMode) }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
     val filteredDevices = remember(devices, sourceFilter, queryFilter) {
         devices.filter { device ->
@@ -851,6 +982,18 @@ private fun DevicesPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
+        ScopeFilterDropdown(
+            selectedScope = dataScope,
+            onScopeSelected = {
+                dataScope = it
+                sourceFilter = null
+                queryFilter = ""
+            }
+        )
+        DeviceSortDropdown(
+            selectedSort = sortMode,
+            onSortSelected = { sortMode = it }
+        )
         SourceFilterDropdown(
             selectedSource = sourceFilter,
             sourceOptions = sourceOptions,
@@ -885,11 +1028,14 @@ private fun DevicesPage(
 
 @Composable
 private fun EncountersPage(
-    encounters: List<Encounter>,
+    recentEncounters: List<Encounter>,
+    allEncounters: List<Encounter>,
     onEncounterClick: (Encounter) -> Unit
 ) {
+    var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
+    val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val sourceOptions = remember(encounters) { encounters.map { it.source.name }.distinct().sorted() }
     val filteredEncounters = remember(encounters, sourceFilter, queryFilter) {
         encounters.filter { encounter ->
@@ -905,6 +1051,14 @@ private fun EncountersPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Encounters", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any encounter for full telemetry.")
+        ScopeFilterDropdown(
+            selectedScope = dataScope,
+            onScopeSelected = {
+                dataScope = it
+                sourceFilter = null
+                queryFilter = ""
+            }
+        )
         SourceFilterDropdown(
             selectedSource = sourceFilter,
             sourceOptions = sourceOptions,
@@ -919,7 +1073,7 @@ private fun EncountersPage(
         )
         Text("Showing ${filteredEncounters.size} of ${encounters.size}")
         LazyColumn {
-            items(filteredEncounters.take(100)) { encounter ->
+            items(filteredEncounters) { encounter ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -933,6 +1087,100 @@ private fun EncountersPage(
                     }
                 }
             }
+        }
+    }
+}
+
+private fun buildDeviceItems(
+    encounters: List<Encounter>,
+    sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN
+): List<DeviceItem> =
+    encounters
+        .groupBy { it.source.name to it.primaryId }
+        .map { (key, groupedEncounters) ->
+            val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
+            DeviceItem(
+                source = key.first,
+                primaryId = key.second,
+                secondaryId = latest.secondaryId,
+                seenCount = groupedEncounters.size,
+                lastSeenEpochMs = latest.timestampEpochMs,
+                lastRssiDbm = latest.rssiDbm,
+                lastFrequencyMhz = latest.frequencyMhz
+            )
+        }
+        .let { deviceItems ->
+            when (sortMode) {
+                DeviceSortMode.LAST_SEEN -> deviceItems.sortedByDescending { it.lastSeenEpochMs }
+                DeviceSortMode.MOST_SEEN -> deviceItems.sortedWith(
+                    compareByDescending<DeviceItem> { it.seenCount }
+                        .thenByDescending { it.lastSeenEpochMs }
+                )
+            }
+        }
+
+@Composable
+private fun DeviceSortDropdown(
+    selectedSort: DeviceSortMode,
+    onSortSelected: (DeviceSortMode) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Sort", fontWeight = FontWeight.Medium)
+        Button(onClick = { expanded = true }) {
+            val label = when (selectedSort) {
+                DeviceSortMode.LAST_SEEN -> "Last Seen"
+                DeviceSortMode.MOST_SEEN -> "Most Seen"
+            }
+            Text(label)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Last Seen") },
+                onClick = {
+                    onSortSelected(DeviceSortMode.LAST_SEEN)
+                    expanded = false
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Most Seen") },
+                onClick = {
+                    onSortSelected(DeviceSortMode.MOST_SEEN)
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScopeFilterDropdown(
+    selectedScope: DataScope,
+    onScopeSelected: (DataScope) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Data Scope", fontWeight = FontWeight.Medium)
+        Button(onClick = { expanded = true }) {
+            Text(if (selectedScope == DataScope.RECENT_100) "Recent (100)" else "All")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Recent (100)") },
+                onClick = {
+                    onScopeSelected(DataScope.RECENT_100)
+                    expanded = false
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("All") },
+                onClick = {
+                    onScopeSelected(DataScope.ALL)
+                    expanded = false
+                }
+            )
         }
     }
 }

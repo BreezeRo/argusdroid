@@ -24,6 +24,16 @@ interface EncounterDao {
 
     @Query(
         """
+        SELECT *
+        FROM encounters
+        WHERE NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
+        ORDER BY timestampEpochMs DESC
+        """
+    )
+    fun observeAll(): Flow<List<EncounterEntity>>
+
+    @Query(
+        """
         SELECT source, COUNT(*) as count
         FROM encounters
         WHERE timestampEpochMs >= :sinceEpochMs

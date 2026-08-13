@@ -11,11 +11,17 @@ Argusdroid is an Android mobile app for long-term device encounter intelligence.
 
 ## Current Capability Snapshot
 
-- Android app scaffold using Kotlin and Jetpack Compose.
-- Room-backed encounter persistence for long-term retention.
-- Periodic background collection with WorkManager.
-- Pluggable scanner layer for source-specific ingestion.
-- Initial dashboard for source summaries and recent encounters.
+- Kotlin + Jetpack Compose Android app with Room-backed encounter persistence.
+- Multi-source sensing pipeline for Wi-Fi, BLE, and cellular data collection.
+- Location snapshot enrichment attached to supported encounter records.
+- Home, Detection, Devices, Encounters, and Settings app sections.
+- Tracking controls with status feedback, real-time status refresh, and last scan timestamp.
+- Detection readiness checks with recommended settings and deep links to system settings.
+- Dual map views: Encounters Map and Devices Map.
+- Map controls for live updates, pin limits, and optional diagnostics panel.
+- Devices and Encounters filtering by scope (Recent 100 or All), source, and text query.
+- Devices sorting by Last Seen or Most Seen.
+- Configurable scan interval in Settings, with WorkManager scheduling.
 
 ## Reality Check: Platform Limits
 
@@ -58,7 +64,7 @@ Argusdroid includes integration hooks so external SDR hardware, OEM SDKs, and de
 2. In Developer options, enable USB debugging.
 3. Connect the phone by USB and accept the RSA debug prompt on-device.
 4. In Android Studio, select your device and run the app module.
-5. If prompted, grant location, Bluetooth, and notification permissions so scanning can work.
+5. If prompted, grant location, Bluetooth, Nearby Wi-Fi devices, and notification permissions so scanning can work.
 
 ## Google Maps API Key (Do Not Commit)
 
@@ -88,12 +94,12 @@ Before production deployment, implement:
 
 ## Roadmap
 
-- Replace BLE placeholder with callback-driven active scan sessions.
-- Add cellular metadata ingestion where permitted.
-- Add optional location enrichment and quality scoring.
-- Add external SDR ingestion for extended RF visibility.
-- Add Remote ID parsing pipeline (for supported sources/feeds).
-- Add anomaly detection and scheduled analytics reports.
+- Expand Remote ID ingestion and decoding for supported sources/feeds.
+- Add advanced map tooling (clustering, heatmaps, and time-window playback).
+- Add richer device history views and encounter drilldowns.
+- Add secure export workflows for encounter datasets.
+- Add anomaly detection and scheduled analytics summaries.
+- Add optional external SDR integration for expanded RF visibility.
 
 ## Documentation
 

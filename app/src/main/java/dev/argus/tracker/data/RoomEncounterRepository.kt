@@ -16,6 +16,9 @@ class RoomEncounterRepository(
     override fun observeRecent(limit: Int): Flow<List<Encounter>> =
         dao.observeRecent(limit).map { list -> list.map { it.toDomain() } }
 
+    override fun observeAll(): Flow<List<Encounter>> =
+        dao.observeAll().map { list -> list.map { it.toDomain() } }
+
     override suspend fun sourceSummarySince(sinceEpochMs: Long): Map<String, Int> =
         dao.aggregateBySourceSince(sinceEpochMs).associate { it.source to it.count }
 

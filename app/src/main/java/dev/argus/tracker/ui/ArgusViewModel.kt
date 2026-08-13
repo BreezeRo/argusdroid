@@ -22,7 +22,13 @@ class ArgusViewModel(
     private val repository: EncounterRepository
 ) : ViewModel() {
 
-    val recentEncounters: StateFlow<List<Encounter>> = repository.observeRecent(limit = 100)
+    val recentEncounters: StateFlow<List<Encounter>> = repository.observeRecent(limit = 1000)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val recent100Encounters: StateFlow<List<Encounter>> = repository.observeRecent(limit = 100)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val allEncounters: StateFlow<List<Encounter>> = repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _summary = MutableStateFlow<List<SourceSummary>>(emptyList())

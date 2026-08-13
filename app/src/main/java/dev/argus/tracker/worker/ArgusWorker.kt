@@ -19,6 +19,7 @@ class ArgusWorker(
 
         val batch = runCatching { sensingService.collectBatch() }.getOrDefault(emptyList())
         runCatching { repository.insertBatch(batch) }
+        runCatching { WorkScheduler.scheduleNextIfNeeded(applicationContext) }
         return Result.success()
     }
 }

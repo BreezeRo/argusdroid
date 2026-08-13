@@ -1,7 +1,10 @@
 package dev.argus.tracker.worker
 
 import android.content.Context
+import androidx.work.ExistingWorkPolicy
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -11,7 +14,8 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 object WorkScheduler {
-    private const val WORK_NAME = "argus-periodic-scan"
+    private const val PERIODIC_WORK_NAME = "argus-periodic-scan"
+    private const val ONE_TIME_WORK_NAME = "argus-one-time-scan"
 
     data class StartResult(
         val success: Boolean,
@@ -19,26 +23,15 @@ object WorkScheduler {
     )
 
     fun start(context: Context) {
-        val request = buildPeriodicRequest(context)
-        val workManager = WorkManager.getInstance(context)
-
-        workManager.enqueueUniquePeriodicWork(
-            WORK_NAME,
-            ExistingPeriodicWorkPolicy.REPLACE,
-            request
-        )
+        ScanSettings.setTrackingEnabled(context, true)
+        enqueueAccordingToInterval(context)
     }
 
     suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
         runCatching {
             val request = buildPeriodicRequest(context)
-            val workManager = WorkManager.getInstance(context)
-
-            val operation = workManager.enqueueUniquePeriodicWork(
-                WORK_NAME,
-                ExistingPeriodicWorkPolicy.REPLACE,
-                request
-            )
+            ScanSettings.setTrackingEnabled(context, true)
+            val operation = enqueueAccordingToInterval(context)
 
             // Wait for enqueue operation completion before checking active state.
             operation.result.get()
@@ -48,7 +41,9 @@ object WorkScheduler {
             var hasActiveOrPending = false
             repeat(10) {
                 latestInfos = WorkManager.getInstance(context)
-                    .getWorkInfosForUniqueWork(WORK_NAME)
+                    .getWorkInfosForUniqueWork(PERIODIC_WORK_NAME)
+                    .get() + WorkManager.getInstance(context)
+                    .getWorkInfosForUniqueWork(ONE_TIME_WORK_NAME)
                     .get()
 
                 hasActiveOrPending = latestInfos.any { info ->
@@ -57,8 +52,11 @@ object WorkScheduler {
                         info.state == WorkInfo.State.BLOCKED
                 }
                 if (hasActiveOrPending) {
-                    val intervalMinutes = ScanSettings.getScanIntervalMinutes(context)
-                    return@withContext StartResult(true, "Tracking started successfully (${intervalMinutes} min interval).")
+                    val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
+                    return@withContext StartResult(
+                        true,
+                        "Tracking started successfully (${ScanSettings.formatInterval(intervalSeconds)} interval)."
+                    )
                 }
                 delay(200)
             }
@@ -71,21 +69,64 @@ object WorkScheduler {
     }
 
     private fun buildPeriodicRequest(context: Context): androidx.work.PeriodicWorkRequest {
-        val intervalMinutes = ScanSettings.getScanIntervalMinutes(context)
-        return PeriodicWorkRequestBuilder<ArgusWorker>(intervalMinutes, TimeUnit.MINUTES)
+        val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
+        return PeriodicWorkRequestBuilder<ArgusWorker>(intervalSeconds, TimeUnit.SECONDS)
             .setInitialDelay(1, TimeUnit.MINUTES)
             .build()
     }
 
+    private fun buildOneTimeRequest(context: Context) =
+        OneTimeWorkRequestBuilder<ArgusWorker>()
+            .setInitialDelay(ScanSettings.getScanIntervalSeconds(context), TimeUnit.SECONDS)
+            .build()
+
+    private fun enqueueAccordingToInterval(context: Context): Operation {
+        val workManager = WorkManager.getInstance(context)
+        val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
+        return if (intervalSeconds < ScanSettings.MIN_PERIODIC_INTERVAL_SECONDS) {
+            workManager.cancelUniqueWork(PERIODIC_WORK_NAME)
+            workManager.enqueueUniqueWork(
+                ONE_TIME_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                buildOneTimeRequest(context)
+            )
+        } else {
+            workManager.cancelUniqueWork(ONE_TIME_WORK_NAME)
+            workManager.enqueueUniquePeriodicWork(
+                PERIODIC_WORK_NAME,
+                ExistingPeriodicWorkPolicy.REPLACE,
+                buildPeriodicRequest(context)
+            )
+        }
+    }
+
+    fun scheduleNextIfNeeded(context: Context) {
+        if (!ScanSettings.isTrackingEnabled(context)) return
+        val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
+        if (intervalSeconds >= ScanSettings.MIN_PERIODIC_INTERVAL_SECONDS) return
+
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            ONE_TIME_WORK_NAME,
+            ExistingWorkPolicy.REPLACE,
+            buildOneTimeRequest(context)
+        )
+    }
+
     fun stop(context: Context) {
-        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        ScanSettings.setTrackingEnabled(context, false)
+        WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
+        WorkManager.getInstance(context).cancelUniqueWork(ONE_TIME_WORK_NAME)
     }
 
     suspend fun isTrackingActive(context: Context): Boolean = withContext(Dispatchers.IO) {
-        WorkManager.getInstance(context)
-            .getWorkInfosForUniqueWork(WORK_NAME)
+        val periodicInfos = WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWork(PERIODIC_WORK_NAME)
             .get()
-            .any { info ->
+        val oneTimeInfos = WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWork(ONE_TIME_WORK_NAME)
+            .get()
+
+        (periodicInfos + oneTimeInfos).any { info ->
                 info.state == WorkInfo.State.ENQUEUED || info.state == WorkInfo.State.RUNNING
             }
     }
