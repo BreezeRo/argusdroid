@@ -46,7 +46,6 @@ const state = {
     hotspots: 80,
     "device-locations": 250
   },
-  encounterLimit: 1200,
   mapLocationMode: "PRECISE",
   latestRenderedEncounters: []
 };
@@ -54,7 +53,6 @@ const state = {
 const MAP_TYPES = ["roadmap", "hybrid", "terrain", "satellite"];
 const PIN_LIMIT_OPTIONS = [100, 250, 500, 1000, 0];
 const HOTSPOT_LIMIT_OPTIONS = [40, 80, 120, 200, 0];
-const ENCOUNTER_LIMIT_OPTIONS = [600, 1200, 2500, 5000, 0];
 const LOCATION_MODES = ["PRECISE", "ZONED"];
 const MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160000;
 
@@ -245,9 +243,8 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 function renderAll() {
-  const allMatchingEncounters = getFilteredEncountersUncapped();
-  const encounters = applyEncounterLimit(allMatchingEncounters);
-  renderKpis(encounters, allMatchingEncounters, state.data.mesh);
+  const encounters = getFilteredEncounters();
+  renderKpis(encounters, state.data.mesh);
   renderLatestTable(encounters);
   renderHotspots(encounters);
   renderSourceBars(encounters);
@@ -255,20 +252,38 @@ function renderAll() {
 }
 
 function getFilteredEncountersUncapped() {
-  return state.data.encounters
+  const filtered = state.data.encounters
     .filter((e) => state.enabledSources.has(e.source))
     .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+
+  return dedupeEncountersByDevice(filtered);
 }
 
-function applyEncounterLimit(filtered) {
-  if (state.encounterLimit === 0) {
-    return filtered;
+function dedupeEncountersByDevice(encounters) {
+  const deduped = [];
+  const seen = new Set();
+
+  for (const encounter of encounters) {
+    const key = encounterDedupKey(encounter);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(encounter);
   }
-  return filtered.slice(0, state.encounterLimit);
+
+  return deduped;
+}
+
+function encounterDedupKey(encounter) {
+  const source = String(encounter?.source || "UNKNOWN_RF");
+  const label = String(encounter?.label || "unknown");
+  const secondary = String(encounter?.secondaryId || "");
+  return `${source}|${label}|${secondary}`;
 }
 
 function getFilteredEncounters() {
-  return applyEncounterLimit(getFilteredEncountersUncapped());
+  return getFilteredEncountersUncapped();
 }
 
 function renderDashboardControls() {
@@ -276,23 +291,8 @@ function renderDashboardControls() {
   if (!host) {
     return;
   }
-
   host.innerHTML = "";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "map-control-btn";
-  button.textContent = `Encounters: ${state.encounterLimit === 0 ? "All" : state.encounterLimit}`;
-  button.addEventListener("click", () => {
-    const currentIndex = ENCOUNTER_LIMIT_OPTIONS.indexOf(state.encounterLimit);
-    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % ENCOUNTER_LIMIT_OPTIONS.length : 0;
-    state.encounterLimit = ENCOUNTER_LIMIT_OPTIONS[nextIndex];
-    renderDashboardControls();
-    renderAll();
-    drawMarkers();
-    drawHotspotRegions();
-    drawDeviceLocations();
-  });
-  host.appendChild(button);
+  host.hidden = true;
 }
 
 function renderFilters() {
@@ -321,19 +321,18 @@ function renderFilters() {
   });
 }
 
-function renderKpis(encounters, allMatchingEncounters, mesh) {
+function renderKpis(encounters, mesh) {
   const now = Date.now();
   const oneDayMs = 24 * 60 * 60 * 1000;
-  const visibleRecentCount = encounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
-  const totalRecentCount = allMatchingEncounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
+  const recentCount = encounters.filter((e) => now - Date.parse(e.timestamp) < oneDayMs).length;
   const strongSignal = encounters.filter((e) => e.signalDbm >= -65).length;
   const nearest = encounters.length
     ? Math.min(...encounters.map((e) => e.distanceMeters))
     : 0;
 
   const cards = [
-    { label: "Visible Encounters", value: `${encounters.length} / ${allMatchingEncounters.length}` },
-    { label: "Last 24 Hours", value: `${visibleRecentCount} / ${totalRecentCount}` },
+    { label: "Visible Encounters", value: encounters.length },
+    { label: "Last 24 Hours", value: recentCount },
     { label: "Strong Signals", value: strongSignal },
     { label: "Nearest Range", value: `${nearest.toFixed(1)} m` },
     { label: "Peers Connected", value: mesh.connectedPeers },
