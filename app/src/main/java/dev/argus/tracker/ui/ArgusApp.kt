@@ -1,10 +1,14 @@
 package dev.argus.tracker.ui
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.net.Uri
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
@@ -51,6 +55,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
@@ -113,6 +120,8 @@ private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}
 private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 private const val LIVE_SCAN_INTERVAL_MS = 5000L
+private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
+private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 
 private data class DeviceItem(
     val source: String,
@@ -124,7 +133,16 @@ private data class DeviceItem(
     val lastFrequencyMhz: Int?,
     val lastLat: Double?,
     val lastLon: Double?,
-    val lastRawPayloadJson: String?
+    val lastRawPayloadJson: String?,
+    val isApproaching: Boolean,
+    val approachConfidence: Double?,
+    val approachDeltaMeters: Double?
+)
+
+private data class ApproachSignal(
+    val isApproaching: Boolean,
+    val confidence: Double,
+    val deltaMeters: Double
 )
 
 private data class SensorGateSettings(
@@ -149,7 +167,8 @@ private data class DeviceLocationCandidate(
     val encounters: List<Encounter>,
     val approximateLocation: DetectionLocation? = null,
     val approximateMethod: String? = null,
-    val approximateRangeMeters: Double? = null
+    val approximateRangeMeters: Double? = null,
+    val approachSignal: ApproachSignal? = null
 )
 
 private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
@@ -174,8 +193,12 @@ fun ArgusApp() {
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
     var scanIntervalSeconds by remember { mutableStateOf(ScanSettings.getScanIntervalSeconds(context)) }
     var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
+    var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
+    var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
+    val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
+    val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -195,6 +218,39 @@ fun ArgusApp() {
         while (true) {
             trackingActive = WorkScheduler.isTrackingActive(context)
             delay(1000)
+        }
+    }
+
+    LaunchedEffect(allEncounters, approachDetectionEnabled, approachNotificationsEnabled) {
+        if (!approachDetectionEnabled || !approachNotificationsEnabled) return@LaunchedEffect
+        if (!hasPostNotificationsPermission(context)) return@LaunchedEffect
+
+        ensureApproachNotificationChannel(context)
+        val now = System.currentTimeMillis()
+        val devices = buildDeviceItems(allEncounters, approachDetectionEnabled = true)
+        val seenKeys = mutableSetOf<String>()
+
+        devices.forEach { device ->
+            val key = "${device.source}|${device.primaryId}"
+            seenKeys += key
+            val wasApproaching = approachStateByDevice[key] ?: false
+            val isApproaching = device.isApproaching
+
+            if (isApproaching && !wasApproaching) {
+                val lastNotified = lastApproachNotificationEpochByDevice[key] ?: 0L
+                if (now - lastNotified >= APPROACH_ALERT_COOLDOWN_MS) {
+                    sendApproachNotification(context, device)
+                    lastApproachNotificationEpochByDevice[key] = now
+                }
+            }
+
+            approachStateByDevice[key] = isApproaching
+        }
+
+        val staleKeys = approachStateByDevice.keys.filter { it !in seenKeys }
+        staleKeys.forEach { staleKey ->
+            approachStateByDevice.remove(staleKey)
+            lastApproachNotificationEpochByDevice.remove(staleKey)
         }
     }
 
@@ -322,6 +378,8 @@ fun ArgusApp() {
             composable(SETTINGS_ROUTE) {
                 AppSettingsPage(
                     scanIntervalSeconds = scanIntervalSeconds,
+                    approachDetectionEnabled = approachDetectionEnabled,
+                    approachNotificationsEnabled = approachNotificationsEnabled,
                     onScanIntervalSelected = { seconds ->
                         scope.launch {
                             scanIntervalSeconds = seconds
@@ -341,6 +399,14 @@ fun ArgusApp() {
                                 trackingStartMessageIsError = false
                             }
                         }
+                    },
+                    onApproachDetectionChanged = { enabled ->
+                        approachDetectionEnabled = enabled
+                        ScanSettings.setApproachDetectionEnabled(context, enabled)
+                    },
+                    onApproachNotificationsChanged = { enabled ->
+                        approachNotificationsEnabled = enabled
+                        ScanSettings.setApproachNotificationsEnabled(context, enabled)
                     }
                 )
             }
@@ -349,6 +415,7 @@ fun ArgusApp() {
                 DetectionPage(
                     readinessItems = readinessItems,
                     encounters = recent,
+                    approachDetectionEnabled = approachDetectionEnabled,
                     onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
@@ -393,6 +460,7 @@ fun ArgusApp() {
                 DevicesPage(
                     recentEncounters = recent100,
                     allEncounters = allEncounters,
+                    approachDetectionEnabled = approachDetectionEnabled,
                     onDeviceClick = { device ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
@@ -416,7 +484,7 @@ fun ArgusApp() {
             composable(DEVICE_DETAIL_ROUTE) { entry ->
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
-                val item = buildDeviceItems(allEncounters)
+                val item = buildDeviceItems(allEncounters, approachDetectionEnabled = approachDetectionEnabled)
                     .firstOrNull { it.source == source && it.primaryId == primaryId }
                 DeviceDetailPage(item = item, onBack = { navController.popBackStack() })
             }
@@ -599,7 +667,11 @@ private fun HomePage(
 @Composable
 private fun AppSettingsPage(
     scanIntervalSeconds: Long,
-    onScanIntervalSelected: (Long) -> Unit
+    approachDetectionEnabled: Boolean,
+    approachNotificationsEnabled: Boolean,
+    onScanIntervalSelected: (Long) -> Unit,
+    onApproachDetectionChanged: (Boolean) -> Unit,
+    onApproachNotificationsChanged: (Boolean) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -638,6 +710,40 @@ private fun AppSettingsPage(
         item {
             Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
         }
+        item {
+            Text("Approach Detection", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable approach detection")
+                        Switch(
+                            checked = approachDetectionEnabled,
+                            onCheckedChange = onApproachDetectionChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Approach notifications")
+                        Switch(
+                            checked = approachNotificationsEnabled,
+                            onCheckedChange = onApproachNotificationsChanged,
+                            enabled = approachDetectionEnabled
+                        )
+                    }
+                    Text("Notifications trigger when a tracked device changes into approaching state.")
+                }
+            }
+        }
     }
 }
 
@@ -645,6 +751,7 @@ private fun AppSettingsPage(
 private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
+    approachDetectionEnabled: Boolean,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
@@ -692,7 +799,12 @@ private fun DetectionPage(
                     secondaryId = latest.secondaryId,
                     latestTimestampEpochMs = latest.timestampEpochMs,
                     seenCount = deviceEncounters.size,
-                    encounters = deviceEncounters
+                    encounters = deviceEncounters,
+                    approachSignal = if (approachDetectionEnabled) {
+                        analyzeApproachSignal(deviceEncounters)
+                    } else {
+                        null
+                    }
                 )
             }
             .sortedByDescending { it.latestTimestampEpochMs }
@@ -797,11 +909,17 @@ private fun DetectionPage(
             val methodSnippet = candidate.approximateMethod
                 ?.let { "$it" }
                 ?: "Approx location"
+            val approachSnippet = candidate.approachSignal
+                ?.takeIf { it.isApproaching }
+                ?.let { signal ->
+                    " • Approaching (${(signal.confidence * 100.0).toInt()}%)"
+                }
+                .orEmpty()
 
             MapPin(
                 position = LatLng(location.lat, location.lon),
                 title = "${listSourceLabel(candidate.source, candidate.secondaryId)} • ${candidate.primaryId}",
-                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet",
+                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
@@ -1530,6 +1648,52 @@ private fun distanceForDeviceMeters(
     return distanceForEncounterMeters(pseudoEncounter, currentLocation)
 }
 
+private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? {
+    val samples = encounters
+        .sortedBy { it.timestampEpochMs }
+        .mapNotNull { encounter ->
+            val distance = distanceForEncounterMeters(encounter, null) ?: return@mapNotNull null
+            encounter.timestampEpochMs to distance
+        }
+
+    if (samples.size < 4) return null
+
+    val recent = samples.takeLast(8)
+    val spanMs = recent.last().first - recent.first().first
+    if (spanMs < 15_000L) return null
+
+    val chunkSize = (recent.size / 3).coerceAtLeast(1)
+    val firstChunk = recent.take(chunkSize).map { it.second }
+    val lastChunk = recent.takeLast(chunkSize).map { it.second }
+    val startAvg = firstChunk.average()
+    val endAvg = lastChunk.average()
+    val deltaMeters = startAvg - endAvg
+
+    var approachSteps = 0
+    var consideredSteps = 0
+    for (i in 1 until recent.size) {
+        val prev = recent[i - 1].second
+        val curr = recent[i].second
+        val step = prev - curr
+        consideredSteps += 1
+        if (step >= 3.0 || (prev > 0.0 && (curr / prev) <= 0.97)) {
+            approachSteps += 1
+        }
+    }
+
+    if (consideredSteps == 0) return null
+    val consistency = approachSteps.toDouble() / consideredSteps.toDouble()
+    val confidence = (0.65 * (deltaMeters / 60.0).coerceIn(0.0, 1.0) +
+        0.35 * consistency).coerceIn(0.0, 1.0)
+
+    val approaching = deltaMeters >= 15.0 && consistency >= 0.60 && confidence >= 0.55
+    return ApproachSignal(
+        isApproaching = approaching,
+        confidence = confidence,
+        deltaMeters = deltaMeters
+    )
+}
+
 private fun estimateWifiRangeMeters(encounter: Encounter): Double? {
     val rssi = encounter.rssiDbm ?: return null
     if (rssi >= 0) return null
@@ -1693,11 +1857,56 @@ private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
     return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 }
 
+private fun hasPostNotificationsPermission(context: android.content.Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+    return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
+}
+
+private fun ensureApproachNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(APPROACH_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        APPROACH_ALERT_CHANNEL_ID,
+        "Approach Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when detected devices are approaching"
+    }
+    manager.createNotificationChannel(channel)
+}
+
+private fun sendApproachNotification(context: android.content.Context, device: DeviceItem) {
+    val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt().coerceIn(0, 100)
+    val trend = device.approachDeltaMeters
+        ?.takeIf { it > 0.0 }
+        ?.let { formatDistanceFeetMiles(it) }
+        ?: "unknown"
+
+    val title = "Approaching device detected"
+    val content = "${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId} • Confidence ${confidencePct}% • Trend ${trend}"
+    val notification = NotificationCompat.Builder(context, APPROACH_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_more)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
+    approachDetectionEnabled: Boolean,
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
@@ -1710,7 +1919,13 @@ private fun DevicesPage(
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
-    val devices = remember(selectedEncounters, sortMode) { buildDeviceItems(selectedEncounters, sortMode) }
+    val devices = remember(selectedEncounters, sortMode, approachDetectionEnabled) {
+        buildDeviceItems(
+            encounters = selectedEncounters,
+            sortMode = sortMode,
+            approachDetectionEnabled = approachDetectionEnabled
+        )
+    }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
     val filteredDevices = remember(devices, sourceFilter, queryFilter) {
         devices.filter { device ->
@@ -1802,6 +2017,17 @@ private fun DevicesPage(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
+                        if (device.isApproaching) {
+                            val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt()
+                            val deltaLabel = device.approachDeltaMeters
+                                ?.let { formatDistanceFeetMiles(it.coerceAtLeast(0.0)) }
+                                ?: "n/a"
+                            Text(
+                                text = "Approaching • Confidence ${confidencePct}% • Trend ${deltaLabel}",
+                                color = Color(0xFFB3261E),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         if (showSecondaryIds && supportsSecondaryIdInList(device.source) && !device.secondaryId.isNullOrBlank()) {
                             Text("${secondaryIdLabel(device.source)}: ${device.secondaryId}")
                         }
@@ -1948,12 +2174,18 @@ private fun EncountersPage(
 
 private fun buildDeviceItems(
     encounters: List<Encounter>,
-    sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN
+    sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN,
+    approachDetectionEnabled: Boolean = true
 ): List<DeviceItem> =
     encounters
         .groupBy { it.source.name to it.primaryId }
         .map { (key, groupedEncounters) ->
             val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
+            val approachSignal = if (approachDetectionEnabled) {
+                analyzeApproachSignal(groupedEncounters)
+            } else {
+                null
+            }
             DeviceItem(
                 source = key.first,
                 primaryId = key.second,
@@ -1964,7 +2196,10 @@ private fun buildDeviceItems(
                 lastFrequencyMhz = latest.frequencyMhz,
                 lastLat = latest.lat,
                 lastLon = latest.lon,
-                lastRawPayloadJson = latest.rawPayloadJson
+                lastRawPayloadJson = latest.rawPayloadJson,
+                isApproaching = approachSignal?.isApproaching == true,
+                approachConfidence = approachSignal?.confidence,
+                approachDeltaMeters = approachSignal?.deltaMeters
             )
         }
         .let { deviceItems ->
@@ -2070,6 +2305,18 @@ private fun DeviceDetailPage(
         DetailRow("Secondary ID", item.secondaryId ?: "n/a")
         DetailRow("Seen Count", item.seenCount.toString())
         DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
+        DetailRow(
+            "Approach Status",
+            if (item.isApproaching) {
+                val confidencePct = ((item.approachConfidence ?: 0.0) * 100.0).toInt()
+                val deltaLabel = item.approachDeltaMeters
+                    ?.let { formatDistanceFeetMiles(it.coerceAtLeast(0.0)) }
+                    ?: "n/a"
+                "Approaching (${confidencePct}% confidence, trend ${deltaLabel})"
+            } else {
+                "Not approaching"
+            }
+        )
         DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
         DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
         DetailRow(

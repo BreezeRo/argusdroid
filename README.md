@@ -18,14 +18,23 @@ Argusdroid is an Android mobile app for long-term device encounter intelligence.
 - Tracking controls with status feedback, real-time status refresh, and last scan timestamp.
 - Per-sensor collection toggles on Home (Wi-Fi, Bluetooth LE, Cellular, Remote ID), persisted in app settings.
 - Detection readiness checks with recommended settings and deep links to system settings.
-- Detection map suite with Encounters Map, Devices Map, and Device Location Map (cell-device pins).
+- Detection map suite with Device Encounters Map and Device Location Map.
+- Device Location Map supports approximate locations across device types:
+	- CELL uses tower lookup with observed-location fallback.
+	- Wi-Fi/BLE use multi-observation range inference with observed-location fallback.
+	- Other sources use best available observed encounter location.
+- Source-colored map pins with in-app color legend by detected source type.
 - Map controls for live updates, pin limits, and optional diagnostics panel.
+- Live map mode defaults on and includes a compact in-header LIVE badge.
 - Devices and Encounters filtering by scope (Recent 100 or All), source, and text query.
 - Devices sorting by Last Seen or Most Seen.
+- Devices and Encounters support optional distance display and distance-based sorting.
 - Optional secondary-ID visibility toggles on Devices and Encounters lists.
 - Cellular entries labeled with explicit tower context (for example, CELL TOWER (LTE), CELL TOWER (NR)).
 - CELL encounter details parse and display tower/radio fields (radio type, operator, IDs, signal fields).
 - Optional cell tower location estimation via Mozilla Location Service with range estimate from device in miles/feet.
+- Approach detection analytics identify likely inbound devices from recent distance trends.
+- Approach detection controls in Settings, including optional local approach notifications.
 - Configurable scan interval in Settings, with WorkManager scheduling.
 
 ## Reality Check: Platform Limits
@@ -94,6 +103,7 @@ Notable current runtime asks include:
 - BLUETOOTH_SCAN / BLUETOOTH_CONNECT (API-dependent)
 - NEARBY_WIFI_DEVICES (API-dependent)
 - READ_PHONE_STATE (for cellular detail access)
+- POST_NOTIFICATIONS (for approach and status alerts on supported Android versions)
 
 If a sensor is disabled via Home toggles, that sensor is skipped during scheduled and live scans.
 

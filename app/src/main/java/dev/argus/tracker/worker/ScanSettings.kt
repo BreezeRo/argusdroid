@@ -11,6 +11,8 @@ object ScanSettings {
     private const val KEY_SENSOR_BLE_ENABLED = "sensor_ble_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
+    private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
+    private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L * 60L
     const val MIN_PERIODIC_INTERVAL_SECONDS = 15L * 60L
     val ALLOWED_INTERVALS_SECONDS = listOf(5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
@@ -81,6 +83,28 @@ object ScanSettings {
 
     fun setRemoteIdSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_REMOTE_ID_ENABLED, enabled)
+    }
+
+    fun isApproachDetectionEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_APPROACH_DETECTION_ENABLED, true)
+
+    fun setApproachDetectionEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_APPROACH_DETECTION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isApproachNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, true)
+
+    fun setApproachNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
     }
 
     private fun setSensorEnabled(context: Context, key: String, enabled: Boolean) {
