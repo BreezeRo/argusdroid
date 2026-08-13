@@ -17,6 +17,11 @@ object ScanSettings {
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
+    private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
+    private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
+    private const val KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD = "foreign_signal_alert_threshold"
+    private const val KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED = "foreign_direct_acoustic_enabled"
+    private const val KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED = "foreign_direct_magnetic_enabled"
     private const val KEY_CHAIN_LINK_ENABLED = "chain_link_enabled"
     private const val KEY_CHAIN_NODE_ID = "chain_node_id"
     private const val KEY_CHAIN_SYNC_WINDOW_MINUTES = "chain_sync_window_minutes"
@@ -68,6 +73,7 @@ object ScanSettings {
     const val DEFAULT_EVASION_JITTER_PERCENT = 15
     const val DEFAULT_EVASION_BURST_WATCH_SECONDS = 45L
     const val DEFAULT_EVASION_BURST_COOLDOWN_SECONDS = 300L
+    const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     val ALLOWED_INTERVALS_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
@@ -79,6 +85,7 @@ object ScanSettings {
     val ALLOWED_EVASION_JITTER_PERCENT = listOf(5, 10, 15, 20, 25, 30)
     val ALLOWED_EVASION_BURST_WATCH_SECONDS = listOf(15L, 30L, 45L, 60L, 90L, 120L)
     val ALLOWED_EVASION_BURST_COOLDOWN_SECONDS = listOf(60L, 120L, 180L, 300L, 600L, 900L)
+    val ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS = listOf("HIGH", "CRITICAL")
     val SOURCE_TYPES = listOf(
         "wifi",
         "wifi_direct",
@@ -87,7 +94,9 @@ object ScanSettings {
         "cellular",
         "remote_id",
         "uwb",
-        "sdr"
+        "sdr",
+        "acoustic",
+        "magnetic"
     )
     val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> =
         (1L..60L).toList() + listOf(120L, 300L, 600L, 1800L, 3600L)
@@ -234,6 +243,69 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isForeignSignalRiskEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_SIGNAL_RISK_ENABLED, true)
+
+    fun setForeignSignalRiskEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_SIGNAL_RISK_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isForeignSignalAlertsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_SIGNAL_ALERTS_ENABLED, true)
+
+    fun setForeignSignalAlertsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_SIGNAL_ALERTS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getForeignSignalAlertThreshold(context: Context): String {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD, DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD)
+            .orEmpty()
+            .trim()
+            .uppercase()
+        return raw.takeIf { it in ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS }
+            ?: DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
+    }
+
+    fun setForeignSignalAlertThreshold(context: Context, threshold: String) {
+        val safe = threshold.trim().uppercase().takeIf { it in ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS }
+            ?: DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD, safe)
+            .apply()
+    }
+
+    fun isForeignDirectAcousticEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED, false)
+
+    fun setForeignDirectAcousticEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isForeignDirectMagneticEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED, false)
+
+    fun setForeignDirectMagneticEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED, enabled)
             .apply()
     }
 

@@ -122,6 +122,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -158,6 +159,8 @@ private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
+private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val ALERT_LOG_MAX_ENTRIES = 400
 private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
@@ -166,7 +169,8 @@ private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
 
 private enum class AlertLogType {
     APPROACH,
-    TRACKER
+    TRACKER,
+    FOREIGN_SIGNAL
 }
 
 private data class AlertLogEntry(
@@ -192,6 +196,33 @@ private data class TrackerRiskSignal(
     val spreadMeters: Double,
     val activeWindowMinutes: Double,
     val summary: String
+)
+
+private enum class ForeignSignalRiskLevel {
+    QUIET,
+    ELEVATED,
+    HIGH,
+    CRITICAL
+}
+
+private data class ForeignSignalRiskSignal(
+    val level: ForeignSignalRiskLevel,
+    val score: Int,
+    val confidence: Double,
+    val summary: String,
+    val windowMinutes: Double,
+    val sampleCount: Int,
+    val cellularAnomalyScore: Double,
+    val wifiAnomalyScore: Double,
+    val bleAnomalyScore: Double,
+    val gnssInterferenceScore: Double,
+    val uwbActivityScore: Double,
+    val rfTextureScore: Double,
+    val acousticProxyScore: Double,
+    val magneticProxyScore: Double,
+    val directAcousticObserved: Boolean,
+    val directMagneticObserved: Boolean,
+    val unavailableSignals: List<String>
 )
 
 private data class DeviceItem(
@@ -240,7 +271,9 @@ private data class SensorGateSettings(
     val wifiEnabled: Boolean,
     val bluetoothEnabled: Boolean,
     val cellularEnabled: Boolean,
-    val remoteIdEnabled: Boolean
+    val remoteIdEnabled: Boolean,
+    val directAcousticEnabled: Boolean,
+    val directMagneticEnabled: Boolean
 )
 
 private data class InferredDeviceLocation(
@@ -444,7 +477,9 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
         bluetoothEnabled = ScanSettings.isBleSensorEnabled(context),
         cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
-        remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context)
+        remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context),
+        directAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context),
+        directMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
     )
 
 @Composable
@@ -467,6 +502,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var foreignSignalRiskEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalRiskEnabled(context)) }
+    var foreignSignalAlertsEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalAlertsEnabled(context)) }
+    var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
+    var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
+    var foreignDirectMagneticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectMagneticEnabled(context)) }
     var chainLinkEnabled by remember { mutableStateOf(ScanSettings.isChainLinkEnabled(context)) }
     var chainNodeId by remember { mutableStateOf(ScanSettings.getChainNodeId(context)) }
     var chainDeviceName by remember { mutableStateOf(ScanSettings.getChainDeviceName(context)) }
@@ -508,6 +548,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
+    var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
+    var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -602,7 +644,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 "cellular" to 30L,
                 "remote_id" to 60L,
                 "uwb" to 30L,
-                "sdr" to 30L
+                "sdr" to 30L,
+                "acoustic" to 30L,
+                "magnetic" to 30L
             ) to 15L
         }
 
@@ -775,6 +819,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
+        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
+        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
+        foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+        foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
         autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
@@ -1013,6 +1062,56 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             trackerStateByDevice.remove(staleKey)
             lastTrackerNotificationEpochByDevice.remove(staleKey)
         }
+    }
+
+    LaunchedEffect(
+        allEncounters,
+        foreignSignalRiskEnabled,
+        foreignSignalAlertsEnabled,
+        foreignSignalAlertThreshold
+    ) {
+        val risk = withContext(Dispatchers.Default) { analyzeForeignSignalRisk(allEncounters) }
+        val currentLevel = risk?.level ?: ForeignSignalRiskLevel.QUIET
+        val previousLevel = previousForeignSignalRiskLevel
+
+        if (!foreignSignalRiskEnabled) {
+            previousForeignSignalRiskLevel = currentLevel
+            return@LaunchedEffect
+        }
+
+        val thresholdLevel = when (foreignSignalAlertThreshold.uppercase(Locale.US)) {
+            "CRITICAL" -> ForeignSignalRiskLevel.CRITICAL
+            else -> ForeignSignalRiskLevel.HIGH
+        }
+
+        val meetsThreshold = currentLevel.ordinal >= thresholdLevel.ordinal
+        val crossedUp = previousLevel.ordinal < thresholdLevel.ordinal && meetsThreshold
+        val now = System.currentTimeMillis()
+
+        if (risk != null && crossedUp) {
+            withContext(Dispatchers.IO) {
+                AlertLogStore.append(
+                    context,
+                    AlertLogEntry(
+                        timestampEpochMs = now,
+                        type = AlertLogType.FOREIGN_SIGNAL,
+                        source = "UNKNOWN_RF",
+                        primaryId = "environment",
+                        message = "Foreign signal risk ${risk.level.name} (${risk.score}/100): ${risk.summary}",
+                        confidence = risk.confidence
+                    )
+                )
+            }
+            alertLogs = AlertLogStore.read(context)
+
+            if (foreignSignalAlertsEnabled && hasPostNotificationsPermission(context) && now - lastForeignSignalAlertEpochMs >= FOREIGN_SIGNAL_ALERT_COOLDOWN_MS) {
+                ensureForeignSignalNotificationChannel(context)
+                sendForeignSignalRiskNotification(context, risk)
+                lastForeignSignalAlertEpochMs = now
+            }
+        }
+
+        previousForeignSignalRiskLevel = currentLevel
     }
 
     LaunchedEffect(evasionEscalationActiveUntilEpochMs) {
@@ -1271,6 +1370,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    foreignSignalRiskEnabled = foreignSignalRiskEnabled,
+                    foreignSignalAlertsEnabled = foreignSignalAlertsEnabled,
+                    foreignSignalAlertThreshold = foreignSignalAlertThreshold,
+                    foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
+                    foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
                     onScanIntervalSelected = { seconds ->
                         scope.launch {
                             applyScanInterval(seconds, "Manual update", "manual")
@@ -1332,6 +1436,28 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
                     },
+                    onForeignSignalRiskEnabledChanged = { enabled ->
+                        foreignSignalRiskEnabled = enabled
+                        ScanSettings.setForeignSignalRiskEnabled(context, enabled)
+                    },
+                    onForeignSignalAlertsEnabledChanged = { enabled ->
+                        foreignSignalAlertsEnabled = enabled
+                        ScanSettings.setForeignSignalAlertsEnabled(context, enabled)
+                    },
+                    onForeignSignalAlertThresholdChanged = { threshold ->
+                        foreignSignalAlertThreshold = threshold
+                        ScanSettings.setForeignSignalAlertThreshold(context, threshold)
+                    },
+                    onForeignDirectAcousticEnabledChanged = { enabled ->
+                        foreignDirectAcousticEnabled = enabled
+                        ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
+                        sensorGateSettings = readSensorGateSettings(context)
+                    },
+                    onForeignDirectMagneticEnabledChanged = { enabled ->
+                        foreignDirectMagneticEnabled = enabled
+                        ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
+                        sensorGateSettings = readSensorGateSettings(context)
+                    },
                     onLiveMapUpdateIntervalSelected = { seconds ->
                         liveMapUpdateIntervalSeconds = seconds
                         ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
@@ -1381,6 +1507,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
+                        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
+                        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
+                        foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                        foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
                         autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
@@ -1420,6 +1551,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
+                        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
+                        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
+                        foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                        foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
                         autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
@@ -1461,6 +1597,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
                             chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
                             chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+                            foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
+                            foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
+                            foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
+                            foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                            foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                             viewModel.refreshSummary()
                         }
                     }
@@ -1472,6 +1613,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     readinessItems = readinessItems,
                     encounters = recent,
                     meshInsightEncounters = allEncounters,
+                    foreignSignalRiskEnabled = foreignSignalRiskEnabled,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
                     alertLogs = alertLogs,
@@ -2418,12 +2560,22 @@ private fun AppSettingsPage(
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    foreignSignalRiskEnabled: Boolean,
+    foreignSignalAlertsEnabled: Boolean,
+    foreignSignalAlertThreshold: String,
+    foreignDirectAcousticEnabled: Boolean,
+    foreignDirectMagneticEnabled: Boolean,
     onScanIntervalSelected: (Long) -> Unit,
     onAutoAdjustScanIntervalChanged: (Boolean) -> Unit,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onForeignSignalRiskEnabledChanged: (Boolean) -> Unit,
+    onForeignSignalAlertsEnabledChanged: (Boolean) -> Unit,
+    onForeignSignalAlertThresholdChanged: (String) -> Unit,
+    onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
+    onForeignDirectMagneticEnabledChanged: (Boolean) -> Unit,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onExportBackup: suspend () -> String,
     onExportEncryptedBackup: suspend (String) -> String,
@@ -2436,6 +2588,7 @@ private fun AppSettingsPage(
     var expanded by remember { mutableStateOf(false) }
     var liveMapIntervalExpanded by remember { mutableStateOf(false) }
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
+    var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
     var backupActionInProgress by remember { mutableStateOf(false) }
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
     var backupPassphrase by rememberSaveable { mutableStateOf("") }
@@ -2679,6 +2832,87 @@ private fun AppSettingsPage(
                     }
                     Text("Notifications trigger when a tracked device changes into approaching state.")
                     Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
+                }
+            }
+        }
+        item {
+            Text("Foreign Signal Risk", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable foreign signal scoring")
+                        Switch(
+                            checked = foreignSignalRiskEnabled,
+                            onCheckedChange = onForeignSignalRiskEnabledChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Foreign signal alerts")
+                        Switch(
+                            checked = foreignSignalAlertsEnabled,
+                            onCheckedChange = onForeignSignalAlertsEnabledChanged,
+                            enabled = foreignSignalRiskEnabled
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Direct acoustic channel")
+                        Switch(
+                            checked = foreignDirectAcousticEnabled,
+                            onCheckedChange = onForeignDirectAcousticEnabledChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Direct magnetometer channel")
+                        Switch(
+                            checked = foreignDirectMagneticEnabled,
+                            onCheckedChange = onForeignDirectMagneticEnabledChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Alert threshold")
+                        Button(
+                            onClick = { foreignSignalThresholdExpanded = true },
+                            enabled = foreignSignalRiskEnabled && foreignSignalAlertsEnabled
+                        ) {
+                            Text(foreignSignalAlertThreshold)
+                        }
+                        DropdownMenu(
+                            expanded = foreignSignalThresholdExpanded,
+                            onDismissRequest = { foreignSignalThresholdExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS.forEach { threshold ->
+                                DropdownMenuItem(
+                                    text = { Text(threshold) },
+                                    onClick = {
+                                        onForeignSignalAlertThresholdChanged(threshold)
+                                        foreignSignalThresholdExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Text("HIGH triggers earlier alerts; CRITICAL reduces noise.")
+                    Text("Direct acoustic and magnetometer channels now ingest live samples when enabled.")
                 }
             }
         }
@@ -3375,6 +3609,7 @@ private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     meshInsightEncounters: List<Encounter>,
+    foreignSignalRiskEnabled: Boolean,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     alertLogs: List<AlertLogEntry>,
@@ -3416,6 +3651,9 @@ private fun DetectionPage(
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
+    val foreignSignalRisk = remember(encounters, foreignSignalRiskEnabled) {
+        if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(encounters) else null
+    }
 
     val encounterPins = remember(encounters) {
         encounters
@@ -3615,6 +3853,68 @@ private fun DetectionPage(
                         Text("Refresh Readiness")
                     }
                 }
+                item {
+                    if (!foreignSignalRiskEnabled) {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Foreign Signal Risk: disabled in settings.",
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    } else if (foreignSignalRisk == null) {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Foreign Signal Risk: waiting for enough recent samples.",
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    } else {
+                        val riskColor = when (foreignSignalRisk.level) {
+                            ForeignSignalRiskLevel.CRITICAL -> Color(0xFFB3261E)
+                            ForeignSignalRiskLevel.HIGH -> Color(0xFFD84315)
+                            ForeignSignalRiskLevel.ELEVATED -> Color(0xFFE65100)
+                            ForeignSignalRiskLevel.QUIET -> Color(0xFF2E7D32)
+                        }
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Foreign Signal Risk: ${foreignSignalRisk.level.name} (${foreignSignalRisk.score}/100)",
+                                    color = riskColor,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(foreignSignalRisk.summary)
+                                Text(
+                                    "Confidence ${String.format(Locale.US, "%.0f%%", foreignSignalRisk.confidence * 100.0)} " +
+                                        "| Window ${String.format(Locale.US, "%.1f min", foreignSignalRisk.windowMinutes)} " +
+                                        "| Samples ${foreignSignalRisk.sampleCount}"
+                                )
+                                Text(
+                                    "Cell ${formatRiskScorePct(foreignSignalRisk.cellularAnomalyScore)} | " +
+                                        "Wi-Fi ${formatRiskScorePct(foreignSignalRisk.wifiAnomalyScore)} | " +
+                                        "BLE ${formatRiskScorePct(foreignSignalRisk.bleAnomalyScore)}"
+                                )
+                                Text(
+                                    "GNSS ${formatRiskScorePct(foreignSignalRisk.gnssInterferenceScore)} | " +
+                                        "UWB ${formatRiskScorePct(foreignSignalRisk.uwbActivityScore)} | " +
+                                        "RF Texture ${formatRiskScorePct(foreignSignalRisk.rfTextureScore)}"
+                                )
+                                Text(
+                                    "Acoustic ${if (foreignSignalRisk.directAcousticObserved) "direct" else "proxy"} ${formatRiskScorePct(foreignSignalRisk.acousticProxyScore)} | " +
+                                        "Magnetic ${if (foreignSignalRisk.directMagneticObserved) "direct" else "proxy"} ${formatRiskScorePct(foreignSignalRisk.magneticProxyScore)}"
+                                )
+                                if (foreignSignalRisk.unavailableSignals.isNotEmpty()) {
+                                    Text(
+                                        "Unavailable on current pipeline: ${foreignSignalRisk.unavailableSignals.joinToString(", ")}",
+                                        color = Color(0xFF5F6368)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 items(readinessItems) { item ->
                     val statusText = if (item.isMissing) "MISSING" else "READY"
                     val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
@@ -3732,11 +4032,13 @@ private fun DetectionLogsPage(
 ) {
     var showApproachLogs by rememberSaveable { mutableStateOf(true) }
     var showTrackerLogs by rememberSaveable { mutableStateOf(true) }
+    var showForeignSignalLogs by rememberSaveable { mutableStateOf(true) }
 
-    val filteredLogs = remember(logs, showApproachLogs, showTrackerLogs) {
+    val filteredLogs = remember(logs, showApproachLogs, showTrackerLogs, showForeignSignalLogs) {
         logs.filter { entry ->
             (showApproachLogs && entry.type == AlertLogType.APPROACH) ||
-                (showTrackerLogs && entry.type == AlertLogType.TRACKER)
+                (showTrackerLogs && entry.type == AlertLogType.TRACKER) ||
+                (showForeignSignalLogs && entry.type == AlertLogType.FOREIGN_SIGNAL)
         }.sortedByDescending { it.timestampEpochMs }
     }
 
@@ -3778,6 +4080,13 @@ private fun DetectionLogsPage(
                         onCheckedChange = { showTrackerLogs = it }
                     )
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Foreign Signal")
+                    Switch(
+                        checked = showForeignSignalLogs,
+                        onCheckedChange = { showForeignSignalLogs = it }
+                    )
+                }
             }
         }
         item {
@@ -3799,6 +4108,7 @@ private fun DetectionLogsPage(
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
+                AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
             val confidenceLabel = entry.confidence
@@ -5146,6 +5456,8 @@ private fun formatSourceTypeLabel(sourceType: String): String = when (sourceType
     "remote_id" -> "Remote ID"
     "uwb" -> "UWB"
     "sdr" -> "SDR"
+    "acoustic" -> "Acoustic"
+    "magnetic" -> "Magnetometer"
     else -> sourceType.replace('_', ' ').uppercase()
 }
 
@@ -5177,6 +5489,8 @@ private fun computeRecommendedIntervalSeconds(
             add("uwb")
             add("sdr")
         }
+        if (sensorGateSettings.directAcousticEnabled) add("acoustic")
+        if (sensorGateSettings.directMagneticEnabled) add("magnetic")
     }
     val suggested = timings
         .filter { it.sourceType in enabledTypes }
@@ -5207,6 +5521,8 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
         add("uwb")
         add("sdr")
     }
+    if (sensorGateSettings.directAcousticEnabled) add("acoustic")
+    if (sensorGateSettings.directMagneticEnabled) add("magnetic")
 }
 
 private fun autoMarkConnectedWifiAsOwned(
@@ -5283,6 +5599,8 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "manual-wifi_direct" -> "Manual Wi-Fi Direct interval change"
     "manual-uwb" -> "Manual UWB interval change"
     "manual-sdr" -> "Manual SDR interval change"
+    "manual-acoustic" -> "Manual acoustic interval change"
+    "manual-magnetic" -> "Manual magnetometer interval change"
     "auto-overrun-wifi" -> "Auto-adjust Wi-Fi overrun protection"
     "auto-overrun-wifi_direct" -> "Auto-adjust Wi-Fi Direct overrun protection"
     "auto-overrun-ble" -> "Auto-adjust Bluetooth LE overrun protection"
@@ -5291,6 +5609,8 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "auto-overrun-remote_id" -> "Auto-adjust Remote ID overrun protection"
     "auto-overrun-uwb" -> "Auto-adjust UWB overrun protection"
     "auto-overrun-sdr" -> "Auto-adjust SDR overrun protection"
+    "auto-overrun-acoustic" -> "Auto-adjust acoustic overrun protection"
+    "auto-overrun-magnetic" -> "Auto-adjust magnetometer overrun protection"
     "auto-stable-wifi" -> "Auto-adjust Wi-Fi stable downshift"
     "auto-stable-wifi_direct" -> "Auto-adjust Wi-Fi Direct stable downshift"
     "auto-stable-ble" -> "Auto-adjust Bluetooth LE stable downshift"
@@ -5299,6 +5619,8 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "auto-stable-remote_id" -> "Auto-adjust Remote ID stable downshift"
     "auto-stable-uwb" -> "Auto-adjust UWB stable downshift"
     "auto-stable-sdr" -> "Auto-adjust SDR stable downshift"
+    "auto-stable-acoustic" -> "Auto-adjust acoustic stable downshift"
+    "auto-stable-magnetic" -> "Auto-adjust magnetometer stable downshift"
     else -> reason.replace('-', ' ').replace('_', ' ')
 }
 
@@ -5458,6 +5780,68 @@ private fun readGenericPayloadFields(rawPayloadJson: String): List<Pair<String, 
         }
 }
 
+private fun readDirectAcousticFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    val fields = mutableListOf<Pair<String, String>>()
+
+    val sampleRateHz = payload.optInt("sampleRateHz", -1).takeIf { it > 0 }
+    val sampleCount = payload.optInt("sampleCount", -1).takeIf { it > 0 }
+    val rmsDbFs = payload.optDouble("rmsDbFs", Double.NaN).takeIf { it.isFinite() }
+    val peakDbFs = payload.optDouble("peakDbFs", Double.NaN).takeIf { it.isFinite() }
+
+    sampleRateHz?.let { fields += "Sample Rate" to "$it Hz" }
+    sampleCount?.let { fields += "Sample Count" to it.toString() }
+    rmsDbFs?.let { fields += "RMS Level" to String.format(Locale.US, "%.1f dBFS", it) }
+    peakDbFs?.let { fields += "Peak Level" to String.format(Locale.US, "%.1f dBFS", it) }
+
+    return if (fields.isNotEmpty()) fields else readGenericPayloadFields(rawPayloadJson)
+}
+
+private fun readDirectMagneticFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    val fields = mutableListOf<Pair<String, String>>()
+
+    fun appendMicroTesla(label: String, key: String) {
+        val value = payload.optDouble(key, Double.NaN)
+        if (value.isFinite()) {
+            fields += label to String.format(Locale.US, "%.2f uT", value)
+        }
+    }
+
+    appendMicroTesla("X", "xMicroTesla")
+    appendMicroTesla("Y", "yMicroTesla")
+    appendMicroTesla("Z", "zMicroTesla")
+    appendMicroTesla("Magnitude", "magnitudeMicroTesla")
+    appendMicroTesla("Delta from Earth Baseline", "deltaFromEarthBaselineMicroTesla")
+
+    val accuracy = payload.optInt("accuracy", Int.MIN_VALUE)
+    if (accuracy != Int.MIN_VALUE) {
+        fields += "Sensor Accuracy" to accuracy.toString()
+    }
+
+    return if (fields.isNotEmpty()) fields else readGenericPayloadFields(rawPayloadJson)
+}
+
+private fun readUnknownRfFields(rawPayloadJson: String): Pair<String, List<Pair<String, String>>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull()
+    val signalChannel = payload?.optString("signalChannel", "")?.trim()?.lowercase(Locale.US).orEmpty()
+    val isDirect = payload?.optBoolean("directChannel", false) == true
+
+    return when {
+        isDirect && signalChannel == "acoustic" -> {
+            "Direct Acoustic Signal Details" to readDirectAcousticFields(rawPayloadJson)
+        }
+
+        isDirect && signalChannel == "magnetic" -> {
+            "Direct Magnetometer Signal Details" to readDirectMagneticFields(rawPayloadJson)
+        }
+
+        else -> {
+            "Unknown RF Details" to readGenericPayloadFields(rawPayloadJson)
+        }
+    }
+}
+
 private fun readRemoteIdFields(rawPayloadJson: String): List<Pair<String, String>> {
     val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
     val normalized = RemoteIdPayloadParser.normalizeIncomingPayload(payload)
@@ -5501,7 +5885,7 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readRemoteIdFields(encounter.rawPayloadJson)
         EncounterSource.UWB -> "UWB Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.SDR -> "SDR Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
-        EncounterSource.UNKNOWN_RF -> "Unknown RF Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.UNKNOWN_RF -> readUnknownRfFields(encounter.rawPayloadJson)
     }
 
 @Composable
@@ -6085,6 +6469,359 @@ private fun analyzeTrackerRisk(
     )
 }
 
+private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignalRiskSignal? {
+    val ordered = encounters
+        .sortedBy { it.timestampEpochMs }
+        .takeLast(600)
+
+    if (ordered.size < 8) return null
+
+    val firstTs = ordered.first().timestampEpochMs
+    val lastTs = ordered.last().timestampEpochMs
+    val windowMinutes = ((lastTs - firstTs).coerceAtLeast(0L) / 60_000.0)
+
+    val cellularScore = computeCellularAnomalyScore(ordered)
+    val wifiScore = computeWifiAnomalyScore(ordered)
+    val bleScore = computeBleAnomalyScore(ordered)
+    val gnssScore = computeGnssInterferenceScore(ordered)
+    val uwbScore = computeUwbActivityScore(ordered, windowMinutes)
+    val rfTextureScore = computeRfTextureScore(ordered)
+
+    val directAcousticObserved = ordered.any { isDirectSignalChannel(it, "acoustic") }
+    val directMagneticObserved = ordered.any { isDirectSignalChannel(it, "magnetic") }
+    val directAcousticScore = computeDirectAcousticScore(ordered)
+    val directMagneticScore = computeDirectMagneticScore(ordered)
+
+    val unknownEmissionScore = computeUnknownEmissionScore(ordered, windowMinutes)
+    val acousticProxyScore = if (directAcousticObserved) {
+        directAcousticScore
+    } else {
+        (unknownEmissionScore * 0.55).coerceIn(0.0, 1.0)
+    }
+    val magneticProxyScore = if (directMagneticObserved) {
+        directMagneticScore
+    } else {
+        (unknownEmissionScore * 0.45).coerceIn(0.0, 1.0)
+    }
+
+    val distinctSources = ordered.map { it.source }.toSet().size
+    val sourceDiversityScore = ((distinctSources - 1).toDouble() / 6.0).coerceIn(0.0, 1.0)
+
+    val weightedScore = (
+        0.18 * cellularScore +
+            0.14 * wifiScore +
+            0.14 * bleScore +
+            0.14 * gnssScore +
+            0.08 * uwbScore +
+            0.18 * rfTextureScore +
+            0.07 * acousticProxyScore +
+            0.07 * magneticProxyScore +
+            0.10 * sourceDiversityScore
+        ).coerceIn(0.0, 1.0)
+
+    val score = (weightedScore * 100.0).roundToInt().coerceIn(0, 100)
+
+    val level = when {
+        score >= 80 -> ForeignSignalRiskLevel.CRITICAL
+        score >= 60 -> ForeignSignalRiskLevel.HIGH
+        score >= 35 -> ForeignSignalRiskLevel.ELEVATED
+        else -> ForeignSignalRiskLevel.QUIET
+    }
+
+    val activeSignalFamilies = listOf(
+        cellularScore,
+        wifiScore,
+        bleScore,
+        gnssScore,
+        uwbScore,
+        rfTextureScore
+    ).count { it > 0.0 }
+
+    val confidence = (
+        0.50 * (ordered.size.toDouble() / 180.0).coerceIn(0.0, 1.0) +
+            0.25 * (windowMinutes / 30.0).coerceIn(0.0, 1.0) +
+            0.25 * (activeSignalFamilies.toDouble() / 6.0).coerceIn(0.0, 1.0)
+        ).coerceIn(0.0, 1.0)
+
+    val unavailable = buildList {
+        if (ordered.none { it.source == EncounterSource.UWB }) {
+            add("UWB (no recent encounters)")
+        }
+        if (!directAcousticObserved) add("Direct acoustic signature channel")
+        if (!directMagneticObserved) add("Direct magnetometer disturbance channel")
+    }
+
+    val summary = when (level) {
+        ForeignSignalRiskLevel.CRITICAL -> "Multiple channels show simultaneous foreign-signal anomalies."
+        ForeignSignalRiskLevel.HIGH -> "Cross-channel anomalies detected; likely elevated foreign-signal activity nearby."
+        ForeignSignalRiskLevel.ELEVATED -> "Early anomaly pattern detected across one or more radio channels."
+        ForeignSignalRiskLevel.QUIET -> "No strong multi-channel foreign-signal anomalies detected."
+    }
+
+    return ForeignSignalRiskSignal(
+        level = level,
+        score = score,
+        confidence = confidence,
+        summary = summary,
+        windowMinutes = windowMinutes,
+        sampleCount = ordered.size,
+        cellularAnomalyScore = cellularScore,
+        wifiAnomalyScore = wifiScore,
+        bleAnomalyScore = bleScore,
+        gnssInterferenceScore = gnssScore,
+        uwbActivityScore = uwbScore,
+        rfTextureScore = rfTextureScore,
+        acousticProxyScore = acousticProxyScore,
+        magneticProxyScore = magneticProxyScore,
+        directAcousticObserved = directAcousticObserved,
+        directMagneticObserved = directMagneticObserved,
+        unavailableSignals = unavailable
+    )
+}
+
+private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolean {
+    if (encounter.source != EncounterSource.UNKNOWN_RF) return false
+    val payload = parseEncounterPayload(encounter) ?: return false
+    val signalChannel = payload.optString("signalChannel", "").trim().lowercase(Locale.US)
+    val direct = payload.optBoolean("directChannel", false)
+    return direct && signalChannel == channel.lowercase(Locale.US)
+}
+
+private fun computeDirectAcousticScore(encounters: List<Encounter>): Double {
+    val acousticPayloads = encounters
+        .filter { isDirectSignalChannel(it, "acoustic") }
+        .mapNotNull { parseEncounterPayload(it) }
+
+    if (acousticPayloads.size < 2) return 0.0
+
+    val rmsDbFs = acousticPayloads
+        .mapNotNull { payload ->
+            if (!payload.has("rmsDbFs") || payload.isNull("rmsDbFs")) return@mapNotNull null
+            payload.optDouble("rmsDbFs", Double.NaN).takeIf { it.isFinite() }
+        }
+    if (rmsDbFs.isEmpty()) return 0.0
+
+    val loudRate = rmsDbFs.count { it >= -42.0 }.toDouble() / rmsDbFs.size.toDouble()
+    val volatility = (standardDeviation(rmsDbFs) / 20.0).coerceIn(0.0, 1.0)
+    return (0.65 * loudRate.coerceIn(0.0, 1.0) + 0.35 * volatility).coerceIn(0.0, 1.0)
+}
+
+private fun computeDirectMagneticScore(encounters: List<Encounter>): Double {
+    val magneticPayloads = encounters
+        .filter { isDirectSignalChannel(it, "magnetic") }
+        .mapNotNull { parseEncounterPayload(it) }
+
+    if (magneticPayloads.size < 2) return 0.0
+
+    val magnitudes = magneticPayloads
+        .mapNotNull { payload ->
+            if (!payload.has("magnitudeMicroTesla") || payload.isNull("magnitudeMicroTesla")) return@mapNotNull null
+            payload.optDouble("magnitudeMicroTesla", Double.NaN).takeIf { it.isFinite() }
+        }
+    if (magnitudes.isEmpty()) return 0.0
+
+    val anomalyRate = magnitudes.count { it < 25.0 || it > 65.0 }.toDouble() / magnitudes.size.toDouble()
+    val volatility = (standardDeviation(magnitudes) / 35.0).coerceIn(0.0, 1.0)
+    return (0.70 * anomalyRate.coerceIn(0.0, 1.0) + 0.30 * volatility).coerceIn(0.0, 1.0)
+}
+
+private fun computeCellularAnomalyScore(encounters: List<Encounter>): Double {
+    val cellEncounters = encounters
+        .filter { it.source == EncounterSource.CELL }
+        .sortedBy { it.timestampEpochMs }
+    if (cellEncounters.size < 4) return 0.0
+
+    val payloads = cellEncounters.mapNotNull { parseEncounterPayload(it) }
+    val operatorCodes = payloads
+        .map { it.optString("networkOperator", "").trim() }
+        .filter { it.isNotBlank() }
+    val radios = payloads
+        .map { it.optString("radio", "").uppercase(Locale.US) }
+        .filter { it.isNotBlank() }
+
+    val operatorDiversity = ((operatorCodes.toSet().size - 1).toDouble() / 3.0).coerceIn(0.0, 1.0)
+    val radioTransitions = transitionsFraction(radios)
+    val rssiVolatility = (standardDeviation(cellEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 24.0)
+        .coerceIn(0.0, 1.0)
+
+    return (
+        0.35 * operatorDiversity +
+            0.35 * radioTransitions +
+            0.30 * rssiVolatility
+        ).coerceIn(0.0, 1.0)
+}
+
+private fun computeWifiAnomalyScore(encounters: List<Encounter>): Double {
+    val wifiEncounters = encounters.filter {
+        it.source == EncounterSource.WIFI || it.source == EncounterSource.WIFI_DIRECT
+    }
+    if (wifiEncounters.size < 6) return 0.0
+
+    val payloads = wifiEncounters.mapNotNull { parseEncounterPayload(it) }
+    val ssidToBssid = mutableMapOf<String, MutableSet<String>>()
+    payloads.forEach { payload ->
+        val ssid = payload.optString("ssid", "").trim()
+        val bssid = payload.optString("bssid", "").trim()
+        if (ssid.isNotBlank() && bssid.isNotBlank()) {
+            ssidToBssid.getOrPut(ssid) { mutableSetOf() }.add(bssid)
+        }
+    }
+
+    val spoofLikeClusters = ssidToBssid.values.count { it.size >= 3 }
+    val spoofClusterScore = if (ssidToBssid.isEmpty()) {
+        0.0
+    } else {
+        (spoofLikeClusters.toDouble() / ssidToBssid.size.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    val idChurn = (wifiEncounters.map { it.primaryId }.toSet().size.toDouble() / wifiEncounters.size.toDouble())
+        .coerceIn(0.0, 1.0)
+    val rssiVolatility = (standardDeviation(wifiEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 20.0)
+        .coerceIn(0.0, 1.0)
+
+    return (
+        0.35 * spoofClusterScore +
+            0.30 * idChurn +
+            0.35 * rssiVolatility
+        ).coerceIn(0.0, 1.0)
+}
+
+private fun computeBleAnomalyScore(encounters: List<Encounter>): Double {
+    val bleEncounters = encounters.filter {
+        it.source == EncounterSource.BLUETOOTH_LE || it.source == EncounterSource.REMOTE_ID
+    }
+    if (bleEncounters.size < 6) return 0.0
+
+    val payloads = bleEncounters.mapNotNull { parseEncounterPayload(it) }
+    val unknownClassRate = payloads
+        .map { it.optString("deviceClassHint", "") }
+        .let { classes ->
+            if (classes.isEmpty()) 0.0 else classes.count { it.equals("unknown", ignoreCase = true) }.toDouble() / classes.size.toDouble()
+        }
+    val idChurn = (bleEncounters.map { it.primaryId }.toSet().size.toDouble() / bleEncounters.size.toDouble())
+        .coerceIn(0.0, 1.0)
+    val rssiVolatility = (standardDeviation(bleEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 18.0)
+        .coerceIn(0.0, 1.0)
+
+    return (
+        0.40 * idChurn +
+            0.30 * unknownClassRate.coerceIn(0.0, 1.0) +
+            0.30 * rssiVolatility
+        ).coerceIn(0.0, 1.0)
+}
+
+private fun computeGnssInterferenceScore(encounters: List<Encounter>): Double {
+    data class TimedLatLon(val ts: Long, val lat: Double, val lon: Double)
+
+    val points = encounters
+        .filter { isValidLatLon(it.lat, it.lon) }
+        .sortedBy { it.timestampEpochMs }
+        .map { TimedLatLon(it.timestampEpochMs, it.lat!!, it.lon!!) }
+        .distinctBy { "${it.ts}:${it.lat}:${it.lon}" }
+
+    if (points.size < 4) return 0.0
+
+    val speeds = mutableListOf<Double>()
+    val stepDistances = mutableListOf<Double>()
+
+    for (i in 1 until points.size) {
+        val previous = points[i - 1]
+        val current = points[i]
+        val dtSeconds = ((current.ts - previous.ts).coerceAtLeast(0L) / 1000.0)
+        if (dtSeconds <= 0.0 || dtSeconds > 300.0) continue
+        val distance = distanceFromLocationMeters(previous.lat, previous.lon, current.lat, current.lon) ?: continue
+        if (!distance.isFinite() || distance < 0.0) continue
+        stepDistances += distance
+        speeds += (distance / dtSeconds)
+    }
+
+    if (speeds.size < 3) return 0.0
+
+    val impossibleSpeedRatio = speeds.count { it > 70.0 }.toDouble() / speeds.size.toDouble()
+    val jitterScore = (standardDeviation(stepDistances) / 150.0).coerceIn(0.0, 1.0)
+
+    return (
+        0.65 * impossibleSpeedRatio.coerceIn(0.0, 1.0) +
+            0.35 * jitterScore
+        ).coerceIn(0.0, 1.0)
+}
+
+private fun computeUwbActivityScore(encounters: List<Encounter>, windowMinutes: Double): Double {
+    val uwbEncounters = encounters.filter { it.source == EncounterSource.UWB }
+    if (uwbEncounters.isEmpty()) return 0.0
+    val safeWindow = windowMinutes.coerceAtLeast(1.0)
+    val burstDensityPerMinute = uwbEncounters.size.toDouble() / safeWindow
+    val burstScore = (burstDensityPerMinute / 6.0).coerceIn(0.0, 1.0)
+    val idDiversity = (uwbEncounters.map { it.primaryId }.toSet().size.toDouble() / uwbEncounters.size.toDouble())
+        .coerceIn(0.0, 1.0)
+    return (0.70 * burstScore + 0.30 * idDiversity).coerceIn(0.0, 1.0)
+}
+
+private fun computeRfTextureScore(encounters: List<Encounter>): Double {
+    val samples = encounters.mapNotNull { it.rssiDbm?.toDouble() }
+    if (samples.size < 6) return 0.0
+
+    val weakSignalRate = samples.count { it <= -92.0 }.toDouble() / samples.size.toDouble()
+    val volatility = (standardDeviation(samples) / 22.0).coerceIn(0.0, 1.0)
+
+    val sourceAverages = encounters
+        .filter { it.rssiDbm != null }
+        .groupBy { it.source }
+        .mapValues { (_, values) -> values.mapNotNull { it.rssiDbm?.toDouble() }.average() }
+
+    val crossSourceWeakness = if (sourceAverages.isEmpty()) {
+        0.0
+    } else {
+        sourceAverages.values.count { it <= -88.0 }.toDouble() / sourceAverages.size.toDouble()
+    }
+
+    return (
+        0.40 * weakSignalRate.coerceIn(0.0, 1.0) +
+            0.35 * volatility +
+            0.25 * crossSourceWeakness.coerceIn(0.0, 1.0)
+        ).coerceIn(0.0, 1.0)
+}
+
+private fun computeUnknownEmissionScore(encounters: List<Encounter>, windowMinutes: Double): Double {
+    val unknown = encounters.count {
+        it.source == EncounterSource.SDR ||
+            (it.source == EncounterSource.UNKNOWN_RF &&
+                !isDirectSignalChannel(it, "acoustic") &&
+                !isDirectSignalChannel(it, "magnetic"))
+    }
+    if (unknown == 0) return 0.0
+    val safeWindow = windowMinutes.coerceAtLeast(1.0)
+    return ((unknown.toDouble() / safeWindow) / 4.0).coerceIn(0.0, 1.0)
+}
+
+private fun parseEncounterPayload(encounter: Encounter): JSONObject? =
+    runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
+
+private fun transitionsFraction(values: List<String>): Double {
+    if (values.size < 2) return 0.0
+    var transitions = 0
+    for (i in 1 until values.size) {
+        if (values[i] != values[i - 1]) transitions += 1
+    }
+    return (transitions.toDouble() / (values.size - 1).toDouble()).coerceIn(0.0, 1.0)
+}
+
+private fun standardDeviation(values: List<Double>): Double {
+    if (values.size < 2) return 0.0
+    val mean = values.average()
+    val variance = values
+        .map { sample ->
+            val delta = sample - mean
+            delta * delta
+        }
+        .average()
+    if (!variance.isFinite()) return 0.0
+    return sqrt(variance)
+}
+
+private fun formatRiskScorePct(score: Double): String =
+    "${(score.coerceIn(0.0, 1.0) * 100.0).roundToInt()}%"
+
 private fun estimateWifiRangeMeters(encounter: Encounter): Double? {
     val rssi = encounter.rssiDbm ?: return null
     if (rssi >= 0) return null
@@ -6315,6 +7052,22 @@ private fun ensureTrackerNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureForeignSignalNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(FOREIGN_SIGNAL_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        FOREIGN_SIGNAL_ALERT_CHANNEL_ID,
+        "Foreign Signal Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when multi-channel foreign-signal risk crosses threshold"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun sendApproachNotification(context: android.content.Context, device: DeviceItem) {
     val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt().coerceIn(0, 100)
     val trend = device.approachDeltaMeters
@@ -6375,6 +7128,34 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
         .build()
 
     val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun sendForeignSignalRiskNotification(
+    context: android.content.Context,
+    risk: ForeignSignalRiskSignal
+) {
+    val title = "Foreign signal risk ${risk.level.name}"
+    val content = buildString {
+        append("Score ")
+        append(risk.score)
+        append("/100")
+        append(" • ")
+        append(String.format(Locale.US, "%.0f%% confidence", risk.confidence * 100.0))
+        append(" • ")
+        append(risk.summary)
+    }
+
+    val notification = NotificationCompat.Builder(context, FOREIGN_SIGNAL_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_error)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("foreign-signal:${risk.level.name}:${risk.score}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
