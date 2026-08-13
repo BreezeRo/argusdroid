@@ -34,6 +34,9 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Settings now include two explicit reset actions:
 	- Soft Reset: clears local encounters/devices and operational logs.
 	- Hard Reset: runs Soft Reset and also clears mesh network settings.
+- Settings includes app-wide backup/restore actions:
+	- Export Backup / Import Latest Backup for plain JSON snapshots.
+	- Export Encrypted Backup / Import Latest Encrypted for passphrase-protected snapshots.
 
 ### Detection and mapping
 
@@ -66,6 +69,9 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Mesh visualizer now overlays on Google Maps and shows peer state with link lines.
 - Mesh Soft Reset (All Devices) clears encounters/devices/logs across discovered peers and is intended to keep two or more mesh devices better synchronized.
 - Mesh-wide reset uses authenticated coordination with wipe notices (including initiator identity) and a temporary scan gate until all targeted peers complete.
+- Mesh-wide soft reset now exports backup snapshots before wiping on orchestrator and peers.
+- Android system notifications are emitted for mesh wipe lifecycle events (initiated/received/completed/incomplete/released) when notifications are permitted.
+- Android system notifications are emitted for peer connectivity transitions (connected/disconnected) when notifications are permitted.
 - Mesh supports optional accurate location sharing between linked peers:
 	- New toggle: Share Precise Location
 	- Shared coordinates are included in peer hello/status payloads when enabled.
@@ -99,6 +105,11 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 	- ON: map follows incoming device location updates while the details page is visible.
 	- OFF: map stays pinned to the last captured location.
 	- Updates naturally stop when leaving the details page.
+- Device Details and Encounter Details maps now support:
+	- Optional map controls (zoom controls, compass, map toolbar).
+	- Quick focus actions (device, local observer, both).
+	- Dual-pin rendering for local observer vs foreign device/encounter when both positions exist.
+	- Small automatic pin separation (about 2.5 ft) when positions overlap so both markers remain visible.
 
 ### Evasion posture controls
 
@@ -188,6 +199,8 @@ Current runtime asks include:
 - NEARBY_WIFI_DEVICES (API-dependent)
 - POST_NOTIFICATIONS (Android 13+ for approach/status alerts)
 
+Notification-driven features include approach/tracker alerts plus mesh wipe/peer-connectivity status notifications.
+
 If a sensor is disabled from Home, that scanner is skipped in both scheduled and live collection.
 
 ## Scheduling model
@@ -221,6 +234,13 @@ This behavior is intentional to support short intervals while still supporting p
 	- Approach notifications
 - Confirm POST_NOTIFICATIONS permission is granted (Android 13+).
 - Confirm detections provide enough recent samples to classify an approach trend.
+
+### Encrypted backup import/export issues
+
+- Encrypted backup actions require a passphrase with at least 8 characters.
+- Import requires the exact passphrase used at export time.
+- Ensure at least one encrypted snapshot exists in app internal files under backups/.
+- If import fails, verify the selected/latest file is an encrypted snapshot and was not manually edited.
 
 ### Tracker suspicion alerts are not appearing
 
