@@ -23,6 +23,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,6 +58,7 @@ import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
+import dev.argus.tracker.worker.ScanSettings
 import dev.argus.tracker.worker.WorkScheduler
 import kotlinx.coroutines.launch
 import androidx.navigation.compose.NavHost
@@ -70,6 +72,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 
+private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
 private const val DEVICES_ROUTE = "devices"
@@ -77,8 +80,9 @@ private const val ENCOUNTERS_ROUTE = "encounters"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 
-private val topLevelRoutes = setOf(SETTINGS_ROUTE, DETECTION_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE)
+private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+private const val LIVE_SCAN_INTERVAL_MS = 5000L
 
 private data class DeviceItem(
     val source: String,
@@ -102,11 +106,13 @@ fun ArgusApp() {
     var trackingActive by remember { mutableStateOf(false) }
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
+    var scanIntervalMinutes by remember { mutableStateOf(ScanSettings.getScanIntervalMinutes(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
+    val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
     val devices = remember(recent) {
         recent.groupBy { it.source.name to it.primaryId }
             .map { (key, encounters) ->
@@ -131,8 +137,15 @@ fun ArgusApp() {
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
     }
 
+    LaunchedEffect(context) {
+        while (true) {
+            trackingActive = WorkScheduler.isTrackingActive(context)
+            delay(1000)
+        }
+    }
+
     val backStack by navController.currentBackStackEntryAsState()
-    val currentRoute = backStack?.destination?.route ?: SETTINGS_ROUTE
+    val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -140,10 +153,10 @@ fun ArgusApp() {
             if (currentRoute in topLevelRoutes) {
                 NavigationBar {
                     NavigationBarItem(
-                        selected = currentRoute == SETTINGS_ROUTE,
-                        onClick = { navController.navigate(SETTINGS_ROUTE) },
-                        icon = { Text("S") },
-                        label = { Text("Settings") }
+                        selected = currentRoute == HOME_ROUTE,
+                        onClick = { navController.navigate(HOME_ROUTE) },
+                        icon = { Text("H") },
+                        label = { Text("Home") }
                     )
                     NavigationBarItem(
                         selected = currentRoute == DETECTION_ROUTE,
@@ -163,20 +176,27 @@ fun ArgusApp() {
                         icon = { Text("E") },
                         label = { Text("Encounters") }
                     )
+                    NavigationBarItem(
+                        selected = currentRoute == SETTINGS_ROUTE,
+                        onClick = { navController.navigate(SETTINGS_ROUTE) },
+                        icon = { Text("S") },
+                        label = { Text("Settings") }
+                    )
                 }
             }
         }
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = SETTINGS_ROUTE,
+            startDestination = HOME_ROUTE,
             modifier = Modifier
                 .padding(padding)
                 .padding(16.dp)
         ) {
-            composable(SETTINGS_ROUTE) {
-                SettingsPage(
+            composable(HOME_ROUTE) {
+                HomePage(
                     trackingActive = trackingActive,
+                    lastScanEpochMs = lastScanEpochMs,
                     sensorStatuses = sensorStatuses,
                     summary = summary,
                     onStart = {
@@ -227,12 +247,53 @@ fun ArgusApp() {
                 )
             }
 
+            composable(SETTINGS_ROUTE) {
+                AppSettingsPage(
+                    scanIntervalMinutes = scanIntervalMinutes,
+                    onScanIntervalSelected = { minutes ->
+                        scope.launch {
+                            scanIntervalMinutes = minutes
+                            ScanSettings.setScanIntervalMinutes(context, minutes)
+                            if (trackingActive) {
+                                WorkScheduler.stop(context)
+                                val restartResult = WorkScheduler.startAndVerify(context)
+                                trackingStartMessage = if (restartResult.success) {
+                                    "Scan interval updated to $minutes min and tracking restarted."
+                                } else {
+                                    "Scan interval saved, but restart failed: ${restartResult.message}"
+                                }
+                                trackingStartMessageIsError = !restartResult.success
+                                trackingActive = WorkScheduler.isTrackingActive(context)
+                            } else {
+                                trackingStartMessage = "Scan interval updated to $minutes min."
+                                trackingStartMessageIsError = false
+                            }
+                        }
+                    }
+                )
+            }
+
             composable(DETECTION_ROUTE) {
                 DetectionPage(
                     readinessItems = readinessItems,
                     encounters = recent,
                     onRefresh = {
                         readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                    },
+                    onLiveCollect = {
+                        runCatching {
+                            val batch = app.container.sensingService.collectBatch()
+                            app.container.repository.insertBatch(batch)
+                            viewModel.refreshSummary()
+                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                            if (batch.isEmpty()) {
+                                "Live scan completed: no detections this cycle."
+                            } else {
+                                "Live scan added ${batch.size} detections."
+                            }
+                        }.getOrElse { error ->
+                            "Live scan failed: ${error.message ?: "unknown error"}"
+                        }
                     },
                     onOpenReadinessSetting = { item ->
                         runCatching {
@@ -291,8 +352,9 @@ fun ArgusApp() {
 }
 
 @Composable
-private fun SettingsPage(
+private fun HomePage(
     trackingActive: Boolean,
+    lastScanEpochMs: Long?,
     sensorStatuses: List<SensorStatus>,
     summary: List<SourceSummary>,
     onStart: () -> Unit,
@@ -308,14 +370,18 @@ private fun SettingsPage(
         contentPadding = PaddingValues(bottom = 16.dp)
     ) {
         item {
-            Text("Argus Settings", style = MaterialTheme.typography.headlineMedium)
+            Text("Argus Home", style = MaterialTheme.typography.headlineMedium)
         }
         item {
-            Text("Tracking controls and source health.")
+            Text("Tracking controls and source health overview.")
         }
         item {
             Text(
-                text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
+                text = buildString {
+                    append(if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped")
+                    append(" | Last scan: ")
+                    append(lastScanEpochMs?.let(::formatEpoch) ?: "Never")
+                },
                 fontWeight = FontWeight.Medium
             )
         }
@@ -393,10 +459,53 @@ private fun SettingsPage(
 }
 
 @Composable
+private fun AppSettingsPage(
+    scanIntervalMinutes: Long,
+    onScanIntervalSelected: (Long) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Text("Settings", style = MaterialTheme.typography.headlineMedium)
+        }
+        item {
+            Text("Scan interval")
+        }
+        item {
+            Text("Current: every $scanIntervalMinutes minutes", fontWeight = FontWeight.Medium)
+        }
+        item {
+            Button(onClick = { expanded = true }) {
+                Text("Change interval")
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                ScanSettings.ALLOWED_INTERVALS_MINUTES.forEach { minutes ->
+                    DropdownMenuItem(
+                        text = { Text("Every $minutes minutes") },
+                        onClick = {
+                            onScanIntervalSelected(minutes)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+        item {
+            Text("Note: WorkManager minimum periodic interval is 15 minutes.")
+        }
+    }
+}
+
+@Composable
 private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     onRefresh: () -> Unit,
+    onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
@@ -455,18 +564,27 @@ private fun DetectionPage(
                 }
             }
         } else {
-            DetectionMapPage(encounters = encounters)
+            DetectionMapPage(
+                encounters = encounters,
+                onLiveCollect = onLiveCollect
+            )
         }
     }
 }
 
 @Composable
-private fun DetectionMapPage(encounters: List<Encounter>) {
+private fun DetectionMapPage(
+    encounters: List<Encounter>,
+    onLiveCollect: suspend () -> String
+) {
     val context = LocalContext.current
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
     val mapsApiKeyDiagnostic = remember(context) { getMapsApiKeyDiagnostic(context) }
     val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
     val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
+    var liveModeEnabled by rememberSaveable { mutableStateOf(false) }
+    var liveCollectInProgress by remember { mutableStateOf(false) }
+    var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
     val pins = remember(encounters) {
@@ -561,6 +679,21 @@ private fun DetectionMapPage(encounters: List<Encounter>) {
         }
     }
 
+    LaunchedEffect(liveModeEnabled) {
+        if (!liveModeEnabled) {
+            liveCollectInProgress = false
+            liveStatusMessage = "Live mode is off."
+            return@LaunchedEffect
+        }
+
+        while (liveModeEnabled) {
+            liveCollectInProgress = true
+            liveStatusMessage = onLiveCollect()
+            liveCollectInProgress = false
+            delay(LIVE_SCAN_INTERVAL_MS)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Map of Detections", fontWeight = FontWeight.Bold)
         Text("Pins show where encounters were recorded.")
@@ -572,6 +705,25 @@ private fun DetectionMapPage(encounters: List<Encounter>) {
                 }
             }
         } else {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
+                        Switch(
+                            checked = liveModeEnabled,
+                            onCheckedChange = { liveModeEnabled = it }
+                        )
+                    }
+                    Text("Runs a foreground scan every 5 seconds while this tab is open.")
+                    Text(
+                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
+                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
+                    )
+                }
+            }
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Map Diagnostics", fontWeight = FontWeight.Bold)

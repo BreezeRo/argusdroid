@@ -1,17 +1,56 @@
 package dev.argus.tracker
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import dev.argus.tracker.ui.ArgusApp
 
 class MainActivity : ComponentActivity() {
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestRequiredPermissionsIfNeeded()
         enableEdgeToEdge()
         setContent {
             ArgusApp()
         }
+    }
+
+    private fun requestRequiredPermissionsIfNeeded() {
+        val missing = requiredRuntimePermissions()
+            .filter { permission ->
+                ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
+            }
+
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    private fun requiredRuntimePermissions(): List<String> {
+        val permissions = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions += Manifest.permission.BLUETOOTH_SCAN
+            permissions += Manifest.permission.BLUETOOTH_CONNECT
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += Manifest.permission.NEARBY_WIFI_DEVICES
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+
+        return permissions
     }
 }

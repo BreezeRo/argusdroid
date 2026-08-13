@@ -88,6 +88,15 @@ object DetectionReadinessAdvisor {
             true
         }
 
+        val hasNearbyWifiDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
         val hasNotifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
                 context,
@@ -127,6 +136,15 @@ object DetectionReadinessAdvisor {
                 recommendedValue = "Granted",
                 currentValue = if (hasBleScan) "Granted" else "Missing",
                 isMissing = !hasBleScan,
+                openSettingsLabel = "Open App Permissions",
+                settingsIntent = appSettingsIntent
+            ),
+            DetectionReadinessItem(
+                id = "perm_nearby_wifi",
+                title = "Nearby Wi-Fi Devices Permission",
+                recommendedValue = "Granted",
+                currentValue = if (hasNearbyWifiDevices) "Granted" else "Missing",
+                isMissing = !hasNearbyWifiDevices,
                 openSettingsLabel = "Open App Permissions",
                 settingsIntent = appSettingsIntent
             ),

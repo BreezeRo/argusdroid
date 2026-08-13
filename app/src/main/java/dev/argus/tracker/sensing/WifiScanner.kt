@@ -20,6 +20,9 @@ class WifiScanner(
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             ?: return emptyList()
 
+        // Best-effort scan request; platform throttling may still return cached results.
+        val scanRequested = runCatching { wifiManager.startScan() }.getOrDefault(false)
+
         @Suppress("DEPRECATION")
         val results = runCatching { wifiManager.scanResults }.getOrNull() ?: emptyList()
         val now = System.currentTimeMillis()
@@ -35,12 +38,12 @@ class WifiScanner(
                 frequencyMhz = result.frequency,
                 lat = location?.lat,
                 lon = location?.lon,
-                rawPayloadJson = buildWifiPayload(result)
+                rawPayloadJson = buildWifiPayload(result, scanRequested)
             )
         }
     }
 
-    private fun buildWifiPayload(result: android.net.wifi.ScanResult): String {
+    private fun buildWifiPayload(result: android.net.wifi.ScanResult, scanRequested: Boolean): String {
         val payload = JSONObject()
             .put("ssid", result.SSID)
             .put("bssid", result.BSSID)
@@ -52,6 +55,7 @@ class WifiScanner(
             .put("isPasspoint", result.isPasspointNetwork)
             .put("is80211mcResponder", result.is80211mcResponder)
             .put("timestampMicros", result.timestamp)
+            .put("scanRequestAccepted", scanRequested)
 
         runCatching { payload.put("operatorFriendlyName", result.operatorFriendlyName?.toString()) }
         runCatching { payload.put("venueName", result.venueName?.toString()) }

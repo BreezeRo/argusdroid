@@ -19,7 +19,7 @@ object WorkScheduler {
     )
 
     fun start(context: Context) {
-        val request = buildPeriodicRequest()
+        val request = buildPeriodicRequest(context)
         val workManager = WorkManager.getInstance(context)
 
         workManager.enqueueUniquePeriodicWork(
@@ -31,7 +31,7 @@ object WorkScheduler {
 
     suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
         runCatching {
-            val request = buildPeriodicRequest()
+            val request = buildPeriodicRequest(context)
             val workManager = WorkManager.getInstance(context)
 
             val operation = workManager.enqueueUniquePeriodicWork(
@@ -57,7 +57,8 @@ object WorkScheduler {
                         info.state == WorkInfo.State.BLOCKED
                 }
                 if (hasActiveOrPending) {
-                    return@withContext StartResult(true, "Tracking started successfully.")
+                    val intervalMinutes = ScanSettings.getScanIntervalMinutes(context)
+                    return@withContext StartResult(true, "Tracking started successfully (${intervalMinutes} min interval).")
                 }
                 delay(200)
             }
@@ -69,10 +70,12 @@ object WorkScheduler {
         }
     }
 
-    private fun buildPeriodicRequest() =
-        PeriodicWorkRequestBuilder<ArgusWorker>(15, TimeUnit.MINUTES)
+    private fun buildPeriodicRequest(context: Context): androidx.work.PeriodicWorkRequest {
+        val intervalMinutes = ScanSettings.getScanIntervalMinutes(context)
+        return PeriodicWorkRequestBuilder<ArgusWorker>(intervalMinutes, TimeUnit.MINUTES)
             .setInitialDelay(1, TimeUnit.MINUTES)
             .build()
+    }
 
     fun stop(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
