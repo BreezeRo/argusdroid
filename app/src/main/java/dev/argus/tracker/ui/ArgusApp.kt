@@ -81,6 +81,7 @@ import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.MainActivity
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.data.AppBackupManager
 import dev.argus.tracker.data.chain.ChainMeshSnapshot
 import dev.argus.tracker.data.chain.ChainPeerState
 import dev.argus.tracker.data.chain.MeshForegroundServiceController
@@ -1301,6 +1302,52 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = seconds
                         ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
                     },
+                    onExportBackup = {
+                        val file = AppBackupManager.exportSnapshot(
+                            context = context,
+                            repository = app.container.repository,
+                            reason = "manual settings export"
+                        )
+                        "Backup exported: ${file.name}"
+                    },
+                    onImportLatestBackup = {
+                        val fileName = AppBackupManager.importLatestSnapshot(
+                            context = context,
+                            repository = app.container.repository
+                        )
+                        sensorGateSettings = readSensorGateSettings(context)
+                        chainLinkEnabled = ScanSettings.isChainLinkEnabled(context)
+                        chainNodeId = ScanSettings.getChainNodeId(context)
+                        chainDeviceName = ScanSettings.getChainDeviceName(context)
+                        chainSharedSecret = ScanSettings.getChainSharedSecret(context)
+                        chainAutoSyncEnabled = ScanSettings.isChainAutoSyncEnabled(context)
+                        chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
+                        chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
+                        chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
+                        chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+                        evasionProfile = runCatching { EvasionProfile.valueOf(ScanSettings.getEvasionProfile(context)) }
+                            .getOrDefault(EvasionProfile.BALANCED)
+                        evasionAutoEscalateEnabled = ScanSettings.isEvasionAutoEscalateEnabled(context)
+                        evasionEscalateDurationSeconds = ScanSettings.getEvasionAutoEscalateDurationSeconds(context)
+                        evasionJitterEnabled = ScanSettings.isEvasionJitterEnabled(context)
+                        evasionJitterPercent = ScanSettings.getEvasionJitterPercent(context)
+                        evasionBurstEnabled = ScanSettings.isEvasionBurstEnabled(context)
+                        evasionBurstWatchSeconds = ScanSettings.getEvasionBurstWatchSeconds(context)
+                        evasionBurstCooldownSeconds = ScanSettings.getEvasionBurstCooldownSeconds(context)
+                        evasionActionLog = ScanSettings.getEvasionActionLog(context, 25)
+                        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
+                        sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+                        sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
+                        sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+                        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
+                        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        alertLogs = AlertLogStore.read(context)
+                        ownedDeviceKeys = OwnedDeviceRegistry.read(context)
+                        MeshForegroundServiceController.ensureState(context)
+                        viewModel.refreshSummary()
+                        "Backup imported from $fileName"
+                    },
                     onSoftReset = {
                         scope.launch {
                             app.container.repository.clearEncounters()
@@ -1342,6 +1389,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 DetectionPage(
                     readinessItems = readinessItems,
                     encounters = recent,
+                    meshInsightEncounters = allEncounters,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
                     alertLogs = alertLogs,
@@ -2270,12 +2318,17 @@ private fun AppSettingsPage(
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
+    onExportBackup: suspend () -> String,
+    onImportLatestBackup: suspend () -> String,
     onSoftReset: () -> Unit,
     onHardReset: () -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     var expanded by remember { mutableStateOf(false) }
     var liveMapIntervalExpanded by remember { mutableStateOf(false) }
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
+    var backupActionInProgress by remember { mutableStateOf(false) }
+    var backupStatusMessage by remember { mutableStateOf<String?>(null) }
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
     val recommendedBySource = remember(sourceScanTimings) {
         sourceScanTimings.associate { timing ->
@@ -2515,6 +2568,55 @@ private fun AppSettingsPage(
                     }
                     Text("Notifications trigger when a tracked device changes into approaching state.")
                     Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
+                }
+            }
+        }
+        item {
+            Text("Backup and Restore", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Export creates an app-wide snapshot (encounters + settings/logs).")
+                    Text("Import restores the latest snapshot from internal app backup storage.")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            enabled = !backupActionInProgress,
+                            onClick = {
+                                scope.launch {
+                                    backupActionInProgress = true
+                                    backupStatusMessage = runCatching { onExportBackup() }
+                                        .getOrElse { error -> "Export failed: ${error.message ?: "unknown error"}" }
+                                    backupActionInProgress = false
+                                }
+                            }
+                        ) {
+                            Text(if (backupActionInProgress) "Working..." else "Export Backup")
+                        }
+                        Button(
+                            enabled = !backupActionInProgress,
+                            onClick = {
+                                scope.launch {
+                                    backupActionInProgress = true
+                                    backupStatusMessage = runCatching { onImportLatestBackup() }
+                                        .getOrElse { error -> "Import failed: ${error.message ?: "unknown error"}" }
+                                    backupActionInProgress = false
+                                }
+                            }
+                        ) {
+                            Text("Import Latest Backup")
+                        }
+                    }
+                    if (backupStatusMessage != null) {
+                        Text(backupStatusMessage!!)
+                    }
+                    Text("Backups are stored in internal app files under backups/.")
                 }
             }
         }
@@ -3112,6 +3214,7 @@ private fun ChainMeshVisualizer(
 private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
+    meshInsightEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     alertLogs: List<AlertLogEntry>,
@@ -3480,7 +3583,7 @@ private fun DetectionPage(
             )
         } else {
             DetectionMeshNetworkPage(
-                encounters = encounters,
+                encounters = meshInsightEncounters,
                 chainLinkEnabled = chainLinkEnabled,
                 chainNodeId = chainNodeId,
                 chainDeviceName = chainDeviceName,
@@ -3755,7 +3858,7 @@ private fun DetectionMeshNetworkPage(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("Blind-Spot Fill Insights", fontWeight = FontWeight.Bold)
-                    Text("Last 2h across mesh-visible devices. Shows who is spotting most, least, and what each node misses.")
+                    Text("Last 2h across mesh-visible devices. Credits observations to origin node (not relay sender) to reduce sync-forwarding bias.")
                     if (meshCoverageInsights.isEmpty()) {
                         Text("No enough mesh-attributed observations yet. Run sync and collect more detections.")
                     } else {
@@ -3953,7 +4056,7 @@ private fun DetectionMeshNetworkPage(
                     ) {
                         Text(if (wipeInProgress) "Resetting Mesh..." else "Mesh Soft Reset (All Devices)")
                     }
-                    Text("Clears encounters/devices/logs locally and on discovered peers with authenticated coordination to keep two (or more) mesh devices better synchronized.")
+                    Text("Backs up then clears encounters/devices/logs locally and on discovered peers with authenticated coordination to keep two (or more) mesh devices better synchronized.")
 
                     Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
                     OutlinedTextField(
@@ -4087,10 +4190,16 @@ private fun buildMeshCoverageInsights(
         .filter { it.timestampEpochMs >= cutoff }
         .forEach { encounter ->
             val originNode = when (encounter.provenance) {
-                EncounterProvenance.CHAIN_LINKED -> encounter.provenanceNodeId
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "peer-unknown"
+                EncounterProvenance.CHAIN_LINKED -> {
+                    encounter.provenanceOriginNodeId
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: parseProvenancePathNodeIds(encounter.provenancePathNodeIds).firstOrNull()
+                        ?: encounter.provenanceNodeId
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                        ?: "peer-unknown"
+                }
 
                 else -> localNodeId
             }

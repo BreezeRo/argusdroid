@@ -1,12 +1,21 @@
 package dev.argus.tracker.data.chain
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import dev.argus.tracker.data.AppBackupManager
 import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.data.computeEncounterFingerprint
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterProvenance
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.worker.ScanSettings
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -391,6 +400,13 @@ class LocalMeshChainLinkCoordinator(
         val initiatorName = ScanSettings.getChainDeviceName(context)
         val sessionId = "wipe-${System.currentTimeMillis()}-$nodeId"
         if (!ScanSettings.isChainLinkEnabled(context)) {
+            runCatching {
+                AppBackupManager.exportSnapshot(
+                    context = context,
+                    repository = repository,
+                    reason = "mesh-soft-reset local-only initiated by $initiatorName"
+                )
+            }
             repository.clearEncounters()
             repository.clearDevices()
             ScanSettings.clearOperationalLogs(context)
@@ -417,6 +433,13 @@ class LocalMeshChainLinkCoordinator(
 
         val sharedSecret = ScanSettings.getChainSharedSecret(context)
         if (sharedSecret.isBlank()) {
+            runCatching {
+                AppBackupManager.exportSnapshot(
+                    context = context,
+                    repository = repository,
+                    reason = "mesh-soft-reset local-only (missing mesh auth) initiated by $initiatorName"
+                )
+            }
             repository.clearEncounters()
             repository.clearDevices()
             ScanSettings.clearOperationalLogs(context)
@@ -457,6 +480,13 @@ class LocalMeshChainLinkCoordinator(
                 timestampEpochMs = System.currentTimeMillis()
             )
         )
+        runCatching {
+            AppBackupManager.exportSnapshot(
+                context = context,
+                repository = repository,
+                reason = "mesh-soft-reset orchestrator session=$sessionId initiated by $initiatorName"
+            )
+        }
         repository.clearEncounters()
         repository.clearDevices()
         ScanSettings.clearOperationalLogs(context)
@@ -585,8 +615,11 @@ class LocalMeshChainLinkCoordinator(
         markSynced: Boolean = false,
         markLinkRequest: Boolean = false
     ) {
+        var previousState: ChainPeerState? = null
+        var updatedStatus: ChainPeerStatus? = null
         synchronized(peerStatusByNode) {
             val existing = peerStatusByNode[nodeId]
+            previousState = existing?.state
             val updated = ChainPeerStatus(
                 nodeId = nodeId,
                 deviceName = deviceName?.trim()?.ifBlank { null } ?: existing?.deviceName,
@@ -602,7 +635,36 @@ class LocalMeshChainLinkCoordinator(
                 sharedLocationTimestampEpochMs = sharedLocationTimestampEpochMs ?: existing?.sharedLocationTimestampEpochMs
             )
             peerStatusByNode[nodeId] = updated
+            updatedStatus = updated
         }
+        maybeNotifyPeerConnectivityTransition(previousState, updatedStatus)
+    }
+
+    private fun maybeNotifyPeerConnectivityTransition(
+        previous: ChainPeerState?,
+        updated: ChainPeerStatus?
+    ) {
+        val current = updated?.state ?: return
+        if (previous == current) return
+        if (current != ChainPeerState.CONNECTED && previous != ChainPeerState.CONNECTED) return
+        if (!hasPostNotificationsPermission(context)) return
+
+        ensureConnectivityNotificationChannel(context)
+        val peerName = updated.deviceName?.takeIf { it.isNotBlank() } ?: updated.nodeId
+        val content = "$peerName @ ${updated.host}"
+        val title = if (current == ChainPeerState.CONNECTED) "Peer connected" else "Peer disconnected"
+
+        val notification = NotificationCompat.Builder(context, MESH_CONNECTIVITY_ALERT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(title)
+            .setContentText(content.take(180))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+
+        val notificationId = ("mesh-peer:${updated.nodeId}:${updated.lastSeenEpochMs}:$current").hashCode()
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
     }
 
     private fun publishSnapshot(
@@ -636,6 +698,35 @@ class LocalMeshChainLinkCoordinator(
                 wipeNotices.removeAt(wipeNotices.lastIndex)
             }
         }
+        maybeNotifyMeshWipeNotice(notice)
+    }
+
+    private fun maybeNotifyMeshWipeNotice(notice: MeshWipeNotice) {
+        if (!hasPostNotificationsPermission(context)) return
+        ensureMeshWipeNotificationChannel(context)
+
+        val initiator = notice.initiatorDeviceName?.takeIf { it.isNotBlank() } ?: notice.initiatorNodeId
+        val title = when {
+            notice.detail.contains("incomplete", ignoreCase = true) -> "Mesh wipe incomplete"
+            notice.detail.contains("completed", ignoreCase = true) -> "Mesh wipe completed"
+            notice.detail.contains("release", ignoreCase = true) -> "Mesh wipe released"
+            notice.detail.contains("received", ignoreCase = true) -> "Mesh wipe received"
+            notice.detail.contains("initiated", ignoreCase = true) -> "Mesh wipe initiated"
+            else -> "Mesh wipe update"
+        }
+        val content = "$initiator • ${notice.detail}"
+
+        val notification = NotificationCompat.Builder(context, MESH_WIPE_ALERT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle(title)
+            .setContentText(content.take(180))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+
+        val notificationId = ("mesh-wipe:${notice.sessionId}:${notice.timestampEpochMs}:${notice.detail}").hashCode()
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
     }
 
     private suspend fun discoverPeers(): List<DiscoveredPeer> = withContext(Dispatchers.IO) {
@@ -1225,6 +1316,13 @@ private class ChainLinkServer(
                         initiatorNodeId = requesterNodeId,
                         initiatorDeviceName = requesterDeviceName
                     )
+                    runCatching {
+                        AppBackupManager.exportSnapshot(
+                            context = context,
+                            repository = repository,
+                            reason = "mesh-soft-reset peer backup session=$sessionId initiated by ${requesterDeviceName ?: requesterNodeId}"
+                        )
+                    }
                     onWipeNotice(
                         MeshWipeNotice(
                             sessionId = sessionId,
@@ -1397,6 +1495,42 @@ private class ChainLinkServer(
     }
 }
 
+private fun hasPostNotificationsPermission(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+    return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
+}
+
+private fun ensureConnectivityNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(MESH_CONNECTIVITY_ALERT_CHANNEL_ID)
+    if (existing != null) return
+    val channel = NotificationChannel(
+        MESH_CONNECTIVITY_ALERT_CHANNEL_ID,
+        "Mesh Connectivity Alerts",
+        NotificationManager.IMPORTANCE_DEFAULT
+    ).apply {
+        description = "Notifies when mesh peers connect or disconnect."
+    }
+    manager.createNotificationChannel(channel)
+}
+
+private fun ensureMeshWipeNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(MESH_WIPE_ALERT_CHANNEL_ID)
+    if (existing != null) return
+    val channel = NotificationChannel(
+        MESH_WIPE_ALERT_CHANNEL_ID,
+        "Mesh Wipe Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Notifies when mesh-wide wipe/reset operations are initiated, received, and completed."
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private data class ChainAuthHeaders(
     val nodeId: String,
     val timestampMs: Long,
@@ -1481,6 +1615,8 @@ private const val CHAIN_SERVER_ACCEPT_TIMEOUT_MS = 1000
 private const val CHAIN_MAX_AUTH_CLOCK_SKEW_MS = 2 * 60 * 1000L
 private const val CHAIN_MAX_INCOMING_REQUESTS = 50
 private const val CHAIN_MAX_WIPE_NOTICES = 80
+private const val MESH_WIPE_ALERT_CHANNEL_ID = "argus_mesh_wipe_alerts"
+private const val MESH_CONNECTIVITY_ALERT_CHANNEL_ID = "argus_mesh_connectivity_alerts"
 
 private fun Encounter.withExportProvenance(localNodeId: String): Encounter {
     val isLocal = provenance == EncounterProvenance.LOCAL
