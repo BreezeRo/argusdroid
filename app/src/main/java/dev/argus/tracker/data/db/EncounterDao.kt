@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface EncounterDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(items: List<EncounterEntity>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(items: List<EncounterEntity>): List<Long>
 
     @Query(
         """
@@ -43,6 +43,18 @@ interface EncounterDao {
         """
     )
     suspend fun aggregateBySourceSince(sinceEpochMs: Long): List<SourceCountRow>
+
+    @Query(
+        """
+        SELECT *
+        FROM encounters
+        WHERE timestampEpochMs >= :sinceEpochMs
+            AND NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
+        ORDER BY timestampEpochMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun listSince(sinceEpochMs: Long, limit: Int): List<EncounterEntity>
 
     @Query("DELETE FROM encounters")
     suspend fun clearAllEncounters()

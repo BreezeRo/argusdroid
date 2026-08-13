@@ -16,9 +16,11 @@ class ArgusWorker(
             ?: DefaultAppContainer(applicationContext)
         val sensingService = container.sensingService
         val repository = container.repository
+        val chainLinkCoordinator = container.chainLinkCoordinator
 
         val batch = runCatching { sensingService.collectBatch() }.getOrDefault(emptyList())
         runCatching { repository.insertBatch(batch) }
+        runCatching { chainLinkCoordinator.syncNow() }
         runCatching { WorkScheduler.scheduleNextIfNeeded(applicationContext) }
         return Result.success()
     }

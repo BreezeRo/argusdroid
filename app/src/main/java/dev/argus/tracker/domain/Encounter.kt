@@ -1,5 +1,10 @@
 package dev.argus.tracker.domain
 
+enum class EncounterProvenance {
+    LOCAL,
+    CHAIN_LINKED
+}
+
 data class Encounter(
     val id: Long = 0,
     val timestampEpochMs: Long,
@@ -10,5 +15,8 @@ data class Encounter(
     val frequencyMhz: Int?,
     val lat: Double?,
     val lon: Double?,
-    val rawPayloadJson: String
+    val rawPayloadJson: String,
+    val encounterFingerprint: String? = null,
+    val provenance: EncounterProvenance = EncounterProvenance.LOCAL,
+    val provenanceNodeId: String? = null
 )

@@ -10,5 +10,6 @@ class ArgusApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = DefaultAppContainer(this)
+        container.chainLinkCoordinator.ensureServerRunning()
     }
 }

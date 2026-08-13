@@ -2,6 +2,8 @@ package dev.argus.tracker.data
 
 import android.content.Context
 import androidx.room.Room
+import dev.argus.tracker.data.chain.ChainLinkCoordinator
+import dev.argus.tracker.data.chain.LocalMeshChainLinkCoordinator
 import dev.argus.tracker.data.db.ArgusDatabase
 import dev.argus.tracker.sensing.ArgusSensingService
 import dev.argus.tracker.sensing.BleScanner
@@ -12,6 +14,7 @@ import dev.argus.tracker.sensing.WifiScanner
 interface AppContainer {
     val repository: EncounterRepository
     val sensingService: ArgusSensingService
+    val chainLinkCoordinator: ChainLinkCoordinator
 }
 
 class DefaultAppContainer(
@@ -22,11 +25,17 @@ class DefaultAppContainer(
             context,
             ArgusDatabase::class.java,
             "argus.db"
-        ).build()
+        )
+            .addMigrations(ArgusDatabase.MIGRATION_1_2)
+            .build()
     }
 
     override val repository: EncounterRepository by lazy {
         RoomEncounterRepository(db.encounterDao())
+    }
+
+    override val chainLinkCoordinator: ChainLinkCoordinator by lazy {
+        LocalMeshChainLinkCoordinator(context, repository)
     }
 
     override val sensingService: ArgusSensingService by lazy {
