@@ -272,6 +272,8 @@ private data class SensorGateSettings(
     val bluetoothEnabled: Boolean,
     val cellularEnabled: Boolean,
     val remoteIdEnabled: Boolean,
+    val uwbEnabled: Boolean,
+    val sdrEnabled: Boolean,
     val directAcousticEnabled: Boolean,
     val directMagneticEnabled: Boolean
 )
@@ -478,6 +480,8 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         bluetoothEnabled = ScanSettings.isBleSensorEnabled(context),
         cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
         remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context),
+        uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
+        sdrEnabled = ScanSettings.isSdrSensorEnabled(context),
         directAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context),
         directMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
     )
@@ -1332,9 +1336,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "bluetooth" -> ScanSettings.setBleSensorEnabled(context, enabled)
                                 "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
                                 "remote_id" -> ScanSettings.setRemoteIdSensorEnabled(context, enabled)
+                                "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
+                                "sdr" -> ScanSettings.setSdrSensorEnabled(context, enabled)
+                                "direct_acoustic" -> ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
+                                "direct_magnetic" -> ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
                             }
                             RemoteIdForegroundServiceController.ensureState(context)
                             sensorGateSettings = readSensorGateSettings(context)
+                            foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                            foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             trackingStartMessage = "Sensor gating updated."
                             trackingStartMessageIsError = false
@@ -2513,6 +2523,46 @@ private fun HomePage(
                             onCheckedChange = { onSensorGateChanged("remote_id", it) }
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("UWB")
+                        Switch(
+                            checked = sensorGateSettings.uwbEnabled,
+                            onCheckedChange = { onSensorGateChanged("uwb", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("SDR")
+                        Switch(
+                            checked = sensorGateSettings.sdrEnabled,
+                            onCheckedChange = { onSensorGateChanged("sdr", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Acoustic (Direct)")
+                        Switch(
+                            checked = sensorGateSettings.directAcousticEnabled,
+                            onCheckedChange = { onSensorGateChanged("direct_acoustic", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Magnetometer (Direct)")
+                        Switch(
+                            checked = sensorGateSettings.directMagneticEnabled,
+                            onCheckedChange = { onSensorGateChanged("direct_magnetic", it) }
+                        )
+                    }
                 }
             }
         }
@@ -3650,9 +3700,12 @@ private fun DetectionPage(
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
-    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
+    val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
     val foreignSignalRisk = remember(encounters, foreignSignalRiskEnabled) {
         if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(encounters) else null
+    }
+    val signalIntel = remember(encounters, foreignSignalRiskEnabled) {
+        buildSignalIntelSnapshot(encounters, foreignSignalRiskEnabled)
     }
 
     val encounterPins = remember(encounters) {
@@ -3940,6 +3993,12 @@ private fun DetectionPage(
                 }
             }
         } else if (selectedTab == 1) {
+            DetectionSignalIntelPage(
+                intel = signalIntel,
+                riskEnabled = foreignSignalRiskEnabled,
+                onRefresh = onRefresh
+            )
+        } else if (selectedTab == 2) {
             DetectionMapPage(
                 mapTitle = "Device Encounters Map",
                 mapDescription = "Pins show individual encounter points.",
@@ -3954,7 +4013,7 @@ private fun DetectionPage(
                 onLiveCollect = onLiveCollect,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
-        } else if (selectedTab == 2) {
+        } else if (selectedTab == 3) {
             val deviceMapPins = if (movingOnlyOnDeviceMap) {
                 estimatedDeviceLocationPins.filter { it.motionBadge == "MOVING" }
             } else {
@@ -3987,7 +4046,7 @@ private fun DetectionPage(
                 onLiveCollect = onLiveCollect,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
-        } else if (selectedTab == 3) {
+        } else if (selectedTab == 4) {
             DetectionLogsPage(
                 logs = alertLogs,
                 onClearLogs = onClearAlertLogs,
@@ -4019,6 +4078,214 @@ private fun DetectionPage(
                 onSyncNow = onSyncNow,
                 onWipeMeshData = onWipeMeshData
             )
+        }
+    }
+}
+
+private data class SignalIntelSnapshot(
+    val encounterWindowCount: Int,
+    val uwbEncounterCount: Int,
+    val uwbUniqueDeviceCount: Int,
+    val lastUwbEpochMs: Long?,
+    val gnssLocationSampleCount: Int,
+    val gnssInterferenceScore: Double,
+    val rfTextureScore: Double,
+    val rfRssiSampleCount: Int,
+    val acousticDirectSampleCount: Int,
+    val lastAcousticRmsDbFs: Double?,
+    val magneticDirectSampleCount: Int,
+    val lastMagneticMagnitudeMicroTesla: Double?,
+    val foreignRiskScore: Int?,
+    val foreignRiskLevel: ForeignSignalRiskLevel?,
+    val knowledgeGaps: List<String>
+)
+
+private fun buildSignalIntelSnapshot(
+    encounters: List<Encounter>,
+    foreignSignalRiskEnabled: Boolean
+): SignalIntelSnapshot {
+    val window = encounters.sortedByDescending { it.timestampEpochMs }.take(600)
+
+    val uwbEncounters = window.filter { it.source == EncounterSource.UWB }
+    val lastUwbEpochMs = uwbEncounters.maxOfOrNull { it.timestampEpochMs }
+
+    val gnssLocations = window.count { isValidLatLon(it.lat, it.lon) }
+    val gnssScore = computeGnssInterferenceScore(window)
+
+    val rfSamples = window.count { it.rssiDbm != null }
+    val rfTextureScore = computeRfTextureScore(window)
+
+    val acousticDirect = window
+        .asSequence()
+        .filter { isDirectSignalChannel(it, "acoustic") }
+        .toList()
+    val lastAcousticPayload = acousticDirect.maxByOrNull { it.timestampEpochMs }
+        ?.let(::parseEncounterPayload)
+    val lastAcousticRmsDbFs = lastAcousticPayload
+        ?.optDouble("rmsDbFs", Double.NaN)
+        ?.takeIf { it.isFinite() }
+
+    val magneticDirect = window
+        .asSequence()
+        .filter { isDirectSignalChannel(it, "magnetic") }
+        .toList()
+    val lastMagneticPayload = magneticDirect.maxByOrNull { it.timestampEpochMs }
+        ?.let(::parseEncounterPayload)
+    val lastMagneticMagnitudeMicroTesla = lastMagneticPayload
+        ?.optDouble("magnitudeMicroTesla", Double.NaN)
+        ?.takeIf { it.isFinite() }
+
+    val foreignRisk = if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(window) else null
+
+    val gaps = buildList {
+        if (uwbEncounters.isEmpty()) {
+            add("No UWB encounters in recent window. Verify UWB source toggle or ingest feed.")
+        }
+        if (gnssLocations < 4) {
+            add("Insufficient location samples for reliable GNSS interference inference.")
+        }
+        if (rfSamples < 6) {
+            add("Insufficient RSSI samples for stable RF texture scoring.")
+        }
+        if (acousticDirect.isEmpty()) {
+            add("No direct acoustic samples observed. Check microphone permission and direct acoustic toggle.")
+        }
+        if (magneticDirect.isEmpty()) {
+            add("No direct magnetometer samples observed. Check magnetometer availability and direct magnetic toggle.")
+        }
+        val sdrSeen = window.any { it.source == EncounterSource.SDR }
+        if (!sdrSeen) {
+            add("No SDR feed observations in recent window. Configure SDR ingest if expected.")
+        }
+    }
+
+    return SignalIntelSnapshot(
+        encounterWindowCount = window.size,
+        uwbEncounterCount = uwbEncounters.size,
+        uwbUniqueDeviceCount = uwbEncounters.map { it.primaryId }.toSet().size,
+        lastUwbEpochMs = lastUwbEpochMs,
+        gnssLocationSampleCount = gnssLocations,
+        gnssInterferenceScore = gnssScore,
+        rfTextureScore = rfTextureScore,
+        rfRssiSampleCount = rfSamples,
+        acousticDirectSampleCount = acousticDirect.size,
+        lastAcousticRmsDbFs = lastAcousticRmsDbFs,
+        magneticDirectSampleCount = magneticDirect.size,
+        lastMagneticMagnitudeMicroTesla = lastMagneticMagnitudeMicroTesla,
+        foreignRiskScore = foreignRisk?.score,
+        foreignRiskLevel = foreignRisk?.level,
+        knowledgeGaps = gaps
+    )
+}
+
+@Composable
+private fun DetectionSignalIntelPage(
+    intel: SignalIntelSnapshot,
+    riskEnabled: Boolean,
+    onRefresh: () -> Unit
+) {
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Signal Intel", style = MaterialTheme.typography.headlineSmall)
+                Button(onClick = onRefresh) {
+                    Text("Refresh")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Window", fontWeight = FontWeight.Bold)
+                    Text("Recent encounters sampled: ${intel.encounterWindowCount}")
+                    if (riskEnabled && intel.foreignRiskScore != null && intel.foreignRiskLevel != null) {
+                        Text("Foreign signal score: ${intel.foreignRiskScore}/100 (${intel.foreignRiskLevel.name})")
+                    } else {
+                        Text("Foreign signal scoring disabled in settings.")
+                    }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("UWB", fontWeight = FontWeight.Bold)
+                    Text("Encounters: ${intel.uwbEncounterCount}")
+                    Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
+                    Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("GNSS and RF Texture", fontWeight = FontWeight.Bold)
+                    Text("GNSS location samples: ${intel.gnssLocationSampleCount}")
+                    Text("GNSS interference score: ${formatRiskScorePct(intel.gnssInterferenceScore)}")
+                    Text("RF texture score: ${formatRiskScorePct(intel.rfTextureScore)}")
+                    Text("RF RSSI samples: ${intel.rfRssiSampleCount}")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Direct Acoustic", fontWeight = FontWeight.Bold)
+                    Text("Samples: ${intel.acousticDirectSampleCount}")
+                    Text(
+                        "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                    )
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
+                    Text("Samples: ${intel.magneticDirectSampleCount}")
+                    Text(
+                        "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
+                    )
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Knowledge Gaps", fontWeight = FontWeight.Bold)
+                    if (intel.knowledgeGaps.isEmpty()) {
+                        Text("No major coverage gaps detected in the current sampling window.")
+                    } else {
+                        intel.knowledgeGaps.forEach { gap ->
+                            Text("- $gap")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -5484,11 +5751,9 @@ private fun computeRecommendedIntervalSeconds(
             add("bt_classic")
         }
         if (sensorGateSettings.cellularEnabled) add("cellular")
-        if (sensorGateSettings.remoteIdEnabled) {
-            add("remote_id")
-            add("uwb")
-            add("sdr")
-        }
+        if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+        if (sensorGateSettings.uwbEnabled) add("uwb")
+        if (sensorGateSettings.sdrEnabled) add("sdr")
         if (sensorGateSettings.directAcousticEnabled) add("acoustic")
         if (sensorGateSettings.directMagneticEnabled) add("magnetic")
     }
@@ -5516,11 +5781,9 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
         add("bt_classic")
     }
     if (sensorGateSettings.cellularEnabled) add("cellular")
-    if (sensorGateSettings.remoteIdEnabled) {
-        add("remote_id")
-        add("uwb")
-        add("sdr")
-    }
+    if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+    if (sensorGateSettings.uwbEnabled) add("uwb")
+    if (sensorGateSettings.sdrEnabled) add("sdr")
     if (sensorGateSettings.directAcousticEnabled) add("acoustic")
     if (sensorGateSettings.directMagneticEnabled) add("magnetic")
 }
