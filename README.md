@@ -47,17 +47,24 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 	- Other sources: best observed encounter location.
 - Source-colored map pins and an in-app pin color legend.
 - Map controls:
-	- Live map updates (default ON)
+	- Live map updates are active on Device Location Map (default ON there)
 	- Live map update interval selection (1s through 1h)
 	- Pin limit selection (default 1000)
 	- Optional diagnostics panel (default OFF)
 	- Compact LIVE badge in header when live updates are enabled
+- Device Location Map supports a Moving Only filter toggle.
+- Tapping a moving device pin opens a dedicated single-device map with that device's historical path.
+- Device-location pin info windows use compact single-line summaries to reduce clipping on smaller displays.
 
 ### Mesh Network tab
 
 - Chain linking controls were moved from Settings into Detection > Mesh Network.
 - Peer operations include refresh, manual link requests, sync now, and peer-state inspection.
-- Mesh visualizer shows local node + peer labels and connection state.
+- Mesh visualizer now overlays on Google Maps and shows peer state with link lines.
+- Mesh supports optional accurate location sharing between linked peers:
+	- New toggle: Share Precise Location
+	- Shared coordinates are included in peer hello/status payloads when enabled.
+	- Mesh map uses shared precise peer coordinates when available and relative placement fallback for peers that do not share location.
 - Foreground mesh service keeps persistent channel behavior active more reliably while backgrounded when chain linking and persistent channel are both enabled.
 
 ### Additional source hooks
