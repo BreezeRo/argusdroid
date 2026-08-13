@@ -95,9 +95,11 @@ import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.sensing.CellTowerLookupService
 import dev.argus.tracker.sensing.DetectionLocation
 import dev.argus.tracker.sensing.LocationSnapshotProvider
+import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
 import dev.argus.tracker.sensing.TowerLookupResult
+import dev.argus.tracker.sensing.remoteid.RemoteIdPayloadParser
 import dev.argus.tracker.worker.ScanSettings
 import dev.argus.tracker.worker.WorkScheduler
 import kotlinx.coroutines.launch
@@ -698,6 +700,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         ScanSettings.setBleSensorEnabled(context, bluetoothEnabled)
         ScanSettings.setCellularSensorEnabled(context, cellularEnabled)
         ScanSettings.setRemoteIdSensorEnabled(context, remoteIdEnabled)
+        RemoteIdForegroundServiceController.ensureState(context)
         sensorGateSettings = readSensorGateSettings(context)
 
         applyEvasionCadence(
@@ -1224,6 +1227,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
                                 "remote_id" -> ScanSettings.setRemoteIdSensorEnabled(context, enabled)
                             }
+                            RemoteIdForegroundServiceController.ensureState(context)
                             sensorGateSettings = readSensorGateSettings(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             trackingStartMessage = "Sensor gating updated."
@@ -1770,15 +1774,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 val selectedPinLat = entry.arguments?.getString("lat")?.toDoubleOrNull()
                 val selectedPinLon = entry.arguments?.getString("lon")?.toDoubleOrNull()
                 val selectedPinTs = entry.arguments?.getString("ts")?.toLongOrNull()
-                val deviceEncounters = allEncounters.filter {
-                    it.source.name == source && it.primaryId == primaryId
+                val deviceEncounters = remember(allEncounters, source, primaryId) {
+                    allEncounters.filter { it.source.name == source && it.primaryId == primaryId }
                 }
-                val item = buildDeviceItems(
-                    encounters = allEncounters,
-                    approachDetectionEnabled = approachDetectionEnabled,
-                    ownedDeviceKeys = ownedDeviceKeys
-                )
-                    .firstOrNull { it.source == source && it.primaryId == primaryId }
+                val item = remember(deviceEncounters, source, primaryId, approachDetectionEnabled, ownedDeviceKeys) {
+                    buildSingleDeviceItem(
+                        source = source,
+                        primaryId = primaryId,
+                        groupedEncounters = deviceEncounters,
+                        approachDetectionEnabled = approachDetectionEnabled,
+                        ownedDeviceKeys = ownedDeviceKeys
+                    )
+                }
                 DeviceDetailPage(
                     item = item,
                     deviceEncounters = deviceEncounters,
@@ -5431,6 +5438,39 @@ private fun readGenericPayloadFields(rawPayloadJson: String): List<Pair<String, 
         }
 }
 
+private fun readRemoteIdFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    val normalized = RemoteIdPayloadParser.normalizeIncomingPayload(payload)
+    val decoded = normalized.decoded
+
+    val semantic = mutableListOf<Pair<String, String>>()
+    semantic += "UAS ID" to normalized.primaryId
+    normalized.secondaryId?.let { semantic += "Operator ID" to it }
+    decoded?.let {
+        semantic += "Message Type" to it.messageType
+        semantic += "Parse Confidence" to it.parseConfidence.name
+        it.droneLat?.let { value -> semantic += "Drone Lat" to formatCoordinate(value) }
+        it.droneLon?.let { value -> semantic += "Drone Lon" to formatCoordinate(value) }
+        it.operatorLat?.let { value -> semantic += "Operator Lat" to formatCoordinate(value) }
+        it.operatorLon?.let { value -> semantic += "Operator Lon" to formatCoordinate(value) }
+        it.altitudeMeters?.let { value -> semantic += "Altitude" to String.format(Locale.US, "%.1f m", value) }
+        it.speedMetersPerSecond?.let { value -> semantic += "Speed" to String.format(Locale.US, "%.1f m/s", value) }
+        it.headingDegrees?.let { value -> semantic += "Heading" to String.format(Locale.US, "%.0f deg", value) }
+        it.emergencyStatus?.takeIf { value -> value.isNotBlank() }?.let { value ->
+            semantic += "Emergency" to value
+        }
+    }
+
+    if (semantic.isNotEmpty()) {
+        return semantic
+    }
+
+    return readGenericPayloadFields(rawPayloadJson)
+}
+
+private fun formatCoordinate(value: Double): String =
+    String.format(Locale.US, "%.6f", value)
+
 private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
     when (encounter.source) {
         EncounterSource.WIFI -> "Wi-Fi Access Point Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
@@ -5438,7 +5478,7 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_CLASSIC -> "Bluetooth Classic Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.CELL -> "Cell Tower Details" to readCellTowerFields(encounter.rawPayloadJson)
-        EncounterSource.REMOTE_ID -> "Remote ID Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.REMOTE_ID -> "Remote ID Details" to readRemoteIdFields(encounter.rawPayloadJson)
         EncounterSource.UWB -> "UWB Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.SDR -> "SDR Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.UNKNOWN_RF -> "Unknown RF Details" to readGenericPayloadFields(encounter.rawPayloadJson)
@@ -5719,7 +5759,9 @@ private suspend fun resolveDeviceLocation(
 
         EncounterSource.WIFI,
         EncounterSource.BLUETOOTH_LE -> {
-            val inferred = inferLikelyDeviceLocation(encounters)
+            val inferred = withContext(Dispatchers.Default) {
+                inferLikelyDeviceLocation(encounters)
+            }
             if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
                 ResolvedDeviceLocation(
                     lat = inferred.lat,
@@ -6708,47 +6750,13 @@ private fun buildDeviceItems(
 ): List<DeviceItem> =
     encounters
         .groupBy { it.source.name to it.primaryId }
-        .map { (key, groupedEncounters) ->
-            val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
-            val owned = OwnedDeviceRegistry.keyFor(key.first, key.second) in ownedDeviceKeys
-            val approachSignal = if (approachDetectionEnabled) {
-                analyzeApproachSignal(groupedEncounters)
-            } else {
-                null
-            }
-            val trackerRisk = analyzeTrackerRisk(
-                encounters = groupedEncounters,
-                isOwned = owned,
-                approachSignal = approachSignal
-            )
-            val motionSignal = analyzeMotionSignal(groupedEncounters)
-            DeviceItem(
+        .mapNotNull { (key, groupedEncounters) ->
+            buildDeviceItemForGroup(
                 source = key.first,
                 primaryId = key.second,
-                secondaryId = latest.secondaryId,
-                seenCount = groupedEncounters.size,
-                lastSeenEpochMs = latest.timestampEpochMs,
-                lastRssiDbm = latest.rssiDbm,
-                lastFrequencyMhz = latest.frequencyMhz,
-                lastLat = latest.lat,
-                lastLon = latest.lon,
-                lastRawPayloadJson = latest.rawPayloadJson,
-                lastProvenance = latest.provenance,
-                lastProvenanceNodeId = latest.provenanceNodeId,
-                lastProvenanceOriginNodeId = latest.provenanceOriginNodeId,
-                lastProvenancePathNodeIds = latest.provenancePathNodeIds,
-                lastProvenanceReceivedAtEpochMs = latest.provenanceReceivedAtEpochMs,
-                lastProvenanceHopCount = latest.provenanceHopCount,
-                hasChainLinkedData = groupedEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
-                chainLinkedPeerCount = groupedEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
-                isApproaching = approachSignal?.isApproaching == true,
-                approachConfidence = approachSignal?.confidence,
-                approachDeltaMeters = approachSignal?.deltaMeters,
-                isInMotion = motionSignal?.isInMotion == true,
-                motionSpeedMps = motionSignal?.speedMps,
-                motionHeadingDeg = motionSignal?.headingDeg,
-                isOwned = owned,
-                trackerRisk = trackerRisk
+                groupedEncounters = groupedEncounters,
+                approachDetectionEnabled = approachDetectionEnabled,
+                ownedDeviceKeys = ownedDeviceKeys
             )
         }
         .let { deviceItems ->
@@ -6760,6 +6768,73 @@ private fun buildDeviceItems(
                 )
             }
         }
+
+private fun buildSingleDeviceItem(
+    source: String,
+    primaryId: String,
+    groupedEncounters: List<Encounter>,
+    approachDetectionEnabled: Boolean,
+    ownedDeviceKeys: Set<String>
+): DeviceItem? = buildDeviceItemForGroup(
+    source = source,
+    primaryId = primaryId,
+    groupedEncounters = groupedEncounters,
+    approachDetectionEnabled = approachDetectionEnabled,
+    ownedDeviceKeys = ownedDeviceKeys
+)
+
+private fun buildDeviceItemForGroup(
+    source: String,
+    primaryId: String,
+    groupedEncounters: List<Encounter>,
+    approachDetectionEnabled: Boolean,
+    ownedDeviceKeys: Set<String>
+): DeviceItem? {
+    if (groupedEncounters.isEmpty()) return null
+
+    val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
+    val owned = OwnedDeviceRegistry.keyFor(source, primaryId) in ownedDeviceKeys
+    val approachSignal = if (approachDetectionEnabled) {
+        analyzeApproachSignal(groupedEncounters)
+    } else {
+        null
+    }
+    val trackerRisk = analyzeTrackerRisk(
+        encounters = groupedEncounters,
+        isOwned = owned,
+        approachSignal = approachSignal
+    )
+    val motionSignal = analyzeMotionSignal(groupedEncounters)
+
+    return DeviceItem(
+        source = source,
+        primaryId = primaryId,
+        secondaryId = latest.secondaryId,
+        seenCount = groupedEncounters.size,
+        lastSeenEpochMs = latest.timestampEpochMs,
+        lastRssiDbm = latest.rssiDbm,
+        lastFrequencyMhz = latest.frequencyMhz,
+        lastLat = latest.lat,
+        lastLon = latest.lon,
+        lastRawPayloadJson = latest.rawPayloadJson,
+        lastProvenance = latest.provenance,
+        lastProvenanceNodeId = latest.provenanceNodeId,
+        lastProvenanceOriginNodeId = latest.provenanceOriginNodeId,
+        lastProvenancePathNodeIds = latest.provenancePathNodeIds,
+        lastProvenanceReceivedAtEpochMs = latest.provenanceReceivedAtEpochMs,
+        lastProvenanceHopCount = latest.provenanceHopCount,
+        hasChainLinkedData = groupedEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
+        chainLinkedPeerCount = groupedEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
+        isApproaching = approachSignal?.isApproaching == true,
+        approachConfidence = approachSignal?.confidence,
+        approachDeltaMeters = approachSignal?.deltaMeters,
+        isInMotion = motionSignal?.isInMotion == true,
+        motionSpeedMps = motionSignal?.speedMps,
+        motionHeadingDeg = motionSignal?.headingDeg,
+        isOwned = owned,
+        trackerRisk = trackerRisk
+    )
+}
 
 @Composable
 private fun DeviceSortDropdown(
@@ -6901,6 +6976,13 @@ private fun DeviceDetailPage(
             )
         }
     }
+    val topSpeedRecordMps = remember(item?.source, item?.primaryId) {
+        if (item == null) {
+            null
+        } else {
+            DeviceSpeedRecordStore.getRecordSpeedMps(context, item.source, item.primaryId)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -6983,8 +7065,7 @@ private fun DeviceDetailPage(
             right = {
                 DetailRow(
                     "Top Speed Record",
-                    DeviceSpeedRecordStore
-                        .getRecordSpeedMps(context, item.source, item.primaryId)
+                    topSpeedRecordMps
                         ?.let(::formatSpeedLabel)
                         ?: "n/a"
                 )

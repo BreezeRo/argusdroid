@@ -34,7 +34,7 @@ An encounter records:
 
 ## Scheduling Model
 
-Current implementation uses a periodic WorkManager task with 15-minute cadence. For true high-frequency active scans, move sensing into a foreground service with user-visible notification and battery-aware constraints.
+Current implementation uses WorkManager for broad multi-source scheduling and a dedicated foreground service loop for high-cadence Remote ID collection with a user-visible notification.
 
 ## Extensibility Points
 

@@ -17,6 +17,12 @@
 - Arbitrary RF spectrum scanning outside exposed radio stacks.
 - Universal drone Remote ID decoder API across all devices.
 
+## Remote ID status in this app
+
+- BLE-based Remote ID decoding is implemented as best-effort parsing from service/manufacturer payloads.
+- External decoder ingest is supported through a companion broadcast path into app-local JSONL feed storage.
+- Decoder coverage is partial and depends on payload visibility, format, and OEM BLE behavior.
+
 ## Path to advanced detection
 
 - Integrate external SDR hardware over USB OTG for broad RF detection.

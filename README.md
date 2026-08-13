@@ -81,9 +81,14 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 ### Additional source hooks
 
 - Remote ID ingest hook is active via JSONL feed file: app internal files path ingest/remote_id.jsonl.
+- Remote ID BLE decoding attempts are now performed from service/manufacturer data.
+- Remote ID companion ingest broadcast is available for external decoders (`dev.argus.tracker.action.INGEST_REMOTE_ID`).
+- Remote ID payloads are normalized to schema `argus.remote_id.v1` with decoded fields when available.
 - UWB ingest hook is active via JSONL feed file: app internal files path ingest/uwb.jsonl.
 - SDR ingest hook is active via JSONL feed file: app internal files path ingest/sdr.jsonl.
 - Each JSON line should be a single object containing at minimum an id (or primaryId) and optional fields such as timestampEpochMs, label, rssiDbm, frequencyMhz, lat, and lon.
+- Remote ID feed entries can also include semantic fields such as messageType, uasId, operatorId, droneLat, droneLon, altitudeMeters, speedMetersPerSecond, and headingDegrees.
+- Full ingest contract and companion intent format: docs/remote-id-ingest.md.
 
 ### Devices and encounters workflows
 
@@ -152,7 +157,7 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 ## Known limits and truth-in-advertising
 
 - Android does not expose universal arbitrary RF spectrum scanning APIs.
-- Remote ID scanner is currently a hook point and returns no encounters by default.
+- Remote ID decoding is best-effort and may be partial depending on device BLE stack visibility and payload format.
 - Cellular detail richness and update rate are device/OEM/version dependent.
 - Background behavior is constrained by power policy, Doze, and OEM optimizations.
 - Distance and approach estimates are best-effort due to RSSI variability and environment effects.
