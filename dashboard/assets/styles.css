@@ -342,6 +342,30 @@ tbody tr.encounter-row:focus-visible {
   color: var(--muted);
 }
 
+.info-detail-grid {
+  display: grid;
+  grid-template-columns: 138px 1fr;
+  gap: 0.28rem 0.62rem;
+}
+
+.info-detail-key {
+  color: #274246;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.info-detail-value {
+  color: #111;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.info-detail-empty {
+  color: #4e5f61;
+}
+
 .stack-list {
   list-style: none;
   margin: 0;
@@ -428,5 +452,10 @@ tbody tr.encounter-row:focus-visible {
   .device-detail-grid {
     grid-template-columns: 1fr;
     gap: 0.25rem;
+  }
+
+  .info-detail-grid {
+    grid-template-columns: 1fr;
+    gap: 0.22rem;
   }
 }

@@ -56,6 +56,7 @@ const PIN_LIMIT_OPTIONS = [100, 250, 500, 1000, 0];
 const HOTSPOT_LIMIT_OPTIONS = [40, 80, 120, 200, 0];
 const ENCOUNTER_LIMIT_OPTIONS = [600, 1200, 2500, 5000, 0];
 const LOCATION_MODES = ["PRECISE", "ZONED"];
+const MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160000;
 
 bootstrap();
 
@@ -492,9 +493,7 @@ function renderPeers(mesh) {
 }
 
 function initMaps() {
-  const center = state.data.encounters?.[0]
-    ? { lat: state.data.encounters[0].lat, lng: state.data.encounters[0].lng }
-    : { lat: 37.7749, lng: -122.4194 };
+  const center = getDashboardMapAnchorPosition(state.data.encounters) || { lat: 37.7749, lng: -122.4194 };
 
   state.map = new google.maps.Map(document.getElementById("map"), {
     center,
@@ -628,9 +627,10 @@ function renderMapControlsForTab(tabName, mapRef, hostId) {
     {
       label: "Center Latest",
       onClick: () => {
-        const latest = getFilteredEncounters()[0];
-        if (latest && isValidLatLng(Number(latest.lat), Number(latest.lng))) {
-          mapRef.setCenter({ lat: Number(latest.lat), lng: Number(latest.lng) });
+        const latest = getLatestAutoFocusEncounter(mapRef);
+        const point = latest ? getPrecisePosition(latest) : null;
+        if (point && isValidLatLng(Number(point.lat), Number(point.lng))) {
+          mapRef.setCenter({ lat: Number(point.lat), lng: Number(point.lng) });
           mapRef.setZoom(16);
         }
       }
@@ -706,6 +706,8 @@ function drawMarkers() {
   state.markers = [];
 
   const encounters = getMapRenderEncounters();
+  const anchor = getMapAutoFocusAnchor(state.map, encounters);
+  const focusPoints = [];
   const bounds = new google.maps.LatLngBounds();
 
   encounters.forEach((e) => {
@@ -719,14 +721,7 @@ function drawMarkers() {
       position: point,
       map: state.map,
       title: displayLabel,
-      icon: {
-        path: google.maps.SymbolPath.CIRCLE,
-        scale: 7,
-        fillColor: colorForSource(e.source),
-        fillOpacity: 0.9,
-        strokeColor: "#102122",
-        strokeWeight: 1
-      }
+      icon: getDeviceTypeIcon(e)
     });
 
     marker.addListener("click", () => {
@@ -736,13 +731,17 @@ function drawMarkers() {
     });
 
     state.markers.push(marker);
-    bounds.extend(marker.getPosition());
+    const markerPos = marker.getPosition();
+    if (markerPos && shouldAutoFocusPoint(point, anchor, MAP_AUTO_FOCUS_MAX_DISTANCE_METERS)) {
+      bounds.extend(markerPos);
+      focusPoints.push(point);
+    }
   });
 
-  if (encounters.length > 1) {
+  if (focusPoints.length > 1) {
     state.lastBoundsByTab.encounters = bounds;
     state.map.fitBounds(bounds);
-  } else if (encounters.length === 1) {
+  } else if (focusPoints.length === 1) {
     state.lastBoundsByTab.encounters = bounds;
     state.map.setCenter(bounds.getCenter());
     state.map.setZoom(15);
@@ -770,6 +769,8 @@ function drawHotspotRegions() {
 
   const hotspotLimit = state.mapPinLimits.hotspots;
   const regions = buildHotspotRegions(getFilteredEncounters(), hotspotLimit);
+  const anchor = getMapAutoFocusAnchor(state.hotspotMap);
+  const focusRegions = [];
   const bounds = new google.maps.LatLngBounds();
 
   regions.forEach((region) => {
@@ -803,15 +804,18 @@ function drawHotspotRegions() {
     });
 
     state.hotspotCircles.push(circle);
-    bounds.extend(region.center);
+    if (shouldAutoFocusPoint(region.center, anchor, MAP_AUTO_FOCUS_MAX_DISTANCE_METERS)) {
+      bounds.extend(region.center);
+      focusRegions.push(region);
+    }
   });
 
-  if (regions.length > 1) {
+  if (focusRegions.length > 1) {
     state.lastBoundsByTab.hotspots = bounds;
     state.hotspotMap.fitBounds(bounds);
-  } else if (regions.length === 1) {
+  } else if (focusRegions.length === 1) {
     state.lastBoundsByTab.hotspots = bounds;
-    state.hotspotMap.setCenter(regions[0].center);
+    state.hotspotMap.setCenter(focusRegions[0].center);
     state.hotspotMap.setZoom(12);
   } else {
     state.lastBoundsByTab.hotspots = null;
@@ -882,6 +886,8 @@ function drawDeviceLocations() {
   state.deviceMarkers = [];
 
   const deviceRows = buildLatestDeviceRows();
+  const anchor = getMapAutoFocusAnchor(state.deviceMap);
+  const focusRows = [];
   const noteEl = document.querySelector("#map-pane-device-locations .map-pane-note");
   if (noteEl) {
     if (deviceRows.length === 0) {
@@ -909,19 +915,71 @@ function drawDeviceLocations() {
     });
 
     state.deviceMarkers.push(marker);
-    bounds.extend(row.position);
+    if (shouldAutoFocusPoint(row.position, anchor, MAP_AUTO_FOCUS_MAX_DISTANCE_METERS)) {
+      bounds.extend(row.position);
+      focusRows.push(row);
+    }
   });
 
-  if (deviceRows.length > 1) {
+  if (focusRows.length > 1) {
     state.lastBoundsByTab["device-locations"] = bounds;
     state.deviceMap.fitBounds(bounds);
-  } else if (deviceRows.length === 1) {
+  } else if (focusRows.length === 1) {
     state.lastBoundsByTab["device-locations"] = bounds;
-    state.deviceMap.setCenter(deviceRows[0].position);
+    state.deviceMap.setCenter(focusRows[0].position);
     state.deviceMap.setZoom(15);
   } else {
     state.lastBoundsByTab["device-locations"] = null;
   }
+}
+
+function getDashboardMapAnchorPosition(encounters = null) {
+  const pool = Array.isArray(encounters) ? encounters : getFilteredEncounters();
+  const latestObserver = pool.find((encounter) =>
+    isValidLatLng(Number(encounter?.observerLat), Number(encounter?.observerLng))
+  );
+  if (!latestObserver) {
+    return null;
+  }
+  return {
+    lat: Number(latestObserver.observerLat),
+    lng: Number(latestObserver.observerLng)
+  };
+}
+
+function getMapAutoFocusAnchor(mapRef, encounters = null) {
+  const center = mapRef?.getCenter?.();
+  const centerLat = typeof center?.lat === "function" ? Number(center.lat()) : Number(center?.lat);
+  const centerLng = typeof center?.lng === "function" ? Number(center.lng()) : Number(center?.lng);
+  if (isValidLatLng(centerLat, centerLng)) {
+    return { lat: centerLat, lng: centerLng };
+  }
+  return getDashboardMapAnchorPosition(encounters);
+}
+
+function getLatestAutoFocusEncounter(mapRef = null) {
+  const encounters = getFilteredEncounters();
+  const anchor = getMapAutoFocusAnchor(mapRef, encounters);
+  if (!anchor) {
+    return null;
+  }
+  const nearby = encounters.find((encounter) => {
+    const point = getPrecisePosition(encounter);
+    return shouldAutoFocusPoint(point, anchor, MAP_AUTO_FOCUS_MAX_DISTANCE_METERS);
+  });
+  return nearby || null;
+}
+
+function shouldAutoFocusPoint(point, anchor, maxDistanceMeters) {
+  if (!point || !isValidLatLng(Number(point.lat), Number(point.lng))) {
+    return false;
+  }
+  if (!anchor || !isValidLatLng(Number(anchor.lat), Number(anchor.lng))) {
+    return false;
+  }
+
+  const distance = haversineMeters(Number(anchor.lat), Number(anchor.lng), Number(point.lat), Number(point.lng));
+  return Number.isFinite(distance) && distance <= maxDistanceMeters;
 }
 
 function buildLatestDeviceRows() {
@@ -1357,16 +1415,21 @@ function getDeviceTypeIcon(encounter) {
   }
 
   const fill = colorForSource(source);
+  const iconWidth = glyph.length > 6 ? 110 : 54;
+  const iconHeight = 28;
+  const rectWidth = iconWidth - 2;
+  const textY = iconHeight / 2 + 4;
+  const radius = Math.floor(iconHeight / 2) - 1;
   const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="54" height="28" viewBox="0 0 54 28">
-  <rect x="1" y="1" width="52" height="26" rx="13" ry="13" fill="${fill}" stroke="#102122" stroke-width="2"/>
-  <text x="27" y="18" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#0f1516">${glyph}</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="${iconWidth}" height="${iconHeight}" viewBox="0 0 ${iconWidth} ${iconHeight}">
+  <rect x="1" y="1" width="${rectWidth}" height="${iconHeight - 2}" rx="${radius}" ry="${radius}" fill="${fill}" stroke="#102122" stroke-width="2"/>
+  <text x="${iconWidth / 2}" y="${textY}" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#0f1516">${glyph}</text>
 </svg>`;
 
   const icon = {
     url: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
-    scaledSize: new google.maps.Size(54, 28),
-    anchor: new google.maps.Point(27, 14)
+    scaledSize: new google.maps.Size(iconWidth, iconHeight),
+    anchor: new google.maps.Point(iconWidth / 2, iconHeight / 2)
   };
   state.deviceIconCache.set(cacheKey, icon);
   return icon;
@@ -1385,7 +1448,7 @@ function shortGlyphForSource(source) {
     case "BLUETOOTH_CLASSIC":
       return "BT";
     case "REMOTE_ID":
-      return "RID";
+      return "RID / Drone";
     case "UWB":
       return "UWB";
     case "SDR":
@@ -1663,7 +1726,7 @@ function labelForSource(source) {
 }
 
 function buildInfoWindowHtml(encounter, displayLabel = buildEncounterMapLabel(encounter), locationBasis = null) {
-  const detailsMarkup = buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis, 48);
+  const detailsMarkup = buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis, 48, "info-window");
   return `
     <div style="color:#111; font-family:Arial,sans-serif; line-height:1.35; min-width:260px; max-width:360px; max-height:300px; overflow:auto;">
       ${detailsMarkup}
@@ -1681,26 +1744,30 @@ function showDeviceDetailsPage(encounter, locationBasis = null) {
 
   const label = buildEncounterMapLabel(encounter);
   subtitle.textContent = `Viewing all currently available fields for ${label}.`;
-  content.innerHTML = buildEncounterDetailsMarkup(encounter, label, locationBasis);
+  content.innerHTML = buildEncounterDetailsMarkup(encounter, label, locationBasis, 999, "panel");
   panel.hidden = false;
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis = null, maxRows = 999) {
+function buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis = null, maxRows = 999, tone = "panel") {
   const fields = collectEncounterDetails(encounter, displayLabel, locationBasis);
+  const keyClass = tone === "info-window" ? "info-detail-key" : "device-detail-key";
+  const valueClass = tone === "info-window" ? "info-detail-value" : "device-detail-value";
+  const gridClass = tone === "info-window" ? "info-detail-grid" : "device-detail-grid";
+  const emptyClass = tone === "info-window" ? "info-detail-empty" : "device-detail-empty";
   const rows = fields
     .slice(0, maxRows)
     .map(([key, value]) => `
-      <div class="device-detail-key">${escapeHtml(key)}</div>
-      <div class="device-detail-value">${escapeHtml(value)}</div>
+      <div class="${keyClass}">${escapeHtml(key)}</div>
+      <div class="${valueClass}">${escapeHtml(value)}</div>
     `)
     .join("");
 
   if (!rows) {
-    return '<div class="device-detail-empty">No details available for this encounter.</div>';
+    return `<div class="${emptyClass}">No details available for this encounter.</div>`;
   }
 
-  return `<div class="device-detail-grid">${rows}</div>`;
+  return `<div class="${gridClass}">${rows}</div>`;
 }
 
 function collectEncounterDetails(encounter, displayLabel, locationBasis = null) {
@@ -1734,6 +1801,11 @@ function collectEncounterDetails(encounter, displayLabel, locationBasis = null) 
   if (precise) {
     push("Display Lat", precise.lat.toFixed(6));
     push("Display Lng", precise.lng.toFixed(6));
+  }
+
+  const observerToDeviceMeters = getObserverToDeviceDistanceMeters(encounter, precise);
+  if (Number.isFinite(observerToDeviceMeters)) {
+    push("Observer to Device Range", formatDistanceFeetMiles(observerToDeviceMeters));
   }
 
   if (encounter?.source === "REMOTE_ID") {
@@ -1789,6 +1861,32 @@ function collectEncounterDetails(encounter, displayLabel, locationBasis = null) 
 
   appendPayloadDetails(details, encounter?.rawPayloadJson);
   return details;
+}
+
+function getObserverToDeviceDistanceMeters(encounter, displayPoint = null) {
+  const observerLat = Number(encounter?.observerLat);
+  const observerLng = Number(encounter?.observerLng);
+  if (!isValidLatLng(observerLat, observerLng)) {
+    return Number.NaN;
+  }
+
+  const point = displayPoint || getPrecisePosition(encounter);
+  if (!point || !isValidLatLng(Number(point.lat), Number(point.lng))) {
+    return Number.NaN;
+  }
+
+  return haversineMeters(observerLat, observerLng, Number(point.lat), Number(point.lng));
+}
+
+function formatDistanceFeetMiles(meters) {
+  const safeMeters = Number(meters);
+  if (!Number.isFinite(safeMeters) || safeMeters < 0) {
+    return "unknown";
+  }
+
+  const miles = safeMeters / 1609.344;
+  const feet = safeMeters / 0.3048;
+  return `${miles.toFixed(2)} mi (${feet.toFixed(0)} ft)`;
 }
 
 function appendPayloadDetails(details, rawPayloadJson) {
