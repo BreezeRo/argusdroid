@@ -15,6 +15,8 @@ const SOURCE_BY_KEY = Object.fromEntries(SOURCE_DEFS.map((item) => [item.key, it
 const state = {
   data: null,
   config: null,
+  dashboardStatus: "loading",
+  dashboardStatusMessage: "Connecting to live mesh feed...",
   enabledSources: new Set(SOURCE_DEFS.map((item) => item.key)),
   activeMapTab: "encounters",
   map: null,
@@ -42,10 +44,22 @@ const LOCATION_MODES = ["PRECISE", "ZONED"];
 bootstrap();
 
 async function bootstrap() {
+  state.data = emptyDashboardData();
+  renderDashboardStatus();
+
   state.config = await fetchDashboardConfig();
-  state.data = await fetchDashboardData();
+  try {
+    state.data = await fetchDashboardData();
+    state.dashboardStatus = "ready";
+    state.dashboardStatusMessage = "";
+  } catch (error) {
+    state.dashboardStatus = "error";
+    state.dashboardStatusMessage = error?.message || "Unable to load live mesh data.";
+    state.data = emptyDashboardData();
+  }
 
   renderFilters();
+  renderDashboardStatus();
   renderAll();
 
   try {
@@ -61,7 +75,16 @@ async function bootstrap() {
   }
 
   state.autoRefreshTimer = setInterval(async () => {
-    state.data = await fetchDashboardData();
+    try {
+      state.data = await fetchDashboardData();
+      state.dashboardStatus = "ready";
+      state.dashboardStatusMessage = "";
+    } catch (error) {
+      state.dashboardStatus = "error";
+      state.dashboardStatusMessage = error?.message || "Live refresh failed.";
+    }
+
+    renderDashboardStatus();
     renderAll();
     if (state.map) {
       drawMarkers();
@@ -124,24 +147,69 @@ function loadGoogleMaps(apiKey) {
 }
 
 async function fetchDashboardData() {
-  try {
-    const live = await fetchWithTimeout("/api/mesh/live", { cache: "no-store" }, 7000);
-    if (!live.ok) {
-      throw new Error(`Live API failed with ${live.status}`);
-    }
-    const payload = await live.json();
-    if (payload.meta?.live === true) {
-      return payload;
-    }
-    if (Array.isArray(payload.encounters) && payload.encounters.length > 0) {
-      return payload;
-    }
-  } catch (_error) {
-    // Fall through to sample data.
+  const live = await fetchWithTimeout("/api/mesh/live", { cache: "no-store" }, 7000);
+  if (!live.ok) {
+    throw new Error(`Live API failed with ${live.status}`);
   }
 
-  const sample = await fetchWithTimeout("data/sample-encounters.json", { cache: "no-store" }, 5000);
-  return sample.json();
+  const payload = await live.json();
+  if (payload.meta?.live === true) {
+    return normalizeLivePayload(payload);
+  }
+
+  if (Array.isArray(payload.encounters) && payload.encounters.length > 0) {
+    return normalizeLivePayload(payload);
+  }
+
+  throw new Error(payload.meta?.reason || "Live API returned no data.");
+}
+
+function normalizeLivePayload(payload) {
+  return {
+    generatedAt: payload.generatedAt || new Date().toISOString(),
+    mesh: payload.mesh || { discoveredPeers: 0, connectedPeers: 0, peers: [] },
+    encounters: Array.isArray(payload.encounters) ? payload.encounters : [],
+    meta: payload.meta || { live: false }
+  };
+}
+
+function emptyDashboardData() {
+  return {
+    generatedAt: new Date().toISOString(),
+    mesh: { discoveredPeers: 0, connectedPeers: 0, peers: [] },
+    encounters: [],
+    meta: { live: false }
+  };
+}
+
+function renderDashboardStatus() {
+  const host = document.getElementById("dashboard-status");
+  if (!host) {
+    return;
+  }
+
+  if (state.dashboardStatus === "ready") {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+
+  if (state.dashboardStatus === "loading") {
+    host.hidden = false;
+    host.className = "dashboard-status loading";
+    host.innerHTML = `
+      <span class="status-spinner" aria-hidden="true"></span>
+      <span>${state.dashboardStatusMessage || "Connecting to live mesh feed..."}</span>
+    `;
+    return;
+  }
+
+  host.hidden = false;
+  host.className = "dashboard-status error";
+  host.innerHTML = `
+    <strong>Live feed unavailable.</strong>
+    <span>${state.dashboardStatusMessage || "Unable to retrieve mesh encounters."}</span>
+  `;
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {

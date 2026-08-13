@@ -4,14 +4,18 @@ This repository now includes a static view-only dashboard in `dashboard/`.
 
 ## What it includes
 
-- Geospatial map with encounter markers (OpenStreetMap + Leaflet)
-- Source filters (WIFI, BLE, CELL, REMOTE_ID)
+- Google Maps-based geospatial views
+- Map tabs:
+	- Encounters Map
+	- Regional Hotspots
+	- Device Location Map
+- Source filters (WIFI, WIFI DIRECT, BLE, BT CLASSIC, CELL, REMOTE ID, UWB, SDR, UNKNOWN RF)
 - KPI summary cards
 - Latest encounters table
-- Regional hotspot ranking
+- Regional hotspot ranking and hotspot circles
 - Chain mesh peer status list
 - Source distribution bars
-- Live mesh API bridge: `GET /api/mesh/live` (served by `run-dashboard.ps1`)
+- Live mesh API bridge: `GET /api/mesh/live` (served by Node host)
 
 ## Run on your local machine and Wi-Fi
 
@@ -55,4 +59,5 @@ Notes:
 	2. `MAPS_API_KEY` (app key fallback)
 - Preferred launcher is Node/Fastify via `./scripts/run-dashboard-node.ps1` for better concurrency and reliability.
 - Legacy launcher `./scripts/run-dashboard.ps1` is still available as a fallback.
+- Dashboard no longer falls back to bundled sample geodata. If live feed is unavailable, it shows loading/error state explicitly.
 If your Android app key is restricted to Android package/SHA-1, it can work in-app but fail in browser JavaScript maps. Use a separate browser-allowed key via `DASHBOARD_MAPS_API_KEY`.

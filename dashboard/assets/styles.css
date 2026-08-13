@@ -152,6 +152,36 @@ h2 {
   margin-top: 0.4rem;
 }
 
+.dashboard-status {
+  margin-top: 0.65rem;
+  margin-bottom: 0.5rem;
+  border-radius: 10px;
+  border: 1px solid #2e5c5e;
+  background: rgba(12, 34, 35, 0.78);
+  padding: 0.55rem 0.72rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.86rem;
+}
+
+.dashboard-status.error {
+  border-color: #934a4a;
+  background: rgba(64, 20, 20, 0.75);
+  color: #ffd5d5;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.status-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(115, 233, 213, 0.28);
+  border-top-color: #73e9d5;
+  animation: spin 0.9s linear infinite;
+}
+
 .map-tab-btn {
   border: 1px solid #2e5c5e;
   background: rgba(12, 34, 35, 0.85);
@@ -325,6 +355,12 @@ th {
   to {
     transform: translateY(0);
     opacity: 1;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

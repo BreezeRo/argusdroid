@@ -275,6 +275,8 @@ This behavior is intentional to support short intervals while still supporting p
 - Optional port: `./scripts/run-dashboard-node.ps1 -Port 8090`
 - Live mesh config: `dashboard/config/mesh-config.json`
 - First run installs Node dependencies under `dashboard-server/node_modules`.
+- Map tabs: Encounters Map, Regional Hotspots, Device Location Map.
+- Dashboard is live-feed only (no built-in sample geodata fallback); it surfaces loading/error states when live mesh data is unavailable.
 
 When started, the script prints both localhost and LAN URLs so any device on the same Wi-Fi network can open the dashboard.
 To pull real app/mesh data, enable and configure peer IPs and shared secret in `dashboard/config/mesh-config.json`.
