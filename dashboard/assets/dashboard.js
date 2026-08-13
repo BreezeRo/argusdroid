@@ -31,14 +31,29 @@ const state = {
   deviceInfoWindow: null,
   autoRefreshTimer: null,
   trafficLayer: null,
-  mapTypeIndex: 0,
-  lastBounds: null,
-  mapPinLimit: 250,
+  mapTypeIndexByTab: {
+    encounters: 0,
+    hotspots: 0,
+    "device-locations": 0
+  },
+  lastBoundsByTab: {
+    encounters: null,
+    hotspots: null,
+    "device-locations": null
+  },
+  mapPinLimits: {
+    encounters: 250,
+    hotspots: 80,
+    "device-locations": 250
+  },
+  encounterLimit: 1200,
   mapLocationMode: "PRECISE"
 };
 
 const MAP_TYPES = ["roadmap", "hybrid", "terrain", "satellite"];
 const PIN_LIMIT_OPTIONS = [100, 250, 500, 1000, 0];
+const HOTSPOT_LIMIT_OPTIONS = [40, 80, 120, 200, 0];
+const ENCOUNTER_LIMIT_OPTIONS = [600, 1200, 2500, 5000, 0];
 const LOCATION_MODES = ["PRECISE", "ZONED"];
 
 bootstrap();
@@ -59,6 +74,7 @@ async function bootstrap() {
   }
 
   renderFilters();
+  renderDashboardControls();
   renderDashboardStatus();
   renderAll();
 
@@ -235,7 +251,37 @@ function renderAll() {
 }
 
 function getFilteredEncounters() {
-  return state.data.encounters.filter((e) => state.enabledSources.has(e.source));
+  const filtered = state.data.encounters
+    .filter((e) => state.enabledSources.has(e.source))
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  if (state.encounterLimit === 0) {
+    return filtered;
+  }
+  return filtered.slice(0, state.encounterLimit);
+}
+
+function renderDashboardControls() {
+  const host = document.getElementById("dashboard-controls");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "map-control-btn";
+  button.textContent = `Encounters: ${state.encounterLimit === 0 ? "All" : state.encounterLimit}`;
+  button.addEventListener("click", () => {
+    const currentIndex = ENCOUNTER_LIMIT_OPTIONS.indexOf(state.encounterLimit);
+    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % ENCOUNTER_LIMIT_OPTIONS.length : 0;
+    state.encounterLimit = ENCOUNTER_LIMIT_OPTIONS[nextIndex];
+    renderDashboardControls();
+    renderAll();
+    drawMarkers();
+    drawHotspotRegions();
+    drawDeviceLocations();
+  });
+  host.appendChild(button);
 }
 
 function renderFilters() {
@@ -490,94 +536,108 @@ function activateMapTab(tabName) {
       drawMarkers();
     }
   }, 40);
+
+  renderMapControls();
 }
 
 function renderMapControls() {
-  const host = document.getElementById("map-controls");
+  renderMapControlsForTab("encounters", state.map, "map-controls");
+  renderMapControlsForTab("hotspots", state.hotspotMap, "map-controls-hotspots");
+  renderMapControlsForTab("device-locations", state.deviceMap, "map-controls-device-locations");
+}
+
+function renderMapControlsForTab(tabName, mapRef, hostId) {
+  const host = document.getElementById(hostId);
+  if (!host || !mapRef) {
+    return;
+  }
   host.innerHTML = "";
 
   const controls = [
     {
-      id: "zoom-in",
       label: "Zoom +",
       onClick: () => {
-        const current = state.map.getZoom() || 12;
-        state.map.setZoom(current + 1);
+        const current = mapRef.getZoom() || 12;
+        mapRef.setZoom(current + 1);
       }
     },
     {
-      id: "zoom-out",
       label: "Zoom -",
       onClick: () => {
-        const current = state.map.getZoom() || 12;
-        state.map.setZoom(current - 1);
+        const current = mapRef.getZoom() || 12;
+        mapRef.setZoom(current - 1);
       }
     },
     {
-      id: "fit",
-      label: "Fit Markers",
+      label: tabName === "hotspots" ? "Fit Regions" : "Fit Markers",
       onClick: () => {
-        if (state.lastBounds) {
-          state.map.fitBounds(state.lastBounds);
+        const bounds = state.lastBoundsByTab[tabName];
+        if (bounds) {
+          mapRef.fitBounds(bounds);
         }
       }
     },
     {
-      id: "latest",
       label: "Center Latest",
       onClick: () => {
-        const latest = [...getFilteredEncounters()]
-          .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0];
-        if (latest) {
-          state.map.setCenter({ lat: latest.lat, lng: latest.lng });
-          state.map.setZoom(16);
+        const latest = getFilteredEncounters()[0];
+        if (latest && isValidLatLng(Number(latest.lat), Number(latest.lng))) {
+          mapRef.setCenter({ lat: Number(latest.lat), lng: Number(latest.lng) });
+          mapRef.setZoom(16);
         }
       }
     },
     {
-      id: "type",
-      label: `Map: ${MAP_TYPES[state.mapTypeIndex]}`,
+      label: `Map: ${MAP_TYPES[state.mapTypeIndexByTab[tabName]]}`,
       onClick: () => {
-        state.mapTypeIndex = (state.mapTypeIndex + 1) % MAP_TYPES.length;
-        const type = MAP_TYPES[state.mapTypeIndex];
-        state.map.setMapTypeId(type);
-        renderMapControls();
+        state.mapTypeIndexByTab[tabName] = (state.mapTypeIndexByTab[tabName] + 1) % MAP_TYPES.length;
+        const type = MAP_TYPES[state.mapTypeIndexByTab[tabName]];
+        mapRef.setMapTypeId(type);
+        renderMapControlsForTab(tabName, mapRef, hostId);
       }
     },
     {
-      id: "traffic",
-      label: "Traffic",
-      isToggle: true,
-      active: !!state.trafficLayer?.getMap(),
+      label: `Pins: ${state.mapPinLimits[tabName] === 0 ? "All" : state.mapPinLimits[tabName]}`,
       onClick: () => {
-        const showing = !!state.trafficLayer.getMap();
-        state.trafficLayer.setMap(showing ? null : state.map);
-        renderMapControls();
-      }
-    },
-    {
-      id: "pin-limit",
-      label: `Pins: ${state.mapPinLimit === 0 ? "All" : state.mapPinLimit}`,
-      onClick: () => {
-        const currentIndex = PIN_LIMIT_OPTIONS.indexOf(state.mapPinLimit);
-        const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % PIN_LIMIT_OPTIONS.length : 0;
-        state.mapPinLimit = PIN_LIMIT_OPTIONS[nextIndex];
-        renderMapControls();
-        drawMarkers();
-      }
-    },
-    {
-      id: "location-mode",
-      label: `Loc: ${state.mapLocationMode === "ZONED" ? "Zoned" : "Estimated Precise"}`,
-      onClick: () => {
-        const currentIndex = LOCATION_MODES.indexOf(state.mapLocationMode);
-        const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % LOCATION_MODES.length : 0;
-        state.mapLocationMode = LOCATION_MODES[nextIndex];
-        renderMapControls();
-        drawMarkers();
+        const options = tabName === "hotspots" ? HOTSPOT_LIMIT_OPTIONS : PIN_LIMIT_OPTIONS;
+        const currentIndex = options.indexOf(state.mapPinLimits[tabName]);
+        const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % options.length : 0;
+        state.mapPinLimits[tabName] = options[nextIndex];
+        renderMapControlsForTab(tabName, mapRef, hostId);
+        if (tabName === "hotspots") {
+          drawHotspotRegions();
+        } else if (tabName === "device-locations") {
+          drawDeviceLocations();
+        } else {
+          drawMarkers();
+        }
       }
     }
   ];
+
+  if (tabName === "encounters") {
+    controls.push(
+      {
+        label: "Traffic",
+        active: !!state.trafficLayer?.getMap(),
+        onClick: () => {
+          const showing = !!state.trafficLayer.getMap();
+          state.trafficLayer.setMap(showing ? null : state.map);
+          renderMapControlsForTab(tabName, mapRef, hostId);
+        }
+      },
+      {
+        label: `Loc: ${state.mapLocationMode === "ZONED" ? "Zoned" : "Estimated Precise"}`,
+        onClick: () => {
+          const currentIndex = LOCATION_MODES.indexOf(state.mapLocationMode);
+          const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % LOCATION_MODES.length : 0;
+          state.mapLocationMode = LOCATION_MODES[nextIndex];
+          renderMapControlsForTab(tabName, mapRef, hostId);
+          drawMarkers();
+        }
+      }
+    );
+  }
 
   controls.forEach((control) => {
     const button = document.createElement("button");
@@ -630,23 +690,24 @@ function drawMarkers() {
   });
 
   if (encounters.length > 1) {
-    state.lastBounds = bounds;
+    state.lastBoundsByTab.encounters = bounds;
     state.map.fitBounds(bounds);
   } else if (encounters.length === 1) {
-    state.lastBounds = bounds;
+    state.lastBoundsByTab.encounters = bounds;
     state.map.setCenter(bounds.getCenter());
     state.map.setZoom(15);
   } else {
-    state.lastBounds = null;
+    state.lastBoundsByTab.encounters = null;
   }
 }
 
 function getMapRenderEncounters() {
   const encounters = [...getFilteredEncounters()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-  if (state.mapPinLimit === 0) {
+  const pinLimit = state.mapPinLimits.encounters;
+  if (pinLimit === 0) {
     return encounters;
   }
-  return encounters.slice(0, state.mapPinLimit);
+  return encounters.slice(0, pinLimit);
 }
 
 function drawHotspotRegions() {
@@ -657,7 +718,8 @@ function drawHotspotRegions() {
   state.hotspotCircles.forEach((circle) => circle.setMap(null));
   state.hotspotCircles = [];
 
-  const regions = buildHotspotRegions(getFilteredEncounters());
+  const hotspotLimit = state.mapPinLimits.hotspots;
+  const regions = buildHotspotRegions(getFilteredEncounters(), hotspotLimit);
   const bounds = new google.maps.LatLngBounds();
 
   regions.forEach((region) => {
@@ -695,14 +757,18 @@ function drawHotspotRegions() {
   });
 
   if (regions.length > 1) {
+    state.lastBoundsByTab.hotspots = bounds;
     state.hotspotMap.fitBounds(bounds);
   } else if (regions.length === 1) {
+    state.lastBoundsByTab.hotspots = bounds;
     state.hotspotMap.setCenter(regions[0].center);
     state.hotspotMap.setZoom(12);
+  } else {
+    state.lastBoundsByTab.hotspots = null;
   }
 }
 
-function buildHotspotRegions(encounters) {
+function buildHotspotRegions(encounters, hotspotLimit = 80) {
   const grouped = new Map();
 
   encounters.forEach((encounter) => {
@@ -743,7 +809,7 @@ function buildHotspotRegions(encounters) {
       return { ...region, primarySource };
     })
     .sort((a, b) => b.count - a.count)
-    .slice(0, 80);
+    .slice(0, hotspotLimit === 0 ? Number.MAX_SAFE_INTEGER : hotspotLimit);
 }
 
 function haversineMeters(lat1, lng1, lat2, lng2) {
@@ -804,10 +870,14 @@ function drawDeviceLocations() {
   });
 
   if (deviceRows.length > 1) {
+    state.lastBoundsByTab["device-locations"] = bounds;
     state.deviceMap.fitBounds(bounds);
   } else if (deviceRows.length === 1) {
+    state.lastBoundsByTab["device-locations"] = bounds;
     state.deviceMap.setCenter(deviceRows[0].position);
     state.deviceMap.setZoom(15);
+  } else {
+    state.lastBoundsByTab["device-locations"] = null;
   }
 }
 
@@ -843,10 +913,11 @@ function buildLatestDeviceRows() {
   rows.sort((a, b) => Date.parse(b.encounter.timestamp) - Date.parse(a.encounter.timestamp));
   const spreadRows = spreadOverlappingDeviceRows(rows);
 
-  if (state.mapPinLimit === 0) {
+  const pinLimit = state.mapPinLimits["device-locations"];
+  if (pinLimit === 0) {
     return spreadRows;
   }
-  return spreadRows.slice(0, state.mapPinLimit);
+  return spreadRows.slice(0, pinLimit);
 }
 
 function resolveDeviceLocationLikeAndroid(source, encounters) {

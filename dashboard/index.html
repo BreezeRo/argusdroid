@@ -35,6 +35,7 @@
         <div class="panel-head">
           <h2>Geospatial Encounter Map</h2>
           <div class="filter-row" id="source-filters"></div>
+          <div class="filter-row dashboard-controls" id="dashboard-controls"></div>
         </div>
         <div id="dashboard-status" class="dashboard-status loading" role="status" aria-live="polite" hidden></div>
         <div class="map-tabs" role="tablist" aria-label="Map Views">
@@ -48,10 +49,12 @@
         </div>
         <div class="map-pane" id="map-pane-hotspots" role="tabpanel" aria-labelledby="tab-hotspots" hidden>
           <p class="small map-pane-note">Hotspots are grouped by regional buckets and drawn as circles that contain the farthest observed device edge.</p>
+          <div class="map-controls" id="map-controls-hotspots" aria-label="Hotspot Map Controls"></div>
           <div id="hotspot-map" role="application" aria-label="Regional hotspots map"></div>
         </div>
         <div class="map-pane" id="map-pane-device-locations" role="tabpanel" aria-labelledby="tab-device-locations" hidden>
           <p class="small map-pane-note">Latest known location per unique device identifier using mesh-provided device detail location fields only (no encounter-coordinate fallback).</p>
+          <div class="map-controls" id="map-controls-device-locations" aria-label="Device Location Map Controls"></div>
           <div id="device-map" role="application" aria-label="Device location map"></div>
         </div>
       </section>
