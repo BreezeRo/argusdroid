@@ -52,7 +52,8 @@ class MainActivity : ComponentActivity() {
     private fun requiredRuntimePermissions(): List<String> {
         val permissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.READ_PHONE_STATE
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.RECORD_AUDIO
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

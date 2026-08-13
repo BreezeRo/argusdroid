@@ -67,6 +67,8 @@ class ArgusSensingService(
         is CellularScanner -> "cellular"
         is RemoteIdScanner -> "remote_id"
         is ExternalFeedScanner -> scanner.sourceTypeKey
+        is AcousticSignatureScanner -> "acoustic"
+        is MagnetometerDisturbanceScanner -> "magnetic"
         else -> scanner::class.java.simpleName.lowercase()
     }
 }
