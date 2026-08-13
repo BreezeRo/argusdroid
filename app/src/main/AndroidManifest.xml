@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <permission
+        android:name="dev.argus.tracker.permission.INGEST_REMOTE_ID"
+        android:protectionLevel="normal" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
     <uses-feature android:name="android.hardware.uwb" android:required="false" />
@@ -47,6 +51,20 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".sensing.RemoteIdForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver
+            android:name=".sensing.RemoteIdIngestReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="dev.argus.tracker.permission.INGEST_REMOTE_ID">
+            <intent-filter>
+                <action android:name="dev.argus.tracker.action.INGEST_REMOTE_ID" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

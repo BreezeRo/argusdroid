@@ -8,6 +8,7 @@ import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -25,13 +26,14 @@ object WorkScheduler {
     fun start(context: Context) {
         ScanSettings.setTrackingEnabled(context, true)
         enqueueAccordingToInterval(context)
+        RemoteIdForegroundServiceController.ensureState(context)
     }
 
     suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
         runCatching {
-            val request = buildPeriodicRequest(context)
             ScanSettings.setTrackingEnabled(context, true)
             val operation = enqueueAccordingToInterval(context)
+            RemoteIdForegroundServiceController.ensureState(context)
 
             // Wait for enqueue operation completion before checking active state.
             operation.result.get()
@@ -102,6 +104,7 @@ object WorkScheduler {
 
     fun scheduleNextIfNeeded(context: Context) {
         if (!ScanSettings.isTrackingEnabled(context)) return
+        RemoteIdForegroundServiceController.ensureState(context)
         val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
         if (intervalSeconds >= ScanSettings.MIN_PERIODIC_INTERVAL_SECONDS) return
 
@@ -116,6 +119,7 @@ object WorkScheduler {
         ScanSettings.setTrackingEnabled(context, false)
         WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
         WorkManager.getInstance(context).cancelUniqueWork(ONE_TIME_WORK_NAME)
+        RemoteIdForegroundServiceController.ensureState(context)
     }
 
     suspend fun isTrackingActive(context: Context): Boolean = withContext(Dispatchers.IO) {

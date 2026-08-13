@@ -13,6 +13,7 @@ object ScanSettings {
     private const val KEY_SENSOR_BLE_ENABLED = "sensor_ble_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
+    private const val KEY_REMOTE_ID_INGEST_TOKEN = "remote_id_ingest_token"
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
@@ -188,6 +189,19 @@ object ScanSettings {
 
     fun setRemoteIdSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_REMOTE_ID_ENABLED, enabled)
+    }
+
+    fun getRemoteIdIngestToken(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_REMOTE_ID_INGEST_TOKEN, "")
+            .orEmpty()
+            .trim()
+
+    fun setRemoteIdIngestToken(context: Context, token: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_REMOTE_ID_INGEST_TOKEN, token.trim())
+            .apply()
     }
 
     fun isApproachDetectionEnabled(context: Context): Boolean =
