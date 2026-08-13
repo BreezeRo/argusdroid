@@ -1,52 +1,162 @@
 # Argusdroid
 
-Argusdroid is an Android mobile app for long-term device encounter intelligence. It captures what supported phone radios can observe, stores normalized encounter records on-device, and enables ongoing analysis of activity patterns over time.
+Argusdroid is an Android app for on-device radio encounter intelligence. It collects detections from supported phone radios, normalizes them into a shared encounter model, stores them locally, and surfaces trends through map and list workflows.
 
-## What It Does
+## Why this app exists
 
-- Detects nearby broadcast sources through available Android sensor/radio APIs.
-- Logs encounters in a persistent local datastore.
-- Aggregates encounter history for trend and source analysis.
-- Provides a modular architecture for advanced integrations.
+- Turn raw RF-adjacent phone telemetry into usable operational context.
+- Keep the default pipeline local-first and device-resident.
+- Provide a foundation for future advanced ingest sources (OEM SDKs, SDR, external decoders).
 
-## Current Capability Snapshot
+## Current feature set
 
-- Kotlin + Jetpack Compose Android app with Room-backed encounter persistence.
-- Multi-source sensing pipeline for Wi-Fi, BLE, and cellular data collection.
-- Location snapshot enrichment attached to supported encounter records.
-- Home, Detection, Devices, Encounters, and Settings app sections.
-- Tracking controls with status feedback, real-time status refresh, and last scan timestamp.
-- Per-sensor collection toggles on Home (Wi-Fi, Bluetooth LE, Cellular, Remote ID), persisted in app settings.
-- Detection readiness checks with recommended settings and deep links to system settings.
-- Detection map suite with Device Encounters Map and Device Location Map.
-- Device Location Map supports approximate locations across device types:
-	- CELL uses tower lookup with observed-location fallback.
-	- Wi-Fi/BLE use multi-observation range inference with observed-location fallback.
-	- Other sources use best available observed encounter location.
-- Source-colored map pins with in-app color legend by detected source type.
-- Map controls for live updates, pin limits, and optional diagnostics panel.
-- Live map mode defaults on and includes a compact in-header LIVE badge.
-- Devices and Encounters filtering by scope (Recent 100 or All), source, and text query.
-- Devices sorting by Last Seen or Most Seen.
-- Devices and Encounters support optional distance display and distance-based sorting.
-- Optional secondary-ID visibility toggles on Devices and Encounters lists.
-- Cellular entries labeled with explicit tower context (for example, CELL TOWER (LTE), CELL TOWER (NR)).
-- CELL encounter details parse and display tower/radio fields (radio type, operator, IDs, signal fields).
-- Optional cell tower location estimation via Mozilla Location Service with range estimate from device in miles/feet.
-- Approach detection analytics identify likely inbound devices from recent distance trends.
-- Approach detection controls in Settings, including optional local approach notifications.
-- Configurable scan interval in Settings, with WorkManager scheduling.
+### Core collection and storage
 
-## Reality Check: Platform Limits
+- Multi-source sensing for Wi-Fi, Bluetooth LE, and Cellular.
+- Encounter normalization into a shared model with timestamp, IDs, signal metadata, optional location, and raw payload JSON.
+- Room-backed local persistence for historical analysis.
+- Configurable scan interval with WorkManager-based scheduling.
 
-Stock Android phones can reliably support Wi-Fi and BLE environment scanning with proper permissions, but there are hard limits:
+### Home and readiness
 
-- Broad arbitrary RF spectrum scanning is not universally exposed by Android APIs.
-- Remote ID decoding is not available through one standard Android API across all devices.
+- Tracking controls: start, stop, refresh, and last scan visibility.
+- Sensor-level gating (Wi-Fi, Bluetooth LE, Cellular, Remote ID) persisted in app settings and enforced in scanners.
+- Readiness advisor with deep links to system settings for missing prerequisites.
+- Clear encounters and clear devices actions for rapid reset.
 
-Argusdroid includes integration hooks so external SDR hardware, OEM SDKs, and dedicated decoders can be added in later phases.
+### Detection and mapping
 
-## Tech Stack
+- Detection tabs:
+	- Readiness
+	- Device Encounters Map
+	- Device Location Map
+- Device Encounters Map shows direct encounter points.
+- Device Location Map shows best-effort approximate device locations:
+	- Cellular: tower lookup estimate with observed-location fallback.
+	- Wi-Fi and BLE: multi-observation range inference with observed-location fallback.
+	- Other sources: best observed encounter location.
+- Source-colored map pins and an in-app pin color legend.
+- Map controls:
+	- Live map updates (default ON)
+	- Pin limit selection (default 1000)
+	- Optional diagnostics panel (default OFF)
+	- Compact LIVE badge in header when live updates are enabled
+
+### Devices and encounters workflows
+
+- Scope filters (Recent 100 or All).
+- Source and text filtering.
+- Optional secondary ID visibility.
+- Optional distance display.
+- Optional distance-based sorting.
+- Device list sorting by last seen or most seen.
+
+### Cellular enrichment
+
+- Cellular entries labeled as tower context (for example CELL TOWER LTE/NR when available).
+- Parsed cellular detail fields in detail pages (radio type, operator, IDs, signal fields).
+- Optional tower geolocation lookup through Mozilla Location Service and range-from-device display.
+
+### Approach detection and alerts
+
+- Approach analytics estimate whether a device is moving closer using recent distance trend analysis.
+- Settings controls:
+	- Enable approach detection
+	- Enable approach notifications
+- Local notifications fire on transition into approaching state with per-device cooldown to reduce alert spam.
+
+## Known limits and truth-in-advertising
+
+- Android does not expose universal arbitrary RF spectrum scanning APIs.
+- Remote ID scanner is currently a hook point and returns no encounters by default.
+- Cellular detail richness and update rate are device/OEM/version dependent.
+- Background behavior is constrained by power policy, Doze, and OEM optimizations.
+- Distance and approach estimates are best-effort due to RSSI variability and environment effects.
+
+## Quick start
+
+1. Install Android Studio (latest stable).
+2. Install Android SDK Platform 36.
+3. Open this repository.
+4. Let Gradle sync complete.
+5. Connect a physical Android device.
+6. Run the app module.
+7. Grant requested runtime permissions when prompted.
+
+## Android device setup
+
+1. Enable Developer options (tap Build number 7 times).
+2. Enable USB debugging.
+3. Connect phone by USB and accept RSA prompt.
+4. Select device in Android Studio and run.
+
+## Maps API key setup (do not commit secrets)
+
+Google Maps SDK requires a key.
+
+Option A: set local property (recommended)
+
+- Add to local.properties:
+	- MAPS_API_KEY=your_real_key
+
+Option B: environment variable
+
+- Set MAPS_API_KEY in your shell/session before launching Gradle/Android Studio.
+
+The app manifest consumes MAPS_API_KEY via Gradle manifest placeholders.
+
+## Runtime permissions
+
+Current runtime asks include:
+
+- ACCESS_FINE_LOCATION
+- READ_PHONE_STATE
+- BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-dependent)
+- NEARBY_WIFI_DEVICES (API-dependent)
+- POST_NOTIFICATIONS (Android 13+ for approach/status alerts)
+
+If a sensor is disabled from Home, that scanner is skipped in both scheduled and live collection.
+
+## Scheduling model
+
+- Under 15 minutes: chained one-time work requests.
+- 15 minutes and above: periodic WorkManager requests.
+
+This behavior is intentional to support short intervals while still supporting periodic scheduling for longer cadences.
+
+## Troubleshooting
+
+### Map does not render
+
+- Confirm MAPS_API_KEY is present and not placeholder text.
+- Confirm Maps SDK + billing/API restrictions are correct in Google Cloud.
+- Confirm network connectivity and Play Services availability.
+- Turn on map diagnostics panel in Detection map controls.
+
+### Cellular detections are missing or sparse
+
+- Confirm READ_PHONE_STATE is granted.
+- Confirm Cellular sensor toggle is enabled on Home.
+- Check readiness items for missing prerequisites.
+- Note that some devices/carriers expose limited cell metadata.
+
+### No approach notifications
+
+- Confirm both settings are enabled:
+	- Approach detection
+	- Approach notifications
+- Confirm POST_NOTIFICATIONS permission is granted (Android 13+).
+- Confirm detections provide enough recent samples to classify an approach trend.
+
+## Repository layout
+
+- app: Android application module
+- docs/architecture.md: architecture and data flow
+- docs/capabilities-and-limits.md: practical platform constraints
+- src: reserved for shared or non-Android code
+- tests: repository-level test assets
+
+## Tech stack
 
 - Kotlin 2.x
 - Android Gradle Plugin 8.x
@@ -55,77 +165,14 @@ Argusdroid includes integration hooks so external SDR hardware, OEM SDKs, and de
 - WorkManager
 - Coroutines
 
-## Repository Layout
-
-- app: Android application module
-- docs/architecture.md: technical architecture and data flow
-- docs/capabilities-and-limits.md: practical sensing constraints and expansion path
-- src: reserved for shared or non-Android code
-- tests: repository-level test assets
-
-## Getting Started
-
-1. Install Android Studio (latest stable).
-2. Ensure Android SDK Platform 36 is installed.
-3. Open this repository in Android Studio.
-4. Let Gradle sync complete.
-5. Connect a physical Android device.
-6. Run the app module.
-
-## Android Install Guide (Short)
-
-1. On your Android phone, open Settings, then About phone, and tap Build number 7 times to enable Developer options.
-2. In Developer options, enable USB debugging.
-3. Connect the phone by USB and accept the RSA debug prompt on-device.
-4. In Android Studio, select your device and run the app module.
-5. If prompted, grant location, Bluetooth, Nearby Wi-Fi devices, and notification permissions so scanning can work.
-
-## Google Maps API Key (Do Not Commit)
-
-The detection map uses Google Maps SDK and needs an API key, but the key should not be hardcoded in source.
-
-Use either of these options:
-
-1. Add this to your local `local.properties` (not tracked by git):
-	`MAPS_API_KEY=your_real_key`
-2. Or set an environment variable before running Gradle/Android Studio:
-	`MAPS_API_KEY=your_real_key`
-
-The manifest reads `${MAPS_API_KEY}` through Gradle manifest placeholders, so no secret key needs to be committed.
-
-## Runtime Permissions
-
-Argusdroid requires runtime grants for key permissions, including location and radio access. Collection results are dependent on user grants, OEM behavior, and Android power policy.
-
-Notable current runtime asks include:
-
-- ACCESS_FINE_LOCATION
-- BLUETOOTH_SCAN / BLUETOOTH_CONNECT (API-dependent)
-- NEARBY_WIFI_DEVICES (API-dependent)
-- READ_PHONE_STATE (for cellular detail access)
-- POST_NOTIFICATIONS (for approach and status alerts on supported Android versions)
-
-If a sensor is disabled via Home toggles, that sensor is skipped during scheduled and live scans.
-
-For optional tower geolocation lookup, network access is required and location is best-effort based on external cell-ID databases.
-
-## Data and Privacy Guidance
+## Security and privacy notes
 
 Before production deployment, implement:
 
-- Clear user consent and transparent policy disclosures.
-- Retention limits and user-controlled deletion/export.
-- Encryption at rest for sensitive encounter payloads.
-- Audit-safe handling for collected telemetry.
-
-## Roadmap
-
-- Expand Remote ID ingestion and decoding for supported sources/feeds.
-- Add advanced map tooling (clustering, heatmaps, and time-window playback).
-- Add richer device history views and encounter drilldowns.
-- Add secure export workflows for encounter datasets.
-- Add anomaly detection and scheduled analytics summaries.
-- Add optional external SDR integration for expanded RF visibility.
+- Explicit user consent and policy disclosures.
+- Retention and deletion controls.
+- Encryption at rest for sensitive payloads.
+- Auditable telemetry handling.
 
 ## Documentation
 
