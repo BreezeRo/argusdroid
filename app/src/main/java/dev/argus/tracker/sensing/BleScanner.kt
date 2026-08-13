@@ -116,9 +116,12 @@ class BleScanner(
         val name = runCatching {
             if (hasBluetoothConnectPermission()) device?.name else null
         }.getOrNull()
+        val record = scanRecord
+        val classification = classifyBleDevice(name, record)
+        val remoteIdCandidate = isLikelyRemoteId(record)
         return Encounter(
             timestampEpochMs = System.currentTimeMillis(),
-            source = EncounterSource.BLUETOOTH_LE,
+            source = if (remoteIdCandidate) EncounterSource.REMOTE_ID else EncounterSource.BLUETOOTH_LE,
             primaryId = mac,
             secondaryId = name,
             rssiDbm = rssi,
@@ -134,6 +137,9 @@ class BleScanner(
         val name = runCatching {
             if (hasBluetoothConnectPermission()) result.device?.name else null
         }.getOrNull()
+        val record = result.scanRecord
+        val classification = classifyBleDevice(name, record)
+        val remoteIdCandidate = isLikelyRemoteId(record)
         val payload = JSONObject()
             .put("address", address)
             .put("name", name)
@@ -145,8 +151,9 @@ class BleScanner(
             .put("isConnectable", result.isConnectable)
             .put("periodicAdvertisingInterval", result.periodicAdvertisingInterval)
             .put("timestampNanos", result.timestampNanos)
+            .put("deviceClassHint", classification)
+            .put("remoteIdCandidate", remoteIdCandidate)
 
-        val record = result.scanRecord
         payload.put("advertiseFlags", record?.advertiseFlags)
         payload.put("txPowerLevel", record?.txPowerLevel)
         payload.put("serviceUuids", record?.serviceUuids?.joinToString(separator = ",") { it.toString() })
@@ -169,5 +176,43 @@ class BleScanner(
         } else {
             true
         }
+    }
+
+    private fun classifyBleDevice(name: String?, record: android.bluetooth.le.ScanRecord?): String {
+        val normalizedName = name.orEmpty().lowercase()
+        val uuids = record?.serviceUuids
+            ?.map { it.toString().lowercase() }
+            .orEmpty()
+
+        return when {
+            normalizedName.contains("tile") || normalizedName.contains("airtag") -> "tracker-tag"
+            normalizedName.contains("watch") || normalizedName.contains("band") -> "wearable"
+            normalizedName.contains("buds") || normalizedName.contains("head") || normalizedName.contains("audio") -> "audio"
+            normalizedName.contains("sensor") || uuids.any { it.contains("181a") } -> "environment-sensor"
+            uuids.any { it.contains("180d") } -> "heart-rate"
+            uuids.any { it.contains("180f") } -> "battery-powered"
+            uuids.any { it.contains("1812") } -> "input-device"
+            else -> "unknown"
+        }
+    }
+
+    private fun isLikelyRemoteId(record: android.bluetooth.le.ScanRecord?): Boolean {
+        val serviceUuids = record?.serviceUuids
+            ?.map { it.toString().lowercase() }
+            .orEmpty()
+        val remoteIdServiceMatch = serviceUuids.any {
+            it.contains("fffa") || it.contains("fffb") || it.contains("fffc")
+        }
+        if (remoteIdServiceMatch) return true
+
+        val manufacturerData = record?.manufacturerSpecificData ?: return false
+        for (index in 0 until manufacturerData.size()) {
+            val bytes = manufacturerData.valueAt(index) ?: continue
+            val ascii = runCatching { String(bytes, Charsets.US_ASCII) }.getOrDefault("")
+            if (ascii.contains("ASTM", ignoreCase = true) || ascii.contains("REMOTEID", ignoreCase = true)) {
+                return true
+            }
+        }
+        return false
     }
 }

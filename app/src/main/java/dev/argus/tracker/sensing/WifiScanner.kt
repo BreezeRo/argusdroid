@@ -46,10 +46,12 @@ class WifiScanner(
     }
 
     private fun buildWifiPayload(result: android.net.wifi.ScanResult, scanRequested: Boolean): String {
+        val roleHint = classifyWifiRole(result.SSID, result.capabilities)
         val payload = JSONObject()
             .put("ssid", result.SSID)
             .put("bssid", result.BSSID)
             .put("capabilities", result.capabilities)
+            .put("deviceRoleHint", roleHint)
             .put("channelWidth", result.channelWidth)
             .put("centerFreq0", result.centerFreq0)
             .put("centerFreq1", result.centerFreq1)
@@ -62,6 +64,20 @@ class WifiScanner(
         runCatching { payload.put("operatorFriendlyName", result.operatorFriendlyName?.toString()) }
         runCatching { payload.put("venueName", result.venueName?.toString()) }
         return payload.toString()
+    }
+
+    private fun classifyWifiRole(ssid: String?, capabilities: String?): String {
+        val name = ssid.orEmpty().lowercase()
+        val caps = capabilities.orEmpty().lowercase()
+        return when {
+            name.contains("drone") || name.contains("uav") -> "drone-control"
+            name.contains("cam") || name.contains("camera") -> "camera"
+            name.contains("print") -> "printer"
+            name.contains("tv") || name.contains("roku") || name.contains("chromecast") -> "media-device"
+            name.contains("iphone") || name.contains("pixel") || name.contains("galaxy") || name.contains("hotspot") -> "phone-hotspot"
+            caps.contains("[ibss]") -> "ad-hoc"
+            else -> "access-point"
+        }
     }
 
     private fun hasWifiPermissions(): Boolean {
