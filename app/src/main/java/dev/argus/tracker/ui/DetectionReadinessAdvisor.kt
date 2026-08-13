@@ -10,6 +10,8 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.hardware.Sensor
+import android.hardware.SensorManager
 import androidx.core.content.ContextCompat
 
 data class DetectionReadinessItem(
@@ -111,10 +113,24 @@ object DetectionReadinessAdvisor {
             true
         }
 
+        val hasMicrophone = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        val hasMagnetometer = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null
+
         val batteryOptimizationsIgnored = runCatching {
             val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
             pm?.isIgnoringBatteryOptimizations(context.packageName) == true
         }.getOrDefault(false)
+
+        val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
+        val ingestDir = context.filesDir.resolve("ingest")
+        val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
+        val sdrFeedConfigured = ingestDir.resolve("sdr.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
+        val uwbReady = uwbHardwareAvailable || uwbFeedConfigured
 
         return listOf(
             DetectionReadinessItem(
@@ -173,6 +189,15 @@ object DetectionReadinessAdvisor {
                     .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
             ),
             DetectionReadinessItem(
+                id = "perm_microphone",
+                title = "Microphone Permission",
+                recommendedValue = "Granted",
+                currentValue = if (hasMicrophone) "Granted" else "Missing",
+                isMissing = !hasMicrophone,
+                openSettingsLabel = "Open App Permissions",
+                settingsIntent = appSettingsIntent
+            ),
+            DetectionReadinessItem(
                 id = "setting_location_services",
                 title = "Location Services",
                 recommendedValue = "Enabled",
@@ -225,6 +250,38 @@ object DetectionReadinessAdvisor {
                 isMissing = !batteryOptimizationsIgnored,
                 openSettingsLabel = "Open Battery Optimization Settings",
                 settingsIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            ),
+            DetectionReadinessItem(
+                id = "sensor_magnetometer",
+                title = "Magnetometer Sensor Availability",
+                recommendedValue = "Available",
+                currentValue = if (hasMagnetometer) "Available" else "Not available",
+                isMissing = !hasMagnetometer,
+                openSettingsLabel = "Open Device Settings",
+                settingsIntent = Intent(Settings.ACTION_SETTINGS)
+            ),
+            DetectionReadinessItem(
+                id = "source_uwb",
+                title = "UWB Source Availability",
+                recommendedValue = "UWB hardware or UWB ingest feed available",
+                currentValue = when {
+                    uwbHardwareAvailable -> "UWB hardware available"
+                    uwbFeedConfigured -> "UWB ingest feed configured"
+                    else -> "No UWB source detected"
+                },
+                isMissing = !uwbReady,
+                openSettingsLabel = "Open System Settings",
+                settingsIntent = Intent(Settings.ACTION_SETTINGS)
+            ),
+            DetectionReadinessItem(
+                id = "source_sdr",
+                title = "SDR Ingest Feed",
+                recommendedValue = "SDR ingest feed configured",
+                currentValue = if (sdrFeedConfigured) "Configured" else "Not configured",
+                isMissing = !sdrFeedConfigured,
+                openSettingsLabel = "Open App Storage Settings",
+                settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.fromParts("package", context.packageName, null))
             )
         )
     }
