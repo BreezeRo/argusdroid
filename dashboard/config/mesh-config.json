@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "requesterNodeId": "dashboard-control-01",
+  "sharedSecret": "124",
+  "syncWindowMinutes": 120,
+  "peers": [
+    "10.0.0.107",
+    "10.0.0.243"
+  ]
+}

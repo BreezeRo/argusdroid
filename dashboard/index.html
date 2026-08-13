@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Argus Field Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <main class="layout">
+      <header class="hero panel reveal">
+        <div>
+          <p class="eyebrow">Argus Situational Intelligence</p>
+          <h1>View-Only Operations Dashboard</h1>
+          <p class="subtitle">
+            Live-style operational overview for nearby activity, chain mesh health,
+            and encounter geography.
+          </p>
+        </div>
+        <div class="mode-pill" title="No write controls are exposed">
+          View-Only
+        </div>
+      </header>
+
+      <section class="kpis reveal" id="kpi-cards" aria-label="Key Metrics"></section>
+
+      <section class="panel map-panel reveal">
+        <div class="panel-head">
+          <h2>Geospatial Encounter Map</h2>
+          <div class="filter-row" id="source-filters"></div>
+        </div>
+        <div class="map-tabs" role="tablist" aria-label="Map Views">
+          <button class="map-tab-btn active" id="tab-encounters" role="tab" aria-selected="true" data-map-tab="encounters">Encounters Map</button>
+          <button class="map-tab-btn" id="tab-hotspots" role="tab" aria-selected="false" data-map-tab="hotspots">Regional Hotspots</button>
+          <button class="map-tab-btn" id="tab-device-locations" role="tab" aria-selected="false" data-map-tab="device-locations">Device Location Map</button>
+        </div>
+        <div class="map-pane active" id="map-pane-encounters" role="tabpanel" aria-labelledby="tab-encounters">
+          <div class="map-controls" id="map-controls" aria-label="Map Controls"></div>
+          <div id="map" role="application" aria-label="Encounter map"></div>
+        </div>
+        <div class="map-pane" id="map-pane-hotspots" role="tabpanel" aria-labelledby="tab-hotspots" hidden>
+          <p class="small map-pane-note">Hotspots are grouped by regional buckets and drawn as circles that contain the farthest observed device edge.</p>
+          <div id="hotspot-map" role="application" aria-label="Regional hotspots map"></div>
+        </div>
+        <div class="map-pane" id="map-pane-device-locations" role="tabpanel" aria-labelledby="tab-device-locations" hidden>
+          <p class="small map-pane-note">Latest known location per unique device identifier using mesh-provided device detail location fields only (no encounter-coordinate fallback).</p>
+          <div id="device-map" role="application" aria-label="Device location map"></div>
+        </div>
+      </section>
+
+      <section class="grid-two">
+        <article class="panel reveal">
+          <h2>Latest Encounters</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Label</th>
+                  <th>Signal</th>
+                  <th>Distance</th>
+                </tr>
+              </thead>
+              <tbody id="encounter-rows"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel reveal">
+          <h2>Regional Hotspots</h2>
+          <ul id="hotspot-list" class="stack-list"></ul>
+        </article>
+      </section>
+
+      <section class="grid-two">
+        <article class="panel reveal">
+          <h2>Source Mix</h2>
+          <div id="source-bars" class="bars"></div>
+        </article>
+
+        <article class="panel reveal">
+          <h2>Chain Mesh Peers</h2>
+          <ul id="peer-list" class="stack-list"></ul>
+        </article>
+      </section>
+    </main>
+
+    <script src="assets/dashboard.js" defer></script>
+  </body>
+</html>

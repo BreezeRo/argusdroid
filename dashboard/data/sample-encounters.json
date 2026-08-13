@@ -1,0 +1,148 @@
+{
+  "generatedAt": "2026-08-13T16:10:00Z",
+  "mesh": {
+    "discoveredPeers": 12,
+    "connectedPeers": 5,
+    "peers": [
+      { "name": "Argus-Field-01", "state": "CONNECTED", "lastSeen": "Seen 14s ago" },
+      { "name": "Argus-Relay-02", "state": "CONNECTED", "lastSeen": "Seen 38s ago" },
+      { "name": "Argus-Drone-07", "state": "REQUESTED", "lastSeen": "Seen 1m ago" },
+      { "name": "Argus-Mobile-09", "state": "DISCOVERED", "lastSeen": "Seen 2m ago" },
+      { "name": "Argus-Edge-04", "state": "FAILED", "lastSeen": "Seen 6m ago" }
+    ]
+  },
+  "encounters": [
+    {
+      "id": "enc-001",
+      "timestamp": "2026-08-13T15:58:02Z",
+      "source": "WIFI",
+      "label": "CafeMesh-5G",
+      "signalDbm": -54,
+      "distanceMeters": 8.3,
+      "lat": 37.7756,
+      "lng": -122.4189,
+      "zone": "Downtown Core"
+    },
+    {
+      "id": "enc-002",
+      "timestamp": "2026-08-13T15:56:34Z",
+      "source": "BLE",
+      "label": "Tile Beacon A31",
+      "signalDbm": -68,
+      "distanceMeters": 16.4,
+      "lat": 37.7741,
+      "lng": -122.4204,
+      "zone": "Transit Plaza"
+    },
+    {
+      "id": "enc-003",
+      "timestamp": "2026-08-13T15:53:47Z",
+      "source": "CELL",
+      "label": "Carrier LTE Site 112",
+      "signalDbm": -74,
+      "distanceMeters": 350.0,
+      "lat": 37.7792,
+      "lng": -122.4147,
+      "zone": "Market Corridor"
+    },
+    {
+      "id": "enc-004",
+      "timestamp": "2026-08-13T15:50:18Z",
+      "source": "REMOTE_ID",
+      "label": "UAS RID-9C22",
+      "signalDbm": -61,
+      "distanceMeters": 91.8,
+      "lat": 37.7728,
+      "lng": -122.4232,
+      "zone": "Civic Green"
+    },
+    {
+      "id": "enc-005",
+      "timestamp": "2026-08-13T15:47:09Z",
+      "source": "WIFI",
+      "label": "CorpNet-Guest",
+      "signalDbm": -63,
+      "distanceMeters": 12.2,
+      "lat": 37.7773,
+      "lng": -122.4162,
+      "zone": "Market Corridor"
+    },
+    {
+      "id": "enc-006",
+      "timestamp": "2026-08-13T15:45:02Z",
+      "source": "BLE",
+      "label": "HealthBand-5F",
+      "signalDbm": -72,
+      "distanceMeters": 21.6,
+      "lat": 37.7731,
+      "lng": -122.4175,
+      "zone": "Downtown Core"
+    },
+    {
+      "id": "enc-007",
+      "timestamp": "2026-08-13T15:40:38Z",
+      "source": "CELL",
+      "label": "Carrier NR gNodeB 84",
+      "signalDbm": -66,
+      "distanceMeters": 280.3,
+      "lat": 37.7814,
+      "lng": -122.4211,
+      "zone": "North Grid"
+    },
+    {
+      "id": "enc-008",
+      "timestamp": "2026-08-13T15:34:55Z",
+      "source": "REMOTE_ID",
+      "label": "UAS RID-2B10",
+      "signalDbm": -69,
+      "distanceMeters": 114.4,
+      "lat": 37.7705,
+      "lng": -122.4196,
+      "zone": "Transit Plaza"
+    },
+    {
+      "id": "enc-009",
+      "timestamp": "2026-08-13T15:31:09Z",
+      "source": "WIFI",
+      "label": "MetroLink",
+      "signalDbm": -58,
+      "distanceMeters": 10.8,
+      "lat": 37.7761,
+      "lng": -122.4227,
+      "zone": "Civic Green"
+    },
+    {
+      "id": "enc-010",
+      "timestamp": "2026-08-13T15:26:41Z",
+      "source": "BLE",
+      "label": "SmartTag-C9",
+      "signalDbm": -65,
+      "distanceMeters": 14.6,
+      "lat": 37.7783,
+      "lng": -122.4192,
+      "zone": "Downtown Core"
+    },
+    {
+      "id": "enc-011",
+      "timestamp": "2026-08-13T15:22:16Z",
+      "source": "CELL",
+      "label": "Carrier LTE Site 118",
+      "signalDbm": -80,
+      "distanceMeters": 520.7,
+      "lat": 37.7699,
+      "lng": -122.4258,
+      "zone": "West Arc"
+    },
+    {
+      "id": "enc-012",
+      "timestamp": "2026-08-13T15:16:07Z",
+      "source": "REMOTE_ID",
+      "label": "UAS RID-EE31",
+      "signalDbm": -64,
+      "distanceMeters": 76.5,
+      "lat": 37.7802,
+      "lng": -122.4176,
+      "zone": "North Grid"
+    }
+  ]
+}
