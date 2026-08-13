@@ -194,6 +194,9 @@ private data class DeviceItem(
     val isApproaching: Boolean,
     val approachConfidence: Double?,
     val approachDeltaMeters: Double?,
+    val isInMotion: Boolean,
+    val motionSpeedMps: Double?,
+    val motionHeadingDeg: Double?,
     val isOwned: Boolean,
     val trackerRisk: TrackerRiskSignal?
 )
@@ -202,6 +205,13 @@ private data class ApproachSignal(
     val isApproaching: Boolean,
     val confidence: Double,
     val deltaMeters: Double
+)
+
+private data class MotionSignal(
+    val isInMotion: Boolean,
+    val speedMps: Double,
+    val headingDeg: Double,
+    val sampleCount: Int
 )
 
 private data class SensorGateSettings(
@@ -230,6 +240,7 @@ private data class DeviceLocationCandidate(
     val hasChainLinkedData: Boolean = false,
     val chainLinkedPeerCount: Int = 0,
     val approachSignal: ApproachSignal? = null,
+    val motionSignal: MotionSignal? = null,
     val trackerRisk: TrackerRiskSignal? = null,
     val isOwned: Boolean = false
 )
@@ -346,6 +357,39 @@ private object ApproachTrackStore {
         val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
         obj.put(key, epochMs.coerceAtLeast(0L))
         prefs.edit().putString(KEY_APPROACH_TRACK_STARTS, obj.toString()).apply()
+    }
+}
+
+private object DeviceSpeedRecordStore {
+    private const val PREFS_NAME = "argus_settings"
+    private const val KEY_DEVICE_TOP_SPEEDS = "device_top_speeds_mps"
+
+    fun getRecordSpeedMps(context: android.content.Context, source: String, primaryId: String): Double? {
+        val key = "${source}|${primaryId}"
+        val raw = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_DEVICE_TOP_SPEEDS, "{}")
+            .orEmpty()
+        val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+        if (!obj.has(key)) return null
+        return obj.optDouble(key).takeIf { it.isFinite() && it >= 0.0 }
+    }
+
+    fun updateIfHigher(
+        context: android.content.Context,
+        source: String,
+        primaryId: String,
+        currentSpeedMps: Double
+    ): Boolean {
+        if (!currentSpeedMps.isFinite() || currentSpeedMps <= 0.0) return false
+        val key = "${source}|${primaryId}"
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_DEVICE_TOP_SPEEDS, "{}").orEmpty()
+        val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+        val existing = obj.optDouble(key, Double.NaN)
+        if (existing.isFinite() && existing >= currentSpeedMps) return false
+        obj.put(key, currentSpeedMps)
+        prefs.edit().putString(KEY_DEVICE_TOP_SPEEDS, obj.toString()).apply()
+        return true
     }
 }
 
@@ -648,7 +692,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         val devices = withContext(Dispatchers.Default) {
             buildDeviceItems(
                 encounters = allEncounters,
-                approachDetectionEnabled = approachDetectionEnabled,
+                approachDetectionEnabled = true,
                 ownedDeviceKeys = ownedDeviceKeys
             )
         }
@@ -693,6 +737,25 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         staleKeys.forEach { staleKey ->
             trackerStateByDevice.remove(staleKey)
             lastTrackerNotificationEpochByDevice.remove(staleKey)
+        }
+    }
+
+    LaunchedEffect(allEncounters, ownedDeviceKeys) {
+        val devices = withContext(Dispatchers.Default) {
+            buildDeviceItems(
+                encounters = allEncounters,
+                approachDetectionEnabled = approachDetectionEnabled,
+                ownedDeviceKeys = ownedDeviceKeys
+            )
+        }
+        devices.forEach { device ->
+            val speed = device.motionSpeedMps ?: return@forEach
+            DeviceSpeedRecordStore.updateIfHigher(
+                context = context,
+                source = device.source,
+                primaryId = device.primaryId,
+                currentSpeedMps = speed
+            )
         }
     }
 
@@ -978,6 +1041,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         AlertLogStore.clear(context)
                         alertLogs = emptyList()
                     },
+                    onOpenApproachLogMap = { source, primaryId ->
+                        navController.navigate(
+                            "approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
                     onChainLinkChanged = { enabled ->
                         chainLinkEnabled = enabled
                         ScanSettings.setChainLinkEnabled(context, enabled)
@@ -1130,7 +1200,7 @@ private fun ApproachAlertMapPage(
     val trackStartEpochMs = remember(source, primaryId, targetEncounters.size) {
         ApproachTrackStore.getTrackStartEpochMs(context, source, primaryId)
     }
-    val trackedPathPoints = remember(targetEncounters, trackStartEpochMs) {
+    val observerTrackPoints = remember(targetEncounters, trackStartEpochMs) {
         targetEncounters
             .asReversed()
             .filter { encounter ->
@@ -1148,6 +1218,30 @@ private fun ApproachAlertMapPage(
                 }
                 acc
             }
+    }
+    val estimatedTargetPathPoints = remember(targetEncounters, trackStartEpochMs) {
+        val chron = targetEncounters
+            .asReversed()
+            .filter { encounter ->
+                val start = trackStartEpochMs
+                start == null || encounter.timestampEpochMs >= start
+            }
+
+        if (chron.size < 2) {
+            emptyList()
+        } else {
+            chron.indices.mapNotNull { idx ->
+                val windowStart = (idx - 5).coerceAtLeast(0)
+                val window = chron.subList(windowStart, idx + 1)
+                estimateApproachingDeviceLocation(window)?.first
+            }.fold(mutableListOf<LatLng>()) { acc, point ->
+                val previous = acc.lastOrNull()
+                if (previous == null || previous.latitude != point.latitude || previous.longitude != point.longitude) {
+                    acc += point
+                }
+                acc
+            }
+        }
     }
     val targetEstimate = remember(targetEncounters) {
         estimateApproachingDeviceLocation(targetEncounters)
@@ -1251,7 +1345,9 @@ private fun ApproachAlertMapPage(
         Text(
             "Tracking path since: ${trackStartEpochMs?.let(::formatEpoch) ?: "Not started"}"
         )
-        Text("Path points: ${trackedPathPoints.size}")
+        Text("Observer path points: ${observerTrackPoints.size} | Target path points: ${estimatedTargetPathPoints.size}")
+        Text("Legend: Blue=you, Red=current target estimate, Yellow=observer path start, Orange=RED path start")
+        Text("Red path direction: starts at ORANGE marker and ends at RED marker.")
         Text("Target last seen: ${latestTargetSeen?.let(::formatEpoch) ?: "Unknown"}")
         Text("Observer location: ${observerLocation?.let { "${it.lat}, ${it.lon}" } ?: "Unavailable"}")
         Text("Target estimate: ${targetEstimate?.second ?: "Unavailable"}")
@@ -1286,20 +1382,37 @@ private fun ApproachAlertMapPage(
                 )
             }
 
-            if (trackedPathPoints.size >= 2) {
+            if (observerTrackPoints.size >= 2) {
                 Polyline(
-                    points = trackedPathPoints,
+                    points = observerTrackPoints,
+                    color = Color(0xFF1976D2),
+                    width = 6f
+                )
+            }
+
+            if (estimatedTargetPathPoints.size >= 2) {
+                Polyline(
+                    points = estimatedTargetPathPoints,
                     color = Color(0xFFD32F2F),
                     width = 8f
                 )
             }
 
-            trackedPathPoints.firstOrNull()?.let { startPoint ->
+            observerTrackPoints.firstOrNull()?.let { startPoint ->
                 Marker(
                     state = MarkerState(position = startPoint),
-                    title = "Path start",
-                    snippet = "Start of approach tracking",
+                    title = "Observer path start",
+                    snippet = "Where you were when approach tracking started",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW)
+                )
+            }
+
+            estimatedTargetPathPoints.firstOrNull()?.let { startPoint ->
+                Marker(
+                    state = MarkerState(position = startPoint),
+                    title = "RED path start (target)",
+                    snippet = "This is where the red target path begins",
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE)
                 )
             }
         }
@@ -1336,7 +1449,26 @@ private fun HomePage(
     startMessage: String?,
     startMessageIsError: Boolean
 ) {
-    val nowEpochMs = System.currentTimeMillis()
+    var nowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowEpochMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+
+    val enabledSources = remember(sensorGateSettings) {
+        enabledSourceTypes(sensorGateSettings)
+    }
+    val hasFreshSourceScans = remember(enabledSources, sourceLastScanEpochs, sourceScanIntervals, nowEpochMs) {
+        enabledSources.any { sourceType ->
+            val lastScan = sourceLastScanEpochs[sourceType] ?: 0L
+            if (lastScan <= 0L) return@any false
+            val intervalSeconds = sourceScanIntervals[sourceType] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+            val freshnessWindowMs = maxOf(intervalSeconds * 3000L, 15_000L)
+            (nowEpochMs - lastScan) <= freshnessWindowMs
+        }
+    }
     val currentSourceOverruns = remember(sourceScanTimings, sourceScanIntervals, sourceLastScanEpochs, nowEpochMs) {
         sourceScanTimings.mapNotNull { timing ->
             val intervalSeconds = sourceScanIntervals[timing.sourceType] ?: return@mapNotNull null
@@ -1440,12 +1572,23 @@ private fun HomePage(
                     }
                 }
             }
-        } else {
+        } else if (hasFreshSourceScans) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         text = "No current scan overrun warnings.",
                         color = Color(0xFF2E7D32),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        } else {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Overrun status is stale: no recent source scans yet.",
+                        color = Color(0xFFE65100),
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(12.dp)
                     )
@@ -2022,6 +2165,7 @@ private fun DetectionPage(
     onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
     onClearAlertLogs: () -> Unit,
+    onOpenApproachLogMap: (source: String, primaryId: String) -> Unit,
     onChainLinkChanged: (Boolean) -> Unit,
     onChainDeviceNameChanged: (String) -> Unit,
     onChainSharedSecretChanged: (String) -> Unit,
@@ -2033,6 +2177,7 @@ private fun DetectionPage(
     onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
     onSyncNow: suspend () -> String
 ) {
+    val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
@@ -2055,7 +2200,9 @@ private fun DetectionPage(
                         timestampEpochMs = encounter.timestampEpochMs,
                         source = encounter.source.name,
                         primaryId = encounter.primaryId,
-                        encounterTimestampEpochMs = encounter.timestampEpochMs
+                        encounterTimestampEpochMs = encounter.timestampEpochMs,
+                        motionBadge = null,
+                        motionSpeedMps = null
                     )
                 }
             }
@@ -2075,6 +2222,7 @@ private fun DetectionPage(
                 } else {
                     null
                 }
+                val motionSignal = analyzeMotionSignal(deviceEncounters)
                 DeviceLocationCandidate(
                     source = latest.source.name,
                     primaryId = latest.primaryId,
@@ -2086,6 +2234,7 @@ private fun DetectionPage(
                     chainLinkedPeerCount = deviceEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
                     isOwned = owned,
                     approachSignal = approachSignal,
+                    motionSignal = motionSignal,
                     trackerRisk = analyzeTrackerRisk(
                         encounters = deviceEncounters,
                         isOwned = owned,
@@ -2201,6 +2350,13 @@ private fun DetectionPage(
                     " • Approaching (${(signal.confidence * 100.0).toInt()}%)"
                 }
                 .orEmpty()
+            val motionSnippet = candidate.motionSignal?.let { signal ->
+                if (signal.isInMotion) {
+                    " • Moving ${formatSpeedLabel(signal.speedMps)} ${formatHeadingCardinal(signal.headingDeg)}"
+                } else {
+                    " • Not moving"
+                }
+            }.orEmpty()
             val ownershipSnippet = if (candidate.isOwned) {
                 " • Marked as Mine"
             } else {
@@ -2217,19 +2373,41 @@ private fun DetectionPage(
                 TrackerRiskLevel.LOW -> " • Tracker Risk LOW"
                 else -> ""
             }
+            val motionBadge = candidate.motionSignal?.let { if (it.isInMotion) "MOVING" else "STATIC" }
+            val motionLine = candidate.motionSignal?.let { signal ->
+                if (signal.isInMotion) {
+                    "Motion: MOVING ${formatSpeedLabel(signal.speedMps)} ${formatHeadingCardinal(signal.headingDeg)}"
+                } else {
+                    "Motion: STATIC ${formatSpeedLabel(signal.speedMps)}"
+                }
+            } ?: "Motion: n/a"
+            val topSpeedLine = DeviceSpeedRecordStore
+                .getRecordSpeedMps(context, candidate.source, candidate.primaryId)
+                ?.let { " • Top ${formatSpeedLabel(it)}" }
+                .orEmpty()
 
             MapPin(
                 position = LatLng(location.lat, location.lon),
-                title = "${listSourceLabel(candidate.source, candidate.secondaryId)} • ${candidate.primaryId}",
-                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet$ownershipSnippet$chainSnippet$trackerSnippet",
+                title = buildPinTitle(
+                    sourceLabel = listSourceLabel(candidate.source, candidate.secondaryId),
+                    primaryId = candidate.primaryId,
+                    motionBadge = motionBadge
+                ),
+                snippet = buildThreeLineSnippet(
+                    line1 = "$methodSnippet • Seen ${candidate.seenCount}x",
+                    line2 = "Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
+                    line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
+                ),
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
-                encounterTimestampEpochMs = null
+                encounterTimestampEpochMs = null,
+                motionBadge = motionBadge,
+                motionSpeedMps = candidate.motionSignal?.speedMps
             )
         }
 
-        estimatedDeviceLocationPins = resolvedPins
+        estimatedDeviceLocationPins = spreadOverlappingMapPins(resolvedPins)
     }
 
     Column(
@@ -2314,7 +2492,8 @@ private fun DetectionPage(
         } else if (selectedTab == 3) {
             DetectionLogsPage(
                 logs = alertLogs,
-                onClearLogs = onClearAlertLogs
+                onClearLogs = onClearAlertLogs,
+                onOpenApproachMap = onOpenApproachLogMap
             )
         } else {
             DetectionMeshNetworkPage(
@@ -2346,7 +2525,8 @@ private fun DetectionPage(
 @OptIn(ExperimentalLayoutApi::class)
 private fun DetectionLogsPage(
     logs: List<AlertLogEntry>,
-    onClearLogs: () -> Unit
+    onClearLogs: () -> Unit,
+    onOpenApproachMap: (source: String, primaryId: String) -> Unit
 ) {
     var showApproachLogs by rememberSaveable { mutableStateOf(true) }
     var showTrackerLogs by rememberSaveable { mutableStateOf(true) }
@@ -2418,11 +2598,24 @@ private fun DetectionLogsPage(
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
             }
+            val isApproachEntry = entry.type == AlertLogType.APPROACH
             val confidenceLabel = entry.confidence
                 ?.let { " • ${String.format(Locale.US, "%.0f%%", it * 100.0)} confidence" }
                 .orEmpty()
 
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (isApproachEntry) {
+                            Modifier.clickable {
+                                onOpenApproachMap(entry.source, entry.primaryId)
+                            }
+                        } else {
+                            Modifier
+                        }
+                    )
+            ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -2434,6 +2627,13 @@ private fun DetectionLogsPage(
                     )
                     Text(entry.message + confidenceLabel)
                     Text(formatEpoch(entry.timestampEpochMs))
+                    if (isApproachEntry) {
+                        Text(
+                            text = "Tap to open Approach Alert Map",
+                            color = Color(0xFF1565C0),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
         }
@@ -2788,7 +2988,7 @@ private fun DetectionMapPage(
     var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
-    val visiblePins = remember(pins, pinLimit) { pins.take(pinLimit) }
+    val visiblePins = remember(pins, pinLimit) { selectVisiblePinsWithSourceCoverage(pins, pinLimit) }
     val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
 
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
@@ -3053,7 +3253,7 @@ private fun DetectionMapPage(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
                             snippet = pin.snippet,
-                            icon = BitmapDescriptorFactory.defaultMarker(markerHueForSource(pin.source)),
+                            icon = BitmapDescriptorFactory.defaultMarker(markerHueForPin(pin)),
                             onInfoWindowClick = {
                                 onPinDetailsClick(pin)
                             }
@@ -3072,13 +3272,87 @@ private data class MapPin(
     val timestampEpochMs: Long,
     val source: String,
     val primaryId: String,
-    val encounterTimestampEpochMs: Long?
+    val encounterTimestampEpochMs: Long?,
+    val motionBadge: String? = null,
+    val motionSpeedMps: Double? = null
 )
 
 private data class PinLegendItem(
     val label: String,
     val color: Color
 )
+
+private fun selectVisiblePinsWithSourceCoverage(pins: List<MapPin>, pinLimit: Int): List<MapPin> {
+    if (pins.isEmpty()) return emptyList()
+    val safeLimit = pinLimit.coerceAtLeast(1)
+    if (pins.size <= safeLimit) return pins
+
+    // Preserve one newest pin per source so map/legend do not silently drop source types.
+    val newestPerSource = pins
+        .groupBy { it.source }
+        .values
+        .mapNotNull { grouped -> grouped.maxByOrNull { it.timestampEpochMs } }
+        .sortedByDescending { it.timestampEpochMs }
+
+    if (newestPerSource.size >= safeLimit) {
+        return newestPerSource.take(safeLimit)
+    }
+
+    val selected = LinkedHashMap<String, MapPin>()
+    newestPerSource.forEach { pin ->
+        selected["${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"] = pin
+    }
+
+    pins.forEach { pin ->
+        if (selected.size >= safeLimit) return@forEach
+        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        if (!selected.containsKey(key)) {
+            selected[key] = pin
+        }
+    }
+
+    return selected.values
+        .sortedByDescending { it.timestampEpochMs }
+        .take(safeLimit)
+}
+
+private fun spreadOverlappingMapPins(pins: List<MapPin>): List<MapPin> {
+    if (pins.size < 2) return pins
+
+    val grouped = pins.groupBy { pin ->
+        val latKey = (pin.position.latitude * 100_000.0).toLong()
+        val lonKey = (pin.position.longitude * 100_000.0).toLong()
+        "$latKey:$lonKey"
+    }
+
+    val adjusted = mutableListOf<MapPin>()
+    grouped.values.forEach { group ->
+        if (group.size <= 1) {
+            adjusted += group
+            return@forEach
+        }
+
+        group.forEachIndexed { index, pin ->
+            val jitterMeters = (0.6 + ((index / 10) * 0.25)).coerceAtMost(1.8)
+            val angle = (2.0 * Math.PI * index.toDouble()) / group.size.toDouble()
+            val baseLat = pin.position.latitude
+            val baseLon = pin.position.longitude
+            val latRad = Math.toRadians(baseLat)
+            val metersPerDegLat = 111_132.0
+            val metersPerDegLon = (111_320.0 * cos(latRad)).coerceAtLeast(1.0)
+            val dLat = (jitterMeters * cos(angle)) / metersPerDegLat
+            val dLon = (jitterMeters * sin(angle)) / metersPerDegLon
+            val adjustedLat = baseLat + dLat
+            val adjustedLon = baseLon + dLon
+
+            adjusted += pin.copy(
+                position = LatLng(adjustedLat, adjustedLon)
+            )
+        }
+    }
+
+    return adjusted.sortedByDescending { it.timestampEpochMs }
+}
 
 private fun markerHueForSource(source: String): Float = when (source) {
     "CELL" -> BitmapDescriptorFactory.HUE_AZURE
@@ -3140,6 +3414,32 @@ private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
             label = markerLegendLabelForSource(source),
             color = markerLegendColorForSource(source)
         )
+    }
+}
+
+private fun buildPinTitle(sourceLabel: String, primaryId: String, motionBadge: String?): String {
+    val shortId = if (primaryId.length <= 18) primaryId else primaryId.take(15) + "..."
+    val badge = when (motionBadge) {
+        "MOVING" -> "[M] "
+        "STATIC" -> "[S] "
+        else -> ""
+    }
+    return "$badge$sourceLabel • $shortId"
+}
+
+private fun buildThreeLineSnippet(line1: String, line2: String, line3: String): String {
+    fun cap(text: String, max: Int): String {
+        val trimmed = text.trim()
+        return if (trimmed.length <= max) trimmed else trimmed.take(max - 3).trimEnd() + "..."
+    }
+    return listOf(cap(line1, 72), cap(line2, 72), cap(line3, 72)).joinToString("\n")
+}
+
+private fun markerHueForPin(pin: MapPin): Float {
+    return when (pin.motionBadge) {
+        "MOVING" -> BitmapDescriptorFactory.HUE_GREEN
+        "STATIC" -> BitmapDescriptorFactory.HUE_AZURE
+        else -> markerHueForSource(pin.source)
     }
 }
 
@@ -3717,6 +4017,93 @@ private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? 
         confidence = confidence,
         deltaMeters = deltaMeters
     )
+}
+
+private fun analyzeMotionSignal(encounters: List<Encounter>): MotionSignal? {
+    data class TimedPoint(val timestampEpochMs: Long, val lat: Double, val lon: Double)
+
+    val points = encounters
+        .filter { isValidLatLon(it.lat, it.lon) }
+        .sortedBy { it.timestampEpochMs }
+        .map { TimedPoint(it.timestampEpochMs, it.lat!!, it.lon!!) }
+        .distinctBy { "${it.timestampEpochMs}:${it.lat}:${it.lon}" }
+
+    if (points.size < 3) return null
+    val recent = points.takeLast(12)
+    if (recent.size < 3) return null
+
+    var totalDistanceMeters = 0.0
+    var totalTimeSeconds = 0.0
+    var validSegments = 0
+    var weightedSin = 0.0
+    var weightedCos = 0.0
+
+    for (i in 1 until recent.size) {
+        val prev = recent[i - 1]
+        val curr = recent[i]
+        val dtSeconds = ((curr.timestampEpochMs - prev.timestampEpochMs).coerceAtLeast(0L) / 1000.0)
+        if (dtSeconds < 1.0 || dtSeconds > 180.0) continue
+
+        val distance = distanceFromLocationMeters(prev.lat, prev.lon, curr.lat, curr.lon) ?: continue
+        if (!distance.isFinite() || distance < 0.5) continue
+
+        val heading = bearingDegrees(prev.lat, prev.lon, curr.lat, curr.lon)
+        totalDistanceMeters += distance
+        totalTimeSeconds += dtSeconds
+        validSegments += 1
+        val headingRad = Math.toRadians(heading)
+        weightedSin += sin(headingRad) * distance
+        weightedCos += cos(headingRad) * distance
+    }
+
+    if (validSegments < 2 || totalTimeSeconds <= 0.0) return null
+
+    val avgSpeedMps = (totalDistanceMeters / totalTimeSeconds).coerceAtLeast(0.0)
+    val netDisplacement = distanceFromLocationMeters(
+        recent.first().lat,
+        recent.first().lon,
+        recent.last().lat,
+        recent.last().lon
+    ) ?: 0.0
+
+    val isInMotion = avgSpeedMps >= 0.8 && netDisplacement >= 10.0
+
+    val heading = if (weightedSin == 0.0 && weightedCos == 0.0) {
+        0.0
+    } else {
+        ((Math.toDegrees(kotlin.math.atan2(weightedSin, weightedCos)) + 360.0) % 360.0)
+    }
+
+    return MotionSignal(
+        isInMotion = isInMotion,
+        speedMps = avgSpeedMps,
+        headingDeg = heading,
+        sampleCount = validSegments
+    )
+}
+
+private fun bearingDegrees(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Double {
+    val fromLatRad = Math.toRadians(fromLat)
+    val toLatRad = Math.toRadians(toLat)
+    val deltaLonRad = Math.toRadians(toLon - fromLon)
+
+    val y = sin(deltaLonRad) * cos(toLatRad)
+    val x = cos(fromLatRad) * sin(toLatRad) -
+        sin(fromLatRad) * cos(toLatRad) * cos(deltaLonRad)
+    return (Math.toDegrees(kotlin.math.atan2(y, x)) + 360.0) % 360.0
+}
+
+private fun formatSpeedLabel(speedMps: Double): String {
+    val safe = speedMps.coerceAtLeast(0.0)
+    val mph = safe * 2.2369362921
+    return String.format(Locale.US, "%.1f mph", mph)
+}
+
+private fun formatHeadingCardinal(headingDeg: Double): String {
+    val normalized = ((headingDeg % 360.0) + 360.0) % 360.0
+    val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    val index = (((normalized + 22.5) / 45.0).toInt()) % directions.size
+    return "${directions[index]} (${String.format(Locale.US, "%.0f", normalized)} deg)"
 }
 
 private fun locationCellKey(lat: Double, lon: Double, cellDegrees: Double = 0.0025): String {
@@ -4317,6 +4704,26 @@ private fun DevicesPage(
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
+                        if (device.motionSpeedMps != null && device.motionHeadingDeg != null) {
+                            val motionText = if (device.isInMotion) {
+                                "In Motion • ${formatSpeedLabel(device.motionSpeedMps)} • Heading ${formatHeadingCardinal(device.motionHeadingDeg)}"
+                            } else {
+                                "Not moving • Last motion ${formatSpeedLabel(device.motionSpeedMps)}"
+                            }
+                            Text(
+                                text = motionText,
+                                color = if (device.isInMotion) Color(0xFF1565C0) else Color(0xFF5F6368),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        val recordSpeed = DeviceSpeedRecordStore.getRecordSpeedMps(context, device.source, device.primaryId)
+                        if (recordSpeed != null) {
+                            Text(
+                                text = "Top Speed Record • ${formatSpeedLabel(recordSpeed)}",
+                                color = Color(0xFF2E7D32),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                         when (device.trackerRisk?.level) {
                             TrackerRiskLevel.HIGH -> Text(
                                 text = "Tracker Risk: HIGH",
@@ -4510,6 +4917,7 @@ private fun buildDeviceItems(
                 isOwned = owned,
                 approachSignal = approachSignal
             )
+            val motionSignal = analyzeMotionSignal(groupedEncounters)
             DeviceItem(
                 source = key.first,
                 primaryId = key.second,
@@ -4532,6 +4940,9 @@ private fun buildDeviceItems(
                 isApproaching = approachSignal?.isApproaching == true,
                 approachConfidence = approachSignal?.confidence,
                 approachDeltaMeters = approachSignal?.deltaMeters,
+                isInMotion = motionSignal?.isInMotion == true,
+                motionSpeedMps = motionSignal?.speedMps,
+                motionHeadingDeg = motionSignal?.headingDeg,
                 isOwned = owned,
                 trackerRisk = trackerRisk
             )
@@ -4678,6 +5089,27 @@ private fun DeviceDetailPage(
         )
         DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
         DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
+        DetailRow(
+            "Motion Status",
+            when {
+                item.motionSpeedMps == null || item.motionHeadingDeg == null -> "Insufficient motion samples"
+                item.isInMotion -> "In motion"
+                else -> "Not moving"
+            }
+        )
+        if (item.motionSpeedMps != null) {
+            DetailRow("Estimated Speed", formatSpeedLabel(item.motionSpeedMps))
+        }
+        if (item.motionHeadingDeg != null) {
+            DetailRow("Estimated Direction", formatHeadingCardinal(item.motionHeadingDeg))
+        }
+        DetailRow(
+            "Top Speed Record",
+            DeviceSpeedRecordStore
+                .getRecordSpeedMps(context, item.source, item.primaryId)
+                ?.let(::formatSpeedLabel)
+                ?: "n/a"
+        )
         DetailRow(
             "Tracker Risk",
             when (item.trackerRisk?.level) {
