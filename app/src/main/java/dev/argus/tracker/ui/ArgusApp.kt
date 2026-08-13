@@ -1,8 +1,10 @@
 package dev.argus.tracker.ui
 
 import android.Manifest
+import android.app.PendingIntent
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Intent
 import android.net.Uri
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
@@ -72,6 +74,7 @@ import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.rememberCameraPositionState
+import dev.argus.tracker.MainActivity
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.chain.ChainMeshSnapshot
 import dev.argus.tracker.data.chain.ChainPeerState
@@ -123,6 +126,7 @@ private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
+private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 
@@ -133,6 +137,9 @@ private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val ALERT_LOG_MAX_ENTRIES = 400
+private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
+private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
+private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
 
 private enum class AlertLogType {
     APPROACH,
@@ -327,7 +334,7 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
     )
 
 @Composable
-fun ArgusApp() {
+fun ArgusApp(notificationIntent: Intent? = null) {
     val context = LocalContext.current
     val app = context.applicationContext as ArgusApplication
     val navController = rememberNavController()
@@ -375,6 +382,16 @@ fun ArgusApp() {
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
+
+    LaunchedEffect(notificationIntent) {
+        val intent = notificationIntent ?: return@LaunchedEffect
+        if (intent.action != ACTION_OPEN_APPROACH_MAP) return@LaunchedEffect
+        val source = intent.getStringExtra(EXTRA_APPROACH_SOURCE)?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        val primaryId = intent.getStringExtra(EXTRA_APPROACH_PRIMARY_ID)?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        navController.navigate("approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}") {
+            launchSingleTop = true
+        }
+    }
     val autoAdjustSuggestedIntervalSeconds = remember(sourceScanTimings, sensorGateSettings) {
         computeRecommendedIntervalSeconds(sourceScanTimings, sensorGateSettings)
     }
@@ -1042,6 +1059,146 @@ fun ArgusApp() {
                         it.timestampEpochMs == timestamp
                 }
                 EncounterDetailPage(encounter = encounter, onBack = { navController.popBackStack() })
+            }
+
+            composable(APPROACH_ALERT_MAP_ROUTE) { entry ->
+                val source = Uri.decode(entry.arguments?.getString("source") ?: "")
+                val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
+                ApproachAlertMapPage(
+                    source = source,
+                    primaryId = primaryId,
+                    encounters = allEncounters,
+                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
+                    onOpenDeviceDetails = { detailSource, detailPrimaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
+                        )
+                    },
+                    onBack = { navController.popBackStack() }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApproachAlertMapPage(
+    source: String,
+    primaryId: String,
+    encounters: List<Encounter>,
+    liveMapUpdateIntervalSeconds: Long,
+    onOpenDeviceDetails: (String, String) -> Unit,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
+    }
+
+    var observerLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
+    val targetEncounters = remember(encounters, source, primaryId) {
+        encounters
+            .filter { it.source.name == source && it.primaryId == primaryId }
+            .sortedByDescending { it.timestampEpochMs }
+    }
+    val targetEstimate = remember(targetEncounters) {
+        estimateApproachingDeviceLocation(targetEncounters)
+    }
+
+    LaunchedEffect(liveMapUpdateIntervalSeconds, source, primaryId) {
+        val loopMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L)
+        while (true) {
+            observerLocation = LocationSnapshotProvider.read(context)
+            delay(loopMs)
+        }
+    }
+
+    LaunchedEffect(observerLocation, targetEstimate) {
+        val observerLatLng = observerLocation
+            ?.takeIf { isValidLatLon(it.lat, it.lon) }
+            ?.let { LatLng(it.lat, it.lon) }
+        val targetLatLng = targetEstimate?.first
+
+        when {
+            observerLatLng != null && targetLatLng != null -> {
+                val bounds = LatLngBounds.builder()
+                    .include(observerLatLng)
+                    .include(targetLatLng)
+                    .build()
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(bounds, 140))
+            }
+            observerLatLng != null -> {
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(observerLatLng, 16f))
+            }
+            targetLatLng != null -> {
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(targetLatLng, 16f))
+            }
+        }
+    }
+
+    val latestTargetSeen = targetEncounters.firstOrNull()?.timestampEpochMs
+    val separationMeters = run {
+        val observer = observerLocation
+        val target = targetEstimate?.first
+        if (observer == null || target == null) {
+            null
+        } else {
+            distanceFromLocationMeters(
+                fromLat = observer.lat,
+                fromLon = observer.lon,
+                toLat = target.latitude,
+                toLon = target.longitude
+            )
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text("Approach Alert Map", style = MaterialTheme.typography.headlineSmall)
+        Text("Target: ${listSourceLabel(source, null)} $primaryId")
+        Text("Target last seen: ${latestTargetSeen?.let(::formatEpoch) ?: "Unknown"}")
+        Text("Observer location: ${observerLocation?.let { "${it.lat}, ${it.lon}" } ?: "Unavailable"}")
+        Text("Target estimate: ${targetEstimate?.second ?: "Unavailable"}")
+        if (separationMeters != null) {
+            Text("Estimated separation: ${formatDistanceFeetMiles(separationMeters)}")
+        }
+
+        GoogleMap(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            cameraPositionState = cameraPositionState,
+            uiSettings = MapUiSettings(zoomControlsEnabled = true)
+        ) {
+            observerLocation
+                ?.takeIf { isValidLatLon(it.lat, it.lon) }
+                ?.let { observer ->
+                    Marker(
+                        state = MarkerState(position = LatLng(observer.lat, observer.lon)),
+                        title = "You",
+                        snippet = "Current observer location",
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
+                    )
+                }
+
+            targetEstimate?.first?.let { targetLatLng ->
+                Marker(
+                    state = MarkerState(position = targetLatLng),
+                    title = "Approaching device",
+                    snippet = "$source $primaryId",
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                )
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onOpenDeviceDetails(source, primaryId) }) {
+                Text("Open Device Details")
+            }
+            Button(onClick = onBack) {
+                Text("Back")
             }
         }
     }
@@ -3588,6 +3745,27 @@ private fun estimateRangeMeters(encounter: Encounter): Double? = when (encounter
     else -> null
 }
 
+private fun estimateApproachingDeviceLocation(encounters: List<Encounter>): Pair<LatLng, String>? {
+    if (encounters.isEmpty()) return null
+    val latest = encounters.maxByOrNull { it.timestampEpochMs } ?: return null
+
+    val inferred = when (latest.source) {
+        EncounterSource.WIFI,
+        EncounterSource.BLUETOOTH_LE -> inferLikelyDeviceLocation(encounters)
+        else -> null
+    }
+
+    if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
+        return LatLng(inferred.lat, inferred.lon) to "Inferred from movement/range"
+    }
+
+    if (isValidLatLon(latest.lat, latest.lon)) {
+        return LatLng(latest.lat!!, latest.lon!!) to "Observed encounter location"
+    }
+
+    return null
+}
+
 private fun inferLikelyDeviceLocation(encounters: List<Encounter>): InferredDeviceLocation? {
     data class RangeObservation(
         val lat: Double,
@@ -3759,6 +3937,20 @@ private fun sendApproachNotification(context: android.content.Context, device: D
 
     val title = "Approaching device detected"
     val content = "${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId} • Confidence ${confidencePct}% • Trend ${trend}"
+    val notificationId = ("${device.source}|${device.primaryId}").hashCode()
+    val tapIntent = Intent(context, MainActivity::class.java).apply {
+        action = ACTION_OPEN_APPROACH_MAP
+        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        putExtra(EXTRA_APPROACH_SOURCE, device.source)
+        putExtra(EXTRA_APPROACH_PRIMARY_ID, device.primaryId)
+    }
+    val tapPendingIntent = PendingIntent.getActivity(
+        context,
+        notificationId,
+        tapIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
     val notification = NotificationCompat.Builder(context, APPROACH_ALERT_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_more)
         .setContentTitle(title)
@@ -3766,9 +3958,9 @@ private fun sendApproachNotification(context: android.content.Context, device: D
         .setStyle(NotificationCompat.BigTextStyle().bigText(content))
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setAutoCancel(true)
+        .setContentIntent(tapPendingIntent)
         .build()
 
-    val notificationId = ("${device.source}|${device.primaryId}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
