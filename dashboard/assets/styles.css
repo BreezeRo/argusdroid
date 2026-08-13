@@ -299,6 +299,49 @@ th {
   text-transform: uppercase;
 }
 
+tbody tr.encounter-row {
+  cursor: pointer;
+}
+
+tbody tr.encounter-row:hover {
+  background: rgba(78, 150, 151, 0.16);
+}
+
+tbody tr.encounter-row:focus-visible {
+  outline: 2px solid #73e9d5;
+  outline-offset: -2px;
+}
+
+.device-detail-card {
+  border: 1px solid rgba(73, 126, 127, 0.45);
+  background: rgba(10, 31, 31, 0.7);
+  border-radius: 12px;
+  padding: 0.8rem;
+}
+
+.device-detail-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 0.35rem 0.75rem;
+}
+
+.device-detail-key {
+  color: #9acec9;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.8rem;
+}
+
+.device-detail-value {
+  color: #e8f2f1;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.device-detail-empty {
+  color: var(--muted);
+}
+
 .stack-list {
   list-style: none;
   margin: 0;
@@ -380,5 +423,10 @@ th {
 
   .hero {
     flex-direction: column;
+  }
+
+  .device-detail-grid {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
   }
 }

@@ -47,7 +47,8 @@ const state = {
     "device-locations": 250
   },
   encounterLimit: 1200,
-  mapLocationMode: "PRECISE"
+  mapLocationMode: "PRECISE",
+  latestRenderedEncounters: []
 };
 
 const MAP_TYPES = ["roadmap", "hybrid", "terrain", "satellite"];
@@ -75,6 +76,7 @@ async function bootstrap() {
 
   renderFilters();
   renderDashboardControls();
+  initDeviceDetailsInteractions();
   renderDashboardStatus();
   renderAll();
 
@@ -342,15 +344,18 @@ function renderKpis(encounters, mesh) {
 
 function renderLatestTable(encounters) {
   const body = document.getElementById("encounter-rows");
-  const rows = [...encounters]
+  const latest = [...encounters]
     .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
-    .slice(0, 16)
+    .slice(0, 16);
+  state.latestRenderedEncounters = latest;
+
+  const rows = latest
     .map(
-      (e) => `
-      <tr>
+      (e, index) => `
+      <tr class="encounter-row" data-encounter-index="${index}" tabindex="0" role="button" aria-label="Open device details for ${escapeHtml(buildEncounterMapLabel(e))}">
         <td>${formatTime(e.timestamp)}</td>
         <td>${displaySourceForEncounter(e)}</td>
-        <td>${e.label}</td>
+        <td>${buildEncounterMapLabel(e)}</td>
         <td>${e.signalDbm} dBm</td>
         <td>${e.distanceMeters.toFixed(1)} m</td>
       </tr>
@@ -359,6 +364,49 @@ function renderLatestTable(encounters) {
     .join("");
 
   body.innerHTML = rows || "<tr><td colspan=\"5\">No encounters for the selected sources.</td></tr>";
+}
+
+function initDeviceDetailsInteractions() {
+  const encounterRows = document.getElementById("encounter-rows");
+  if (encounterRows) {
+    encounterRows.addEventListener("click", (event) => {
+      const row = event.target?.closest?.("tr[data-encounter-index]");
+      if (!row) {
+        return;
+      }
+      const index = Number(row.dataset.encounterIndex);
+      const encounter = Number.isInteger(index) ? state.latestRenderedEncounters[index] : null;
+      if (encounter) {
+        showDeviceDetailsPage(encounter);
+      }
+    });
+
+    encounterRows.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      const row = event.target?.closest?.("tr[data-encounter-index]");
+      if (!row) {
+        return;
+      }
+      event.preventDefault();
+      const index = Number(row.dataset.encounterIndex);
+      const encounter = Number.isInteger(index) ? state.latestRenderedEncounters[index] : null;
+      if (encounter) {
+        showDeviceDetailsPage(encounter);
+      }
+    });
+  }
+
+  const closeButton = document.getElementById("device-detail-close");
+  if (closeButton) {
+    closeButton.addEventListener("click", () => {
+      const panel = document.getElementById("device-detail-page");
+      if (panel) {
+        panel.hidden = true;
+      }
+    });
+  }
 }
 
 function renderHotspots(encounters) {
@@ -665,11 +713,12 @@ function drawMarkers() {
     if (!point) {
       return;
     }
+    const displayLabel = buildEncounterMapLabel(e);
 
     const marker = new google.maps.Marker({
       position: point,
       map: state.map,
-      title: e.label,
+      title: displayLabel,
       icon: {
         path: google.maps.SymbolPath.CIRCLE,
         scale: 7,
@@ -681,8 +730,9 @@ function drawMarkers() {
     });
 
     marker.addListener("click", () => {
-      state.infoWindow.setContent(buildInfoWindowHtml(e));
+      state.infoWindow.setContent(buildInfoWindowHtml(e, displayLabel));
       state.infoWindow.open({ map: state.map, anchor: marker });
+      showDeviceDetailsPage(e);
     });
 
     state.markers.push(marker);
@@ -847,22 +897,15 @@ function drawDeviceLocations() {
     const marker = new google.maps.Marker({
       position: row.position,
       map: state.deviceMap,
-      title: row.encounter.label,
+      title: row.displayLabel,
       icon: markerIcon
     });
 
     marker.addListener("click", () => {
-      const content = `
-        <div style="color:#111; font-family:Arial,sans-serif; line-height:1.35; min-width:220px;">
-          <strong>${row.encounter.label}</strong><br/>
-          <span><strong>Source:</strong> ${displaySourceForEncounter(row.encounter)}</span><br/>
-          <span><strong>Location Basis:</strong> ${row.locationBasis}</span><br/>
-          <span><strong>Signal:</strong> ${row.encounter.signalDbm} dBm</span><br/>
-          <span><strong>Time:</strong> ${new Date(row.encounter.timestamp).toLocaleString()}</span>
-        </div>
-      `;
+      const content = buildInfoWindowHtml(row.encounter, row.displayLabel, row.locationBasis);
       state.deviceInfoWindow.setContent(content);
       state.deviceInfoWindow.open({ map: state.deviceMap, anchor: marker });
+      showDeviceDetailsPage(row.encounter, row.locationBasis);
     });
 
     state.deviceMarkers.push(marker);
@@ -906,7 +949,8 @@ function buildLatestDeviceRows() {
       deviceKey,
       encounter: latest,
       position: resolved.position,
-      locationBasis: resolved.basis
+      locationBasis: resolved.basis,
+      displayLabel: buildEncounterMapLabel(latest, deviceEncounters)
     });
   }
 
@@ -922,6 +966,14 @@ function buildLatestDeviceRows() {
 
 function resolveDeviceLocationLikeAndroid(source, encounters) {
   const latest = encounters[0];
+
+  if (source === "REMOTE_ID") {
+    const broadcast = getRemoteIdBroadcastPosition(latest);
+    if (broadcast) {
+      return { position: broadcast, basis: "remote-id-broadcast" };
+    }
+    return null;
+  }
 
   if (source === "WIFI" || source === "BLUETOOTH_LE") {
     const inferred = inferLikelyDeviceLocation(encounters, source);
@@ -986,6 +1038,52 @@ function getObservedEncounterLocation(encounter) {
     return null;
   }
   return { lat, lng };
+}
+
+function getRemoteIdBroadcastPosition(encounter) {
+  const source = String(encounter?.source || "");
+  if (source !== "REMOTE_ID") {
+    return null;
+  }
+
+  const candidates = [
+    { lat: encounter?.remoteIdLat, lng: encounter?.remoteIdLng },
+    { lat: encounter?.remoteIdLat, lng: encounter?.remoteIdLon }
+  ];
+
+  for (const item of candidates) {
+    const lat = Number(item.lat);
+    const lng = Number(item.lng);
+    if (isValidLatLng(lat, lng)) {
+      return { lat, lng };
+    }
+  }
+
+  if (typeof encounter?.rawPayloadJson === "string" && encounter.rawPayloadJson.length > 1) {
+    try {
+      const payload = JSON.parse(encounter.rawPayloadJson);
+      const decoded = payload?.remoteIdDecoded && typeof payload.remoteIdDecoded === "object"
+        ? payload.remoteIdDecoded
+        : null;
+      const fallbackCandidates = [
+        { lat: decoded?.droneLat, lng: decoded?.droneLon },
+        { lat: payload?.droneLat, lng: payload?.droneLon },
+        { lat: payload?.lat, lng: payload?.lon }
+      ];
+
+      for (const item of fallbackCandidates) {
+        const lat = Number(item.lat);
+        const lng = Number(item.lng);
+        if (isValidLatLng(lat, lng)) {
+          return { lat, lng };
+        }
+      }
+    } catch (_error) {
+      // Ignore malformed payload.
+    }
+  }
+
+  return null;
 }
 
 function isValidLatLng(lat, lng) {
@@ -1340,6 +1438,11 @@ function getMarkerPosition(encounter) {
 }
 
 function getPrecisePosition(encounter) {
+  const source = String(encounter?.source || "");
+  if (source === "REMOTE_ID") {
+    return getRemoteIdBroadcastPosition(encounter);
+  }
+
   const lat = Number(encounter.lat);
   const lng = Number(encounter.lng);
 
@@ -1351,6 +1454,18 @@ function getPrecisePosition(encounter) {
 }
 
 function getZonedPosition(encounter) {
+  const source = String(encounter?.source || "");
+  if (source === "REMOTE_ID") {
+    const precise = getRemoteIdBroadcastPosition(encounter);
+    if (!precise) {
+      return null;
+    }
+    return {
+      lat: Math.floor(precise.lat * 100) / 100,
+      lng: Math.floor(precise.lng * 100) / 100
+    };
+  }
+
   if (typeof encounter.zone === "string") {
     const parsed = parseZoneCoordinates(encounter.zone);
     if (parsed) {
@@ -1384,6 +1499,157 @@ function parseZoneCoordinates(zone) {
   return { lat, lng };
 }
 
+function buildEncounterMapLabel(encounter, history = null) {
+  const baseLabel = String(encounter?.label || "unknown");
+  const source = String(encounter?.source || "");
+  if (source !== "REMOTE_ID") {
+    return baseLabel;
+  }
+
+  const direction = getRemoteIdDirectionHint(encounter, history);
+  if (!direction) {
+    return baseLabel;
+  }
+  return `${baseLabel} [${direction}]`;
+}
+
+function getRemoteIdDirectionHint(encounter, history = null) {
+  let heading = extractRemoteIdHeadingDegrees(encounter);
+  if (!Number.isFinite(heading)) {
+    heading = deriveHeadingFromHistory(history);
+  }
+  if (!Number.isFinite(heading)) {
+    return "";
+  }
+
+  const cardinal = cardinalFromHeading(heading);
+  if (!cardinal) {
+    return "";
+  }
+  return `${cardinal}->`;
+}
+
+function extractRemoteIdHeadingDegrees(encounter) {
+  if (typeof encounter?.rawPayloadJson !== "string" || encounter.rawPayloadJson.length < 2) {
+    return Number.NaN;
+  }
+
+  try {
+    const payload = JSON.parse(encounter.rawPayloadJson);
+    const decoded = payload?.remoteIdDecoded && typeof payload.remoteIdDecoded === "object"
+      ? payload.remoteIdDecoded
+      : null;
+    const candidates = [
+      decoded?.headingDegrees,
+      decoded?.heading_deg,
+      decoded?.heading,
+      payload?.headingDegrees,
+      payload?.heading_deg,
+      payload?.heading
+    ];
+
+    for (const value of candidates) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return normalizeHeadingDegrees(numeric);
+      }
+    }
+  } catch (_error) {
+    // Ignore malformed payload.
+  }
+
+  return Number.NaN;
+}
+
+function extractRemoteIdAircraftAltitudeMeters(encounter) {
+  if (typeof encounter?.rawPayloadJson !== "string" || encounter.rawPayloadJson.length < 2) {
+    return Number.NaN;
+  }
+
+  try {
+    const payload = JSON.parse(encounter.rawPayloadJson);
+    const decoded = payload?.remoteIdDecoded && typeof payload.remoteIdDecoded === "object"
+      ? payload.remoteIdDecoded
+      : null;
+    const candidates = [
+      decoded?.altitudeMeters,
+      decoded?.aircraftAltitudeMeters,
+      decoded?.aircraft_altitude_m,
+      payload?.altitudeMeters,
+      payload?.aircraftAltitudeMeters,
+      payload?.aircraft_altitude_m,
+      payload?.heightMeters,
+      payload?.height_m,
+      payload?.altitude_m,
+      payload?.alt
+    ];
+
+    for (const value of candidates) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+    }
+  } catch (_error) {
+    // Ignore malformed payload.
+  }
+
+  return Number.NaN;
+}
+
+function deriveHeadingFromHistory(history) {
+  if (!Array.isArray(history) || history.length < 2) {
+    return Number.NaN;
+  }
+
+  const latest = history[0];
+  const previous = history.slice(1).find((enc) => getRemoteIdBroadcastPosition(enc) !== null);
+  if (!previous) {
+    return Number.NaN;
+  }
+
+  const latestPoint = getRemoteIdBroadcastPosition(latest);
+  const previousPoint = getRemoteIdBroadcastPosition(previous);
+  if (!latestPoint || !previousPoint) {
+    return Number.NaN;
+  }
+
+  const deltaTs = Date.parse(latest.timestamp) - Date.parse(previous.timestamp);
+  if (!Number.isFinite(deltaTs) || deltaTs <= 0) {
+    return Number.NaN;
+  }
+
+  return bearingDegrees(previousPoint.lat, previousPoint.lng, latestPoint.lat, latestPoint.lng);
+}
+
+function bearingDegrees(fromLat, fromLng, toLat, toLng) {
+  const fromLatRad = (fromLat * Math.PI) / 180;
+  const toLatRad = (toLat * Math.PI) / 180;
+  const deltaLngRad = ((toLng - fromLng) * Math.PI) / 180;
+
+  const y = Math.sin(deltaLngRad) * Math.cos(toLatRad);
+  const x =
+    Math.cos(fromLatRad) * Math.sin(toLatRad) -
+    Math.sin(fromLatRad) * Math.cos(toLatRad) * Math.cos(deltaLngRad);
+  const heading = (Math.atan2(y, x) * 180) / Math.PI;
+  return normalizeHeadingDegrees(heading);
+}
+
+function normalizeHeadingDegrees(value) {
+  const normalized = ((value % 360) + 360) % 360;
+  return Number.isFinite(normalized) ? normalized : Number.NaN;
+}
+
+function cardinalFromHeading(headingDegrees) {
+  if (!Number.isFinite(headingDegrees)) {
+    return "";
+  }
+
+  const directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  const index = Math.floor(((headingDegrees + 22.5) % 360) / 45);
+  return directions[index] || "";
+}
+
 function formatTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -1396,17 +1662,200 @@ function labelForSource(source) {
   return SOURCE_BY_KEY[source]?.label || source || "UNKNOWN_RF";
 }
 
-function buildInfoWindowHtml(encounter) {
+function buildInfoWindowHtml(encounter, displayLabel = buildEncounterMapLabel(encounter), locationBasis = null) {
+  const detailsMarkup = buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis, 48);
   return `
-    <div style="color:#111; font-family:Arial,sans-serif; line-height:1.35; min-width:220px;">
-      <strong>${encounter.label}</strong><br/>
-      <span><strong>Source:</strong> ${displaySourceForEncounter(encounter)}</span><br/>
-      <span><strong>Signal:</strong> ${encounter.signalDbm} dBm</span><br/>
-      <span><strong>Distance:</strong> ${encounter.distanceMeters.toFixed(1)} m</span><br/>
-      <span><strong>Zone:</strong> ${encounter.zone}</span><br/>
-      <span><strong>Time:</strong> ${new Date(encounter.timestamp).toLocaleString()}</span>
+    <div style="color:#111; font-family:Arial,sans-serif; line-height:1.35; min-width:260px; max-width:360px; max-height:300px; overflow:auto;">
+      ${detailsMarkup}
     </div>
   `;
+}
+
+function showDeviceDetailsPage(encounter, locationBasis = null) {
+  const panel = document.getElementById("device-detail-page");
+  const subtitle = document.getElementById("device-detail-subtitle");
+  const content = document.getElementById("device-detail-content");
+  if (!panel || !subtitle || !content) {
+    return;
+  }
+
+  const label = buildEncounterMapLabel(encounter);
+  subtitle.textContent = `Viewing all currently available fields for ${label}.`;
+  content.innerHTML = buildEncounterDetailsMarkup(encounter, label, locationBasis);
+  panel.hidden = false;
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function buildEncounterDetailsMarkup(encounter, displayLabel, locationBasis = null, maxRows = 999) {
+  const fields = collectEncounterDetails(encounter, displayLabel, locationBasis);
+  const rows = fields
+    .slice(0, maxRows)
+    .map(([key, value]) => `
+      <div class="device-detail-key">${escapeHtml(key)}</div>
+      <div class="device-detail-value">${escapeHtml(value)}</div>
+    `)
+    .join("");
+
+  if (!rows) {
+    return '<div class="device-detail-empty">No details available for this encounter.</div>';
+  }
+
+  return `<div class="device-detail-grid">${rows}</div>`;
+}
+
+function collectEncounterDetails(encounter, displayLabel, locationBasis = null) {
+  const details = [];
+  const push = (name, value) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    const text = String(value).trim();
+    if (!text) {
+      return;
+    }
+    details.push([name, text]);
+  };
+
+  push("Label", displayLabel || encounter?.label || "unknown");
+  push("Source", displaySourceForEncounter(encounter));
+  push("Timestamp", new Date(encounter.timestamp).toLocaleString());
+  if (Number.isFinite(Number(encounter.signalDbm))) {
+    push("Signal", `${Number(encounter.signalDbm)} dBm`);
+  }
+  if (Number.isFinite(Number(encounter.distanceMeters))) {
+    push("Distance", `${Number(encounter.distanceMeters).toFixed(1)} m`);
+  }
+  push("Zone", encounter.zone);
+  if (locationBasis) {
+    push("Location Basis", locationBasis);
+  }
+
+  const precise = getPrecisePosition(encounter);
+  if (precise) {
+    push("Display Lat", precise.lat.toFixed(6));
+    push("Display Lng", precise.lng.toFixed(6));
+  }
+
+  if (encounter?.source === "REMOTE_ID") {
+    const ridPoint = getRemoteIdBroadcastPosition(encounter);
+    if (ridPoint) {
+      push("Remote ID Broadcast Lat", ridPoint.lat.toFixed(6));
+      push("Remote ID Broadcast Lng", ridPoint.lng.toFixed(6));
+    }
+    const altitude = extractRemoteIdAircraftAltitudeMeters(encounter);
+    if (Number.isFinite(altitude)) {
+      push("Aircraft Altitude", `${altitude.toFixed(1)} m`);
+    }
+  }
+
+  const orderedTopLevelKeys = [
+    "source",
+    "sourceLabel",
+    "secondaryId",
+    "lat",
+    "lng",
+    "lon",
+    "remoteIdLat",
+    "remoteIdLng",
+    "remoteIdLon",
+    "deviceLat",
+    "deviceLng",
+    "deviceLon",
+    "detailLat",
+    "detailLng",
+    "detailLon",
+    "estimatedLat",
+    "estimatedLng",
+    "estimatedLon",
+    "frequencyMhz",
+    "hopCount",
+    "peerName",
+    "provenance",
+    "provenanceNodeId",
+    "provenanceOriginNodeId",
+    "provenancePathNodeIds",
+    "provenanceReceivedAtEpochMs",
+    "timestamp"
+  ];
+
+  for (const key of orderedTopLevelKeys) {
+    if (key in (encounter || {})) {
+      const value = encounter[key];
+      if (value !== null && value !== undefined && key !== "timestamp") {
+        push(`Encounter ${key}`, value);
+      }
+    }
+  }
+
+  appendPayloadDetails(details, encounter?.rawPayloadJson);
+  return details;
+}
+
+function appendPayloadDetails(details, rawPayloadJson) {
+  if (typeof rawPayloadJson !== "string" || rawPayloadJson.length < 2) {
+    return;
+  }
+
+  const push = (name, value) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    const text = String(value).trim();
+    if (!text) {
+      return;
+    }
+    details.push([name, text]);
+  };
+
+  try {
+    const payload = JSON.parse(rawPayloadJson);
+    const flattened = flattenPayloadObject(payload);
+    Object.entries(flattened)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([key, value]) => {
+        push(`Payload ${key}`, value);
+      });
+  } catch (_error) {
+    push("Payload Raw", rawPayloadJson);
+  }
+}
+
+function flattenPayloadObject(input, prefix = "", result = {}) {
+  if (!input || typeof input !== "object") {
+    return result;
+  }
+
+  if (Array.isArray(input)) {
+    result[prefix || "array"] = JSON.stringify(input);
+    return result;
+  }
+
+  Object.entries(input).forEach(([key, value]) => {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (value === null || value === undefined) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      result[fullKey] = JSON.stringify(value);
+      return;
+    }
+    if (typeof value === "object") {
+      flattenPayloadObject(value, fullKey, result);
+      return;
+    }
+    result[fullKey] = value;
+  });
+
+  return result;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function displaySourceForEncounter(encounter) {
