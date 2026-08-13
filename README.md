@@ -52,6 +52,14 @@ Argusdroid includes integration hooks so external SDR hardware, OEM SDKs, and de
 5. Connect a physical Android device.
 6. Run the app module.
 
+## Android Install Guide (Short)
+
+1. On your Android phone, open Settings, then About phone, and tap Build number 7 times to enable Developer options.
+2. In Developer options, enable USB debugging.
+3. Connect the phone by USB and accept the RSA debug prompt on-device.
+4. In Android Studio, select your device and run the app module.
+5. If prompted, grant location, Bluetooth, and notification permissions so scanning can work.
+
 ## Runtime Permissions
 
 Argusdroid requires runtime grants for key permissions, including location and radio access. Collection results are dependent on user grants, OEM behavior, and Android power policy.

@@ -23,7 +23,7 @@
         android:label="Argus"
         android:roundIcon="@android:drawable/ic_menu_compass"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight.NoActionBar">
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
         <activity
             android:name=".MainActivity"
             android:exported="true">
