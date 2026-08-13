@@ -430,6 +430,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var chainAutoSyncIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainAutoSyncIntervalSeconds(context)) }
     var chainPersistentChannelEnabled by remember { mutableStateOf(ScanSettings.isChainPersistentChannelEnabled(context)) }
     var chainHeartbeatIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainHeartbeatIntervalSeconds(context)) }
+    var chainSharePreciseLocationEnabled by remember { mutableStateOf(ScanSettings.isChainSharePreciseLocationEnabled(context)) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
     var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
     var lastScanDurationMs by remember { mutableStateOf(ScanSettings.getLastScanDurationMs(context)) }
@@ -520,6 +521,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
+        chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
@@ -976,6 +978,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
                     chainPersistentChannelEnabled = chainPersistentChannelEnabled,
                     chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
+                    chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     chainMeshSnapshot = chainMesh,
                     onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
@@ -1093,6 +1096,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onChainHeartbeatIntervalChanged = { seconds ->
                         chainHeartbeatIntervalSeconds = seconds
                         ScanSettings.setChainHeartbeatIntervalSeconds(context, seconds)
+                    },
+                    onChainSharePreciseLocationChanged = { enabled ->
+                        chainSharePreciseLocationEnabled = enabled
+                        ScanSettings.setChainSharePreciseLocationEnabled(context, enabled)
                     },
                     onRefreshPeers = {
                         app.container.chainLinkCoordinator.refreshPeers()
@@ -2013,153 +2020,139 @@ private fun AppSettingsPage(
 }
 
 @Composable
-private fun ChainMeshVisualizer(snapshot: ChainMeshSnapshot) {
+private fun ChainMeshVisualizer(
+    snapshot: ChainMeshSnapshot,
+    sharePreciseLocationEnabled: Boolean
+) {
+    val context = LocalContext.current
+    val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
+    val localLocation = remember { LocationSnapshotProvider.read(context) }
+    val hasLocalLocation = remember(localLocation) {
+        localLocation != null && isValidLatLon(localLocation.lat, localLocation.lon)
+    }
+    val localLatLng = remember(localLocation, hasLocalLocation) {
+        val currentLocation = localLocation
+        if (hasLocalLocation && currentLocation != null) {
+            LatLng(currentLocation.lat, currentLocation.lon)
+        } else {
+            LatLng(37.4219999, -122.0840575)
+        }
+    }
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(localLatLng, 16f)
+    }
+    val peers = remember(snapshot.peers) { snapshot.peers.take(24) }
+    val peersWithSharedLocation = remember(peers) {
+        peers.mapNotNull { peer ->
+            val lat = peer.sharedLocationLat
+            val lon = peer.sharedLocationLon
+            if (isValidLatLon(lat, lon)) {
+                peer to LatLng(lat!!, lon!!)
+            } else {
+                null
+            }
+        }
+    }
+    val peersWithoutSharedLocation = remember(peers, peersWithSharedLocation) {
+        val locatedIds = peersWithSharedLocation.map { it.first.nodeId }.toSet()
+        peers.filterNot { it.nodeId in locatedIds }
+    }
+    val relativeFallbackPositions = remember(peersWithoutSharedLocation, localLatLng) {
+        if (peersWithoutSharedLocation.isEmpty()) {
+            emptyList()
+        } else {
+            val step = 360.0 / peersWithoutSharedLocation.size.toDouble()
+            peersWithoutSharedLocation.mapIndexed { index, peer ->
+                val ringMeters = 65.0 + ((index / 8) * 25.0)
+                val bearing = step * index.toDouble()
+                peer to offsetLatLng(localLatLng, ringMeters, bearing)
+            }
+        }
+    }
+    val peerPositions = remember(peersWithSharedLocation, relativeFallbackPositions) {
+        val precise = peersWithSharedLocation.map { (peer, point) -> Triple(peer, point, true) }
+        val fallback = relativeFallbackPositions.map { (peer, point) -> Triple(peer, point, false) }
+        precise + fallback
+    }
+    val hasAnySharedPeerLocations = peersWithSharedLocation.isNotEmpty()
+
+    LaunchedEffect(localLatLng, peerPositions.size) {
+        if (peerPositions.isNotEmpty()) {
+            val bounds = LatLngBounds.Builder().apply {
+                if (hasLocalLocation || !hasAnySharedPeerLocations) {
+                    include(localLatLng)
+                }
+                peerPositions.forEach { (_, point, _) -> include(point) }
+            }.build()
+            runCatching {
+                cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
+            }
+        } else {
+            runCatching {
+                cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(localLatLng, 16f))
+            }
+        }
+    }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Mesh Visualizer", fontWeight = FontWeight.SemiBold)
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(220.dp)
-            ) {
-                val centerX = size.width / 2f
-                val centerY = size.height / 2f
-                val radius = (size.minDimension * 0.35f)
-                val peers = snapshot.peers.take(24)
-                val textPaint = android.graphics.Paint().apply {
-                    color = android.graphics.Color.WHITE
-                    textSize = 11.dp.toPx()
-                    isAntiAlias = true
-                    typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.NORMAL)
-                }
-                val lineHeight = 14.dp.toPx()
-                val labelPadding = 6.dp.toPx()
-                val labelCorner = 8.dp.toPx()
-                val labelGapFromBubble = 14.dp.toPx()
-                val maxLabelWidth = 150.dp.toPx()
-                val localBubbleRadius = 14f
-
-                drawCircle(
-                    color = Color(0xFF1565C0),
-                    radius = localBubbleRadius,
-                    center = androidx.compose.ui.geometry.Offset(centerX, centerY)
-                )
-
-                val localDisplay = snapshot.localDeviceName.take(26)
-                val localNodeLabel = "Node: ${snapshot.localNodeId.take(20)}"
-                val localNameWidth = textPaint.measureText(localDisplay)
-                val localNodeWidth = textPaint.measureText(localNodeLabel)
-                val localLabelWidth = (maxOf(localNameWidth, localNodeWidth) + (labelPadding * 2f)).coerceAtMost(maxLabelWidth)
-                val localLabelHeight = lineHeight * 2f + (labelPadding * 2f)
-                val localLeft = (centerX - localLabelWidth / 2f).coerceIn(0f, size.width - localLabelWidth)
-                val localTop = (centerY - localBubbleRadius - labelGapFromBubble - localLabelHeight).coerceIn(0f, size.height - localLabelHeight)
-                val localAnchorX = localLeft + localLabelWidth / 2f
-                val localAnchorY = localTop + localLabelHeight
-
-                drawLine(
-                    color = Color(0xFF1565C0).copy(alpha = 0.85f),
-                    start = androidx.compose.ui.geometry.Offset(centerX, centerY - localBubbleRadius),
-                    end = androidx.compose.ui.geometry.Offset(localAnchorX, localAnchorY),
-                    strokeWidth = 1.5f
-                )
-
-                drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.72f),
-                    topLeft = androidx.compose.ui.geometry.Offset(localLeft, localTop),
-                    size = androidx.compose.ui.geometry.Size(localLabelWidth, localLabelHeight),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(labelCorner, labelCorner)
-                )
-
-                drawContext.canvas.nativeCanvas.apply {
-                    drawText(
-                        localDisplay,
-                        localLeft + labelPadding,
-                        localTop + labelPadding + textPaint.textSize,
-                        textPaint
-                    )
-                    drawText(
-                        localNodeLabel,
-                        localLeft + labelPadding,
-                        localTop + labelPadding + textPaint.textSize + lineHeight,
-                        textPaint
-                    )
-                }
-
-                if (peers.isNotEmpty()) {
-                    val step = (2.0 * Math.PI) / peers.size.toDouble()
-                    peers.forEachIndexed { index, peer ->
-                        val angle = step * index
-                        val px = centerX + (radius * cos(angle).toFloat())
-                        val py = centerY + (radius * sin(angle).toFloat())
-                        val peerColor = when (peer.state) {
-                            ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
-                            ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
-                            ChainPeerState.REQUESTED -> Color(0xFF1565C0)
-                            ChainPeerState.FAILED -> Color(0xFFB3261E)
+            if (!hasMapsApiKey) {
+                Text("Map overlay unavailable: Google Maps API key is missing.")
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                ) {
+                    GoogleMap(
+                        modifier = Modifier.fillMaxSize(),
+                        cameraPositionState = cameraPositionState,
+                        uiSettings = MapUiSettings(
+                            zoomControlsEnabled = true,
+                            zoomGesturesEnabled = true,
+                            scrollGesturesEnabled = true,
+                            tiltGesturesEnabled = false,
+                            rotationGesturesEnabled = false,
+                            myLocationButtonEnabled = false
+                        )
+                    ) {
+                        if (hasLocalLocation || !hasAnySharedPeerLocations) {
+                            Marker(
+                                state = MarkerState(position = localLatLng),
+                                title = "This device",
+                                snippet = "${snapshot.localDeviceName} • ${snapshot.localNodeId.take(20)}",
+                                icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
+                            )
                         }
 
-                        drawLine(
-                            color = peerColor.copy(alpha = 0.7f),
-                            start = androidx.compose.ui.geometry.Offset(centerX, centerY),
-                            end = androidx.compose.ui.geometry.Offset(px, py),
-                            strokeWidth = 2f
-                        )
-                        drawCircle(
-                            color = peerColor,
-                            radius = 10f,
-                            center = androidx.compose.ui.geometry.Offset(px, py)
-                        )
-
-                        val peerDisplay = (peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId)
-                            .take(26)
-                        val peerIp = peer.host.take(26)
-                        val nameWidth = textPaint.measureText(peerDisplay)
-                        val ipWidth = textPaint.measureText(peerIp)
-                        val labelWidth = (maxOf(nameWidth, ipWidth) + (labelPadding * 2f)).coerceAtMost(maxLabelWidth)
-                        val labelHeight = lineHeight * 2f + (labelPadding * 2f)
-
-                        val unitX = cos(angle).toFloat()
-                        val unitY = sin(angle).toFloat()
-                        val labelCenterX = px + unitX * (labelGapFromBubble + labelWidth / 2f)
-                        val labelCenterY = py + unitY * (labelGapFromBubble + labelHeight / 2f)
-
-                        val left = (labelCenterX - labelWidth / 2f).coerceIn(0f, size.width - labelWidth)
-                        val top = (labelCenterY - labelHeight / 2f).coerceIn(0f, size.height - labelHeight)
-                        val right = left + labelWidth
-                        val bottom = top + labelHeight
-
-                        val anchorX = if (unitX >= 0f) left else right
-                        val anchorY = (top + bottom) / 2f
-                        drawLine(
-                            color = peerColor.copy(alpha = 0.8f),
-                            start = androidx.compose.ui.geometry.Offset(px, py),
-                            end = androidx.compose.ui.geometry.Offset(anchorX, anchorY),
-                            strokeWidth = 1.5f
-                        )
-
-                        drawRoundRect(
-                            color = Color.Black.copy(alpha = 0.72f),
-                            topLeft = androidx.compose.ui.geometry.Offset(left, top),
-                            size = androidx.compose.ui.geometry.Size(labelWidth, labelHeight),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(labelCorner, labelCorner)
-                        )
-
-                        drawContext.canvas.nativeCanvas.apply {
-                            drawText(
-                                peerDisplay,
-                                left + labelPadding,
-                                top + labelPadding + textPaint.textSize,
-                                textPaint
-                            )
-                            drawText(
-                                peerIp,
-                                left + labelPadding,
-                                top + labelPadding + textPaint.textSize + lineHeight,
-                                textPaint
+                        peerPositions.forEach { (peer, peerLatLng, isPrecise) ->
+                            if (hasLocalLocation || !isPrecise) {
+                                Polyline(
+                                    points = listOf(localLatLng, peerLatLng),
+                                    color = meshPeerColor(peer.state),
+                                    width = 4f
+                                )
+                            }
+                            Marker(
+                                state = MarkerState(position = peerLatLng),
+                                title = (peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId).take(26),
+                                snippet = "${peer.state.name} • ${peer.host.take(32)} • ${if (isPrecise) "shared precise" else "relative"}",
+                                icon = BitmapDescriptorFactory.defaultMarker(meshPeerMarkerHue(peer.state))
                             )
                         }
                     }
                 }
+            }
+            if (sharePreciseLocationEnabled && hasAnySharedPeerLocations) {
+                Text("Mesh overlay includes peer-shared precise locations where available; remaining peers are shown relatively.")
+            } else if (sharePreciseLocationEnabled) {
+                Text("Precise sharing is enabled on this device. Peer markers remain relative until peers enable sharing too.")
+            } else {
+                Text("Relative mesh overlay: peers are shown topologically around your location.")
+            }
+            if (!hasLocalLocation) {
+                Text("Local location unavailable on this device right now; some link lines may be hidden until location is available.")
             }
             Text("Blue center is this device (${snapshot.localDeviceName}). Green nodes are connected peers.")
         }
@@ -2181,6 +2174,7 @@ private fun DetectionPage(
     chainAutoSyncIntervalSeconds: Long,
     chainPersistentChannelEnabled: Boolean,
     chainHeartbeatIntervalSeconds: Long,
+    chainSharePreciseLocationEnabled: Boolean,
     liveMapUpdateIntervalSeconds: Long,
     chainMeshSnapshot: ChainMeshSnapshot,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
@@ -2198,6 +2192,7 @@ private fun DetectionPage(
     onChainAutoSyncIntervalChanged: (Long) -> Unit,
     onChainPersistentChannelChanged: (Boolean) -> Unit,
     onChainHeartbeatIntervalChanged: (Long) -> Unit,
+    onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
     onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
     onSyncNow: suspend () -> String
@@ -2327,7 +2322,7 @@ private fun DetectionPage(
                         if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
                             candidate.copy(
                                 approximateLocation = DetectionLocation(inferred.lat, inferred.lon),
-                                approximateMethod = "Inferred from range + movement",
+                                approximateMethod = "Inferred location",
                                 approximateRangeMeters = inferred.estimatedRangeMeters
                             )
                         } else if (isValidLatLon(latest.lat, latest.lon)) {
@@ -2367,9 +2362,6 @@ private fun DetectionPage(
             val rangeSnippet = candidate.approximateRangeMeters
                 ?.let { " • Approx range ${formatDistanceFeetMiles(it)}" }
                 .orEmpty()
-            val methodSnippet = candidate.approximateMethod
-                ?.let { "$it" }
-                ?: "Approx location"
             val approachSnippet = candidate.approachSignal
                 ?.takeIf { it.isApproaching }
                 ?.let { signal ->
@@ -2420,7 +2412,7 @@ private fun DetectionPage(
                     motionBadge = motionBadge
                 ),
                 snippet = buildThreeLineSnippet(
-                    line1 = "$methodSnippet • Seen ${candidate.seenCount}x",
+                    line1 = "Seen ${candidate.seenCount}x",
                     line2 = "Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
                     line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
                 ),
@@ -2499,6 +2491,7 @@ private fun DetectionPage(
                     val timestamp = pin.encounterTimestampEpochMs ?: return@DetectionMapPage
                     onEncounterMapPinClick(pin.source, pin.primaryId, timestamp)
                 },
+                liveUpdatesAllowed = false,
                 onLiveCollect = onLiveCollect,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
@@ -2521,6 +2514,8 @@ private fun DetectionPage(
                         onDeviceMapPinClick(pin.source, pin.primaryId)
                     }
                 },
+                liveUpdatesAllowed = true,
+                useSourceOnlyPinColors = true,
                 showMovingOnlyControl = true,
                 movingOnlyEnabled = movingOnlyOnDeviceMap,
                 onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
@@ -2543,6 +2538,7 @@ private fun DetectionPage(
                 chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
                 chainPersistentChannelEnabled = chainPersistentChannelEnabled,
                 chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
+                chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                 chainMeshSnapshot = chainMeshSnapshot,
                 onChainLinkChanged = onChainLinkChanged,
                 onChainDeviceNameChanged = onChainDeviceNameChanged,
@@ -2551,6 +2547,7 @@ private fun DetectionPage(
                 onChainAutoSyncIntervalChanged = onChainAutoSyncIntervalChanged,
                 onChainPersistentChannelChanged = onChainPersistentChannelChanged,
                 onChainHeartbeatIntervalChanged = onChainHeartbeatIntervalChanged,
+                onChainSharePreciseLocationChanged = onChainSharePreciseLocationChanged,
                 onRefreshPeers = onRefreshPeers,
                 onSendLinkRequest = onSendLinkRequest,
                 onSyncNow = onSyncNow
@@ -2688,6 +2685,7 @@ private fun DetectionMeshNetworkPage(
     chainAutoSyncIntervalSeconds: Long,
     chainPersistentChannelEnabled: Boolean,
     chainHeartbeatIntervalSeconds: Long,
+    chainSharePreciseLocationEnabled: Boolean,
     chainMeshSnapshot: ChainMeshSnapshot,
     onChainLinkChanged: (Boolean) -> Unit,
     onChainDeviceNameChanged: (String) -> Unit,
@@ -2696,6 +2694,7 @@ private fun DetectionMeshNetworkPage(
     onChainAutoSyncIntervalChanged: (Long) -> Unit,
     onChainPersistentChannelChanged: (Boolean) -> Unit,
     onChainHeartbeatIntervalChanged: (Long) -> Unit,
+    onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
     onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
     onSyncNow: suspend () -> String
@@ -2748,7 +2747,10 @@ private fun DetectionMeshNetworkPage(
             }
         }
         item {
-            ChainMeshVisualizer(snapshot = chainMeshSnapshot)
+            ChainMeshVisualizer(
+                snapshot = chainMeshSnapshot,
+                sharePreciseLocationEnabled = chainSharePreciseLocationEnabled
+            )
         }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -2828,6 +2830,18 @@ private fun DetectionMeshNetworkPage(
                             enabled = chainLinkEnabled && chainSharedSecret.isNotBlank()
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Share Precise Location")
+                        Switch(
+                            checked = chainSharePreciseLocationEnabled,
+                            onCheckedChange = onChainSharePreciseLocationChanged,
+                            enabled = chainLinkEnabled
+                        )
+                    }
+                    Text("When enabled, this device shares its current location with linked peers to improve mesh map accuracy.")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -2942,6 +2956,15 @@ private fun DetectionMeshNetworkPage(
                                     }
                                     Text("State: ${peer.state.name}")
                                     Text("Last seen: ${formatEpoch(peer.lastSeenEpochMs)}")
+                                    if (isValidLatLon(peer.sharedLocationLat, peer.sharedLocationLon)) {
+                                        val lat = peer.sharedLocationLat ?: 0.0
+                                        val lon = peer.sharedLocationLon ?: 0.0
+                                        Text(
+                                            "Shared precise location: ${"%.5f".format(lat)}, ${"%.5f".format(lon)}"
+                                        )
+                                    } else {
+                                        Text("Shared precise location: not provided")
+                                    }
                                     if (peer.lastSuccessfulSyncEpochMs != null) {
                                         Text("Last sync: ${formatEpoch(peer.lastSuccessfulSyncEpochMs)}")
                                     }
@@ -3009,6 +3032,8 @@ private fun DetectionMapPage(
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
     onPinDetailsClick: (MapPin) -> Unit,
+    liveUpdatesAllowed: Boolean = true,
+    useSourceOnlyPinColors: Boolean = false,
     showMovingOnlyControl: Boolean = false,
     movingOnlyEnabled: Boolean = false,
     onMovingOnlyEnabledChange: (Boolean) -> Unit = {},
@@ -3107,7 +3132,13 @@ private fun DetectionMapPage(
         }
     }
 
-    LaunchedEffect(liveModeEnabled) {
+    LaunchedEffect(liveModeEnabled, liveUpdatesAllowed) {
+        if (!liveUpdatesAllowed) {
+            liveCollectInProgress = false
+            liveStatusMessage = "Live updates are available on Device Location Map only."
+            return@LaunchedEffect
+        }
+
         if (!liveModeEnabled) {
             liveCollectInProgress = false
             liveStatusMessage = "Live mode is off."
@@ -3217,8 +3248,13 @@ private fun DetectionMapPage(
                             ) {
                                 Text("Live Map Updates", fontWeight = FontWeight.Bold)
                                 Switch(
-                                    checked = liveModeEnabled,
-                                    onCheckedChange = { liveModeEnabled = it }
+                                    checked = liveModeEnabled && liveUpdatesAllowed,
+                                    onCheckedChange = { enabled ->
+                                        if (liveUpdatesAllowed) {
+                                            liveModeEnabled = enabled
+                                        }
+                                    },
+                                    enabled = liveUpdatesAllowed
                                 )
                             }
                             Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
@@ -3307,7 +3343,9 @@ private fun DetectionMapPage(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
                             snippet = pin.snippet,
-                            icon = BitmapDescriptorFactory.defaultMarker(markerHueForPin(pin)),
+                            icon = BitmapDescriptorFactory.defaultMarker(
+                                markerHueForPin(pin, useSourceOnlyPinColors)
+                            ),
                             onInfoWindowClick = {
                                 onPinDetailsClick(pin)
                             }
@@ -3457,6 +3495,43 @@ private data class PinLegendItem(
     val color: Color
 )
 
+private fun offsetLatLng(base: LatLng, distanceMeters: Double, bearingDegrees: Double): LatLng {
+    val earthRadiusMeters = 6_378_137.0
+    val angularDistance = distanceMeters / earthRadiusMeters
+    val bearingRad = Math.toRadians(bearingDegrees)
+    val lat1 = Math.toRadians(base.latitude)
+    val lon1 = Math.toRadians(base.longitude)
+
+    val sinLat1 = sin(lat1)
+    val cosLat1 = cos(lat1)
+    val sinAngular = sin(angularDistance)
+    val cosAngular = cos(angularDistance)
+
+    val lat2 = kotlin.math.asin(
+        sinLat1 * cosAngular + cosLat1 * sinAngular * cos(bearingRad)
+    )
+    val lon2 = lon1 + kotlin.math.atan2(
+        sin(bearingRad) * sinAngular * cosLat1,
+        cosAngular - sinLat1 * sin(lat2)
+    )
+
+    return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
+}
+
+private fun meshPeerColor(state: ChainPeerState): Color = when (state) {
+    ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
+    ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
+    ChainPeerState.REQUESTED -> Color(0xFF1565C0)
+    ChainPeerState.FAILED -> Color(0xFFB3261E)
+}
+
+private fun meshPeerMarkerHue(state: ChainPeerState): Float = when (state) {
+    ChainPeerState.CONNECTED -> BitmapDescriptorFactory.HUE_GREEN
+    ChainPeerState.DISCOVERED -> BitmapDescriptorFactory.HUE_YELLOW
+    ChainPeerState.REQUESTED -> BitmapDescriptorFactory.HUE_AZURE
+    ChainPeerState.FAILED -> BitmapDescriptorFactory.HUE_RED
+}
+
 private fun selectVisiblePinsWithSourceCoverage(pins: List<MapPin>, pinLimit: Int): List<MapPin> {
     if (pins.isEmpty()) return emptyList()
     val safeLimit = pinLimit.coerceAtLeast(1)
@@ -3604,16 +3679,21 @@ private fun buildPinTitle(sourceLabel: String, primaryId: String, motionBadge: S
 
 private fun buildThreeLineSnippet(line1: String, line2: String, line3: String): String {
     fun cap(text: String, max: Int): String {
-        val trimmed = text.trim()
-        return if (trimmed.length <= max) trimmed else trimmed.take(max - 3).trimEnd() + "..."
+        val compact = text.trim().replace("\n", " ").replace(Regex("\\s+"), " ")
+        return if (compact.length <= max) compact else compact.take(max - 3).trimEnd() + "..."
     }
-    return listOf(cap(line1, 72), cap(line2, 72), cap(line3, 72)).joinToString("\n")
+    val segments = listOf(line1, line2, line3)
+        .map { cap(it, 54) }
+        .filter { it.isNotBlank() }
+    return cap(segments.joinToString(" | "), 180)
 }
 
-private fun markerHueForPin(pin: MapPin): Float {
+private fun markerHueForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): Float {
+    if (useSourceOnlyPinColors) {
+        return markerHueForSource(pin.source)
+    }
     return when (pin.motionBadge) {
         "MOVING" -> BitmapDescriptorFactory.HUE_GREEN
-        "STATIC" -> BitmapDescriptorFactory.HUE_AZURE
         else -> markerHueForSource(pin.source)
     }
 }
