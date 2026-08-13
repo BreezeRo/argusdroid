@@ -10,21 +10,36 @@ import android.telephony.CellInfoLte
 import android.telephony.CellInfoNr
 import android.telephony.CellInfoWcdma
 import android.telephony.TelephonyManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.worker.ScanSettings
 import org.json.JSONObject
 
 class CellularScanner(
     private val context: Context
 ) : SignalScanner {
     override suspend fun scanOnce(): List<Encounter> {
-        if (!hasCellPermissions()) return emptyList()
+        if (!ScanSettings.isCellularSensorEnabled(context)) return emptyList()
+        if (!hasCellPermissions()) {
+            Log.w(TAG, "Skipping cellular scan: required permissions not granted")
+            return emptyList()
+        }
         val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-            ?: return emptyList()
+            ?: run {
+                Log.w(TAG, "Skipping cellular scan: telephony service unavailable")
+                return emptyList()
+            }
 
-        val allCells = runCatching { telephonyManager.allCellInfo }.getOrNull() ?: return emptyList()
+        val allCells = runCatching { telephonyManager.allCellInfo }
+            .onFailure { error -> Log.w(TAG, "Failed to read allCellInfo", error) }
+            .getOrNull()
+            ?: return emptyList()
+        if (allCells.isEmpty()) {
+            Log.i(TAG, "Cellular scan returned no cells")
+        }
         val now = System.currentTimeMillis()
         val location = LocationSnapshotProvider.read(context)
 
@@ -32,10 +47,15 @@ class CellularScanner(
     }
 
     private fun hasCellPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(
+        val hasFineLocation = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
+        val hasReadPhoneState = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+        return hasFineLocation && hasReadPhoneState
     }
 
     private fun CellInfo.toEncounter(
@@ -235,5 +255,9 @@ class CellularScanner(
 
             else -> null
         }
+    }
+
+    private companion object {
+        private const val TAG = "CellularScanner"
     }
 }

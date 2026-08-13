@@ -70,6 +70,11 @@ object DetectionReadinessAdvisor {
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
 
+        val hasReadPhoneState = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+
         val hasBackgroundLocation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContextCompat.checkSelfPermission(
                 context,
@@ -118,6 +123,15 @@ object DetectionReadinessAdvisor {
                 recommendedValue = "Granted",
                 currentValue = if (hasFineLocation) "Granted" else "Missing",
                 isMissing = !hasFineLocation,
+                openSettingsLabel = "Open App Permissions",
+                settingsIntent = appSettingsIntent
+            ),
+            DetectionReadinessItem(
+                id = "perm_read_phone_state",
+                title = "Phone State Permission",
+                recommendedValue = "Granted",
+                currentValue = if (hasReadPhoneState) "Granted" else "Missing",
+                isMissing = !hasReadPhoneState,
                 openSettingsLabel = "Open App Permissions",
                 settingsIntent = appSettingsIntent
             ),

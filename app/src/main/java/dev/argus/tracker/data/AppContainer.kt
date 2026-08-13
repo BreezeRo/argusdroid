@@ -35,7 +35,7 @@ class DefaultAppContainer(
                 WifiScanner(context),
                 BleScanner(context),
                 CellularScanner(context),
-                RemoteIdScanner()
+                RemoteIdScanner(context)
             )
         )
     }

@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.worker.ScanSettings as ArgusScanSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,6 +25,7 @@ class BleScanner(
     private val context: Context
 ) : SignalScanner {
     override suspend fun scanOnce(): List<Encounter> {
+        if (!ArgusScanSettings.isBleSensorEnabled(context)) return emptyList()
         if (!hasBlePermissions()) return emptyList()
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return emptyList()

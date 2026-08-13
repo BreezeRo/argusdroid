@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.worker.ScanSettings
 import org.json.JSONObject
 
 class WifiScanner(
@@ -16,6 +17,7 @@ class WifiScanner(
 ) : SignalScanner {
 
     override suspend fun scanOnce(): List<Encounter> {
+        if (!ScanSettings.isWifiSensorEnabled(context)) return emptyList()
         if (!hasWifiPermissions()) return emptyList()
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             ?: return emptyList()

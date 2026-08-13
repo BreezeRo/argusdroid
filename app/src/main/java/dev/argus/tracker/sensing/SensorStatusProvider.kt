@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.provider.Settings
 import android.telephony.TelephonyManager
+import dev.argus.tracker.worker.ScanSettings
 
 data class SensorStatus(
     val name: String,
@@ -30,10 +31,26 @@ object SensorStatusProvider {
             TelephonyManager.PHONE_TYPE_NONE && !airplaneModeOn
 
         return listOf(
-            SensorStatus(name = "Wi-Fi", isOn = wifiOn, factoredByArgus = true),
-            SensorStatus(name = "Bluetooth LE", isOn = bleOn, factoredByArgus = true),
-            SensorStatus(name = "Remote ID", isOn = false, factoredByArgus = false),
-            SensorStatus(name = "Cellular", isOn = cellularOn, factoredByArgus = true)
+            SensorStatus(
+                name = "Wi-Fi",
+                isOn = wifiOn,
+                factoredByArgus = ScanSettings.isWifiSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "Bluetooth LE",
+                isOn = bleOn,
+                factoredByArgus = ScanSettings.isBleSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "Remote ID",
+                isOn = ScanSettings.isRemoteIdSensorEnabled(context),
+                factoredByArgus = ScanSettings.isRemoteIdSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "Cellular",
+                isOn = cellularOn,
+                factoredByArgus = ScanSettings.isCellularSensorEnabled(context)
+            )
         )
     }
 }
