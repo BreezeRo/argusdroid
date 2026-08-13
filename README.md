@@ -16,11 +16,16 @@ Argusdroid is an Android mobile app for long-term device encounter intelligence.
 - Location snapshot enrichment attached to supported encounter records.
 - Home, Detection, Devices, Encounters, and Settings app sections.
 - Tracking controls with status feedback, real-time status refresh, and last scan timestamp.
+- Per-sensor collection toggles on Home (Wi-Fi, Bluetooth LE, Cellular, Remote ID), persisted in app settings.
 - Detection readiness checks with recommended settings and deep links to system settings.
-- Dual map views: Encounters Map and Devices Map.
+- Detection map suite with Encounters Map, Devices Map, and Device Location Map (cell-device pins).
 - Map controls for live updates, pin limits, and optional diagnostics panel.
 - Devices and Encounters filtering by scope (Recent 100 or All), source, and text query.
 - Devices sorting by Last Seen or Most Seen.
+- Optional secondary-ID visibility toggles on Devices and Encounters lists.
+- Cellular entries labeled with explicit tower context (for example, CELL TOWER (LTE), CELL TOWER (NR)).
+- CELL encounter details parse and display tower/radio fields (radio type, operator, IDs, signal fields).
+- Optional cell tower location estimation via Mozilla Location Service with range estimate from device in miles/feet.
 - Configurable scan interval in Settings, with WorkManager scheduling.
 
 ## Reality Check: Platform Limits
@@ -82,6 +87,17 @@ The manifest reads `${MAPS_API_KEY}` through Gradle manifest placeholders, so no
 ## Runtime Permissions
 
 Argusdroid requires runtime grants for key permissions, including location and radio access. Collection results are dependent on user grants, OEM behavior, and Android power policy.
+
+Notable current runtime asks include:
+
+- ACCESS_FINE_LOCATION
+- BLUETOOTH_SCAN / BLUETOOTH_CONNECT (API-dependent)
+- NEARBY_WIFI_DEVICES (API-dependent)
+- READ_PHONE_STATE (for cellular detail access)
+
+If a sensor is disabled via Home toggles, that sensor is skipped during scheduled and live scans.
+
+For optional tower geolocation lookup, network access is required and location is best-effort based on external cell-ID databases.
 
 ## Data and Privacy Guidance
 
