@@ -3521,9 +3521,10 @@ private fun ChainMeshVisualizer(
 ) {
     val context = LocalContext.current
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
-    val localLocation = remember { LocationSnapshotProvider.read(context) }
+    var localLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
     val hasLocalLocation = remember(localLocation) {
-        localLocation != null && isValidLatLon(localLocation.lat, localLocation.lon)
+        val currentLocation = localLocation
+        currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)
     }
     val localLatLng = remember(localLocation, hasLocalLocation) {
         val currentLocation = localLocation
@@ -3570,6 +3571,13 @@ private fun ChainMeshVisualizer(
         precise + fallback
     }
     val hasAnySharedPeerLocations = peersWithSharedLocation.isNotEmpty()
+
+    LaunchedEffect(context) {
+        while (true) {
+            localLocation = LocationSnapshotProvider.read(context)
+            delay(5_000)
+        }
+    }
 
     LaunchedEffect(localLatLng, peerPositions.size) {
         if (peerPositions.isNotEmpty()) {
