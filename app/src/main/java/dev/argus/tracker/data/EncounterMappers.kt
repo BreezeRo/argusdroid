@@ -6,6 +6,7 @@ import dev.argus.tracker.domain.EncounterProvenance
 import dev.argus.tracker.domain.EncounterSource
 import java.security.MessageDigest
 import java.util.Locale
+import org.json.JSONObject
 
 fun Encounter.toEntity(): EncounterEntity = EncounterEntity(
     id = id,
@@ -50,9 +51,15 @@ fun EncounterEntity.toDomain(): Encounter = Encounter(
 
 fun computeEncounterFingerprint(encounter: Encounter): String {
     val normalizedPayload = encounter.rawPayloadJson.trim()
+    val remoteIdIdentityKey = if (encounter.source == EncounterSource.REMOTE_ID) {
+        buildRemoteIdIdentityKey(encounter, normalizedPayload)
+    } else {
+        null
+    }
+
     val normalized = listOf(
         encounter.source.name,
-        encounter.timestampEpochMs.toString(),
+        remoteIdIdentityKey ?: encounter.timestampEpochMs.toString(),
         encounter.primaryId,
         encounter.secondaryId.orEmpty(),
         encounter.rssiDbm?.toString().orEmpty(),
@@ -63,4 +70,22 @@ fun computeEncounterFingerprint(encounter: Encounter): String {
     ).joinToString("|")
     val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
     return digest.joinToString(separator = "") { "%02x".format(it) }
+}
+
+private fun buildRemoteIdIdentityKey(encounter: Encounter, normalizedPayload: String): String? {
+    val payload = runCatching { JSONObject(normalizedPayload) }.getOrNull() ?: return null
+
+    val decoded = payload.optJSONObject("remoteIdDecoded")
+    val uasId = decoded?.optString("uasId", "")?.trim().orEmpty()
+        .ifBlank { payload.optString("remoteIdPrimaryId", "").trim() }
+        .ifBlank { encounter.primaryId.trim() }
+    if (uasId.isBlank()) return null
+
+    val ts = decoded?.optLong("messageTimestampEpochMs")
+        ?.takeIf { it > 0L }
+        ?: payload.optLong("timestampEpochMs")
+            .takeIf { it > 0L }
+        ?: encounter.timestampEpochMs
+
+    return "rid:$uasId:$ts"
 }

@@ -15,6 +15,8 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.sensing.remoteid.RemoteIdBleDecoder
+import dev.argus.tracker.sensing.remoteid.RemoteIdPayloadParser
 import dev.argus.tracker.worker.ScanSettings as ArgusScanSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
@@ -117,22 +119,27 @@ class BleScanner(
             if (hasBluetoothConnectPermission()) device?.name else null
         }.getOrNull()
         val record = scanRecord
-        val classification = classifyBleDevice(name, record)
-        val remoteIdCandidate = isLikelyRemoteId(record)
+        val decodedRemoteId = RemoteIdBleDecoder.decodeFromScanRecord(record)
+        val remoteIdCandidate = decodedRemoteId != null || isLikelyRemoteId(record)
+        val remoteIdPrimaryId = decodedRemoteId?.uasId?.takeIf { it.isNotBlank() }
+        val remoteIdSecondaryId = decodedRemoteId?.operatorId?.takeIf { it.isNotBlank() }
         return Encounter(
             timestampEpochMs = System.currentTimeMillis(),
             source = if (remoteIdCandidate) EncounterSource.REMOTE_ID else EncounterSource.BLUETOOTH_LE,
-            primaryId = mac,
-            secondaryId = name,
+            primaryId = if (remoteIdCandidate) remoteIdPrimaryId ?: mac else mac,
+            secondaryId = if (remoteIdCandidate) remoteIdSecondaryId ?: name else name,
             rssiDbm = rssi,
             frequencyMhz = null,
             lat = location?.lat,
             lon = location?.lon,
-            rawPayloadJson = buildBlePayload(this)
+            rawPayloadJson = buildBlePayload(this, decodedRemoteId)
         )
     }
 
-    private fun buildBlePayload(result: ScanResult): String {
+    private fun buildBlePayload(
+        result: ScanResult,
+        decodedRemoteId: dev.argus.tracker.sensing.remoteid.RemoteIdDecoded?
+    ): String {
         val address = runCatching { result.device?.address }.getOrNull()
         val name = runCatching {
             if (hasBluetoothConnectPermission()) result.device?.name else null
@@ -160,6 +167,29 @@ class BleScanner(
         payload.put("manufacturerSpecificDataSize", record?.manufacturerSpecificData?.size() ?: 0)
         payload.put("serviceDataSize", record?.serviceData?.size ?: 0)
         payload.put("rawBytesHex", record?.bytes?.toHex())
+
+        decodedRemoteId?.let { decoded ->
+            payload.put("remoteIdSchema", RemoteIdPayloadParser.SCHEMA_VERSION)
+            payload.put("remoteIdTransport", "BLE")
+            payload.put("remoteIdParserVersion", decoded.parserVersion)
+            payload.put("remoteIdDecoded", JSONObject()
+                .put("messageType", decoded.messageType)
+                .put("uasId", decoded.uasId)
+                .put("operatorId", decoded.operatorId)
+                .put("operatorLat", decoded.operatorLat)
+                .put("operatorLon", decoded.operatorLon)
+                .put("droneLat", decoded.droneLat)
+                .put("droneLon", decoded.droneLon)
+                .put("altitudeMeters", decoded.altitudeMeters)
+                .put("speedMetersPerSecond", decoded.speedMetersPerSecond)
+                .put("headingDegrees", decoded.headingDegrees)
+                .put("emergencyStatus", decoded.emergencyStatus)
+                .put("messageTimestampEpochMs", decoded.messageTimestampEpochMs)
+                .put("parseConfidence", decoded.parseConfidence.name)
+                .put("parseNotes", decoded.parseNotes.joinToString(separator = ","))
+            )
+        }
+
         return payload.toString()
     }
 
