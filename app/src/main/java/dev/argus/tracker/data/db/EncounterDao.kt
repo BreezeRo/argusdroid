@@ -34,6 +34,17 @@ interface EncounterDao {
 
     @Query(
         """
+        SELECT *
+        FROM encounters
+        WHERE NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
+        ORDER BY timestampEpochMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun listAllForExport(limit: Int): List<EncounterEntity>
+
+    @Query(
+        """
         SELECT source, COUNT(*) as count
         FROM encounters
         WHERE timestampEpochMs >= :sinceEpochMs

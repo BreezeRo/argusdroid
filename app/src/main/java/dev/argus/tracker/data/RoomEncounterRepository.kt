@@ -20,6 +20,9 @@ class RoomEncounterRepository(
     override fun observeAll(): Flow<List<Encounter>> =
         dao.observeAll().map { list -> list.map { it.toDomain() } }
 
+    override suspend fun listAll(limit: Int): List<Encounter> =
+        dao.listAllForExport(limit).map { it.toDomain() }
+
     override suspend fun listSince(sinceEpochMs: Long, limit: Int): List<Encounter> =
         dao.listSince(sinceEpochMs, limit).map { it.toDomain() }
 
