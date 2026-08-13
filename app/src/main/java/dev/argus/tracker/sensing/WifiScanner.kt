@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
@@ -20,7 +21,7 @@ class WifiScanner(
             ?: return emptyList()
 
         @Suppress("DEPRECATION")
-        val results = wifiManager.scanResults ?: emptyList()
+        val results = runCatching { wifiManager.scanResults }.getOrNull() ?: emptyList()
         val now = System.currentTimeMillis()
         val location = LocationSnapshotProvider.read(context)
 
@@ -62,10 +63,18 @@ class WifiScanner(
             context,
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
+        val nearbyWifi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
         val wifi = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.ACCESS_WIFI_STATE
         ) == PackageManager.PERMISSION_GRANTED
-        return fine && wifi
+        return fine && nearbyWifi && wifi
     }
 }

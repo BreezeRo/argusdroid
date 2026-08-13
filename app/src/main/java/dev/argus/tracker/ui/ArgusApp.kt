@@ -2,7 +2,11 @@ package dev.argus.tracker.ui
 
 import android.net.Uri
 import android.content.ActivityNotFoundException
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,6 +26,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -29,14 +35,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapUiSettings
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
 import dev.argus.tracker.worker.WorkScheduler
@@ -45,17 +63,21 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.delay
 
 private const val SETTINGS_ROUTE = "settings"
+private const val DETECTION_ROUTE = "detection"
 private const val DEVICES_ROUTE = "devices"
 private const val ENCOUNTERS_ROUTE = "encounters"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 
-private val topLevelRoutes = setOf(SETTINGS_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE)
+private val topLevelRoutes = setOf(SETTINGS_ROUTE, DETECTION_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
 private data class DeviceItem(
@@ -80,6 +102,8 @@ fun ArgusApp() {
     var trackingActive by remember { mutableStateOf(false) }
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
+    var trackingStartMessage by remember { mutableStateOf<String?>(null) }
+    var trackingStartMessageIsError by remember { mutableStateOf(false) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
@@ -122,6 +146,12 @@ fun ArgusApp() {
                         label = { Text("Settings") }
                     )
                     NavigationBarItem(
+                        selected = currentRoute == DETECTION_ROUTE,
+                        onClick = { navController.navigate(DETECTION_ROUTE) },
+                        icon = { Text("R") },
+                        label = { Text("Detection") }
+                    )
+                    NavigationBarItem(
                         selected = currentRoute == DEVICES_ROUTE,
                         onClick = { navController.navigate(DEVICES_ROUTE) },
                         icon = { Text("D") },
@@ -150,8 +180,10 @@ fun ArgusApp() {
                     sensorStatuses = sensorStatuses,
                     summary = summary,
                     onStart = {
-                        WorkScheduler.start(context)
                         scope.launch {
+                            val startResult = WorkScheduler.startAndVerify(context)
+                            trackingStartMessage = startResult.message
+                            trackingStartMessageIsError = !startResult.success
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
@@ -164,6 +196,8 @@ fun ArgusApp() {
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                            trackingStartMessage = "Tracking stopped."
+                            trackingStartMessageIsError = false
                         }
                     },
                     onRefresh = {
@@ -172,6 +206,8 @@ fun ArgusApp() {
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                            trackingStartMessage = "Status refreshed."
+                            trackingStartMessageIsError = false
                         }
                     },
                     onClearEncounters = {
@@ -186,7 +222,18 @@ fun ArgusApp() {
                             viewModel.refreshSummary()
                         }
                     },
+                    startMessage = trackingStartMessage,
+                    startMessageIsError = trackingStartMessageIsError
+                )
+            }
+
+            composable(DETECTION_ROUTE) {
+                DetectionPage(
                     readinessItems = readinessItems,
+                    encounters = recent,
+                    onRefresh = {
+                        readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                    },
                     onOpenReadinessSetting = { item ->
                         runCatching {
                             context.startActivity(item.settingsIntent)
@@ -253,10 +300,9 @@ private fun SettingsPage(
     onRefresh: () -> Unit,
     onClearEncounters: () -> Unit,
     onClearDevices: () -> Unit,
-    readinessItems: List<DetectionReadinessItem>,
-    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
+    startMessage: String?,
+    startMessageIsError: Boolean
 ) {
-    val missingItems = readinessItems.filter { it.isMissing }
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(bottom = 16.dp)
@@ -272,6 +318,19 @@ private fun SettingsPage(
                 text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
                 fontWeight = FontWeight.Medium
             )
+        }
+        if (startMessage != null) {
+            item {
+                val statusColor = if (startMessageIsError) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = startMessage,
+                        color = statusColor,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -295,32 +354,6 @@ private fun SettingsPage(
                 }
                 Button(onClick = onClearDevices) {
                     Text("Clear Devices")
-                }
-            }
-        }
-
-        item {
-            Text("Detection Readiness", fontWeight = FontWeight.Bold)
-        }
-        if (missingItems.isEmpty()) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text("All key permissions and settings are in recommended state.")
-                    }
-                }
-            }
-        } else {
-            items(missingItems) { item ->
-                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(item.title, fontWeight = FontWeight.Bold)
-                        Text("Current: ${item.currentValue}")
-                        Text("Recommended: ${item.recommendedValue}")
-                        Button(onClick = { onOpenReadinessSetting(item) }) {
-                            Text(item.openSettingsLabel)
-                        }
-                    }
                 }
             }
         }
@@ -357,6 +390,292 @@ private fun SettingsPage(
             }
         }
     }
+}
+
+@Composable
+private fun DetectionPage(
+    readinessItems: List<DetectionReadinessItem>,
+    encounters: List<Encounter>,
+    onRefresh: () -> Unit,
+    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
+) {
+    var selectedTab by remember { mutableStateOf(0) }
+    val tabs = listOf("Readiness", "Map")
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Detection", style = MaterialTheme.typography.headlineMedium)
+        TabRow(selectedTabIndex = selectedTab) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(title) }
+                )
+            }
+        }
+
+        if (selectedTab == 0) {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(bottom = 16.dp)
+            ) {
+                item {
+                    Text("Recommended settings and permissions for stronger detections.")
+                }
+                item {
+                    Button(onClick = onRefresh) {
+                        Text("Refresh Readiness")
+                    }
+                }
+                items(readinessItems) { item ->
+                    val statusText = if (item.isMissing) "MISSING" else "READY"
+                    val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(item.title, fontWeight = FontWeight.Bold)
+                                Text(statusText, color = statusColor, fontWeight = FontWeight.Bold)
+                            }
+                            Text("Current: ${item.currentValue}")
+                            Text("Recommended: ${item.recommendedValue}")
+                            Button(onClick = { onOpenReadinessSetting(item) }) {
+                                Text(item.openSettingsLabel)
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            DetectionMapPage(encounters = encounters)
+        }
+    }
+}
+
+@Composable
+private fun DetectionMapPage(encounters: List<Encounter>) {
+    val context = LocalContext.current
+    val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
+    val mapsApiKeyDiagnostic = remember(context) { getMapsApiKeyDiagnostic(context) }
+    val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
+    val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
+    var mapLoaded by remember { mutableStateOf(false) }
+    var mapError by remember { mutableStateOf<String?>(null) }
+    val pins = remember(encounters) {
+        encounters
+            .mapNotNull { encounter ->
+                val lat = encounter.lat
+                val lon = encounter.lon
+                if (!isValidLatLon(lat, lon)) {
+                    null
+                } else {
+                    Triple(
+                        LatLng(lat!!, lon!!),
+                        "${encounter.source} • ${encounter.primaryId}",
+                        formatEpoch(encounter.timestampEpochMs)
+                    )
+                }
+            }
+    }
+
+    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    var autoPositioned by rememberSaveable { mutableStateOf(false) }
+
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 2f)
+    }
+
+    LaunchedEffect(currentLocation, pins, hasMapsApiKey, autoPositioned) {
+        if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
+
+        when {
+            pins.size > 1 && mapLoaded -> {
+                val boundsBuilder = LatLngBounds.Builder()
+                pins.forEach { pin -> boundsBuilder.include(pin.first) }
+                val bounds = boundsBuilder.build()
+                runCatching {
+                    cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
+                }.onFailure {
+                    mapError = "Failed to fit pins in view: ${it.message ?: "unknown error"}"
+                }
+            }
+
+            pins.size == 1 -> {
+                runCatching {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(pins.first().first, 13f)
+                    )
+                }.onFailure {
+                    mapError = "Failed to center on pin: ${it.message ?: "unknown error"}"
+                }
+            }
+
+            currentLocation != null -> {
+                runCatching {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(
+                            LatLng(currentLocation.lat, currentLocation.lon),
+                            13f
+                        )
+                    )
+                }.onFailure {
+                    mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+                }
+            }
+
+            else -> {
+                runCatching {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(LatLng(0.0, 0.0), 2f)
+                    )
+                }.onFailure {
+                    mapError = "Failed to move camera to fallback location: ${it.message ?: "unknown error"}"
+                }
+            }
+        }
+
+        autoPositioned = true
+    }
+
+    LaunchedEffect(hasMapsApiKey, mapLoaded, hasNetwork, playServicesDiagnostic) {
+        if (!hasMapsApiKey || mapLoaded) return@LaunchedEffect
+        delay(7000)
+        if (mapLoaded) return@LaunchedEffect
+        if (mapError == null) {
+            mapError = buildString {
+                append("Map did not finish loading. ")
+                append("Check API key restrictions, Maps SDK enablement, billing, Play Services, and network. ")
+                append("Play Services: ")
+                append(playServicesDiagnostic)
+                append(". Network: ")
+                append(if (hasNetwork) "available" else "unavailable")
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Map of Detections", fontWeight = FontWeight.Bold)
+        Text("Pins show where encounters were recorded.")
+        if (!hasMapsApiKey) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Map unavailable: Google Maps API key is missing.", fontWeight = FontWeight.Bold)
+                    Text("Add com.google.android.geo.API_KEY in AndroidManifest metadata to enable map rendering.")
+                }
+            }
+        } else {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Map Diagnostics", fontWeight = FontWeight.Bold)
+                    Text("Loaded: ${if (mapLoaded) "yes" else "no"}")
+                    Text("API key: $mapsApiKeyDiagnostic")
+                    Text("Play Services: $playServicesDiagnostic")
+                    Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
+                    Text("Pins: ${pins.size}")
+                    Text(
+                        text = if (currentLocation != null) {
+                            "Current location: ${"%.5f".format(currentLocation.lat)}, ${"%.5f".format(currentLocation.lon)}"
+                        } else {
+                            "Current location: unavailable"
+                        }
+                    )
+                    if (mapError != null) {
+                        Text(
+                            text = "Error: ${mapError}",
+                            color = Color(0xFFB3261E),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                GoogleMap(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraPositionState = cameraPositionState,
+                    onMapLoaded = {
+                        mapLoaded = true
+                        autoPositioned = false
+                    },
+                    uiSettings = MapUiSettings(
+                        zoomControlsEnabled = true,
+                        zoomGesturesEnabled = true,
+                        scrollGesturesEnabled = true,
+                        tiltGesturesEnabled = false,
+                        rotationGesturesEnabled = false,
+                        myLocationButtonEnabled = false
+                    )
+                ) {
+                    pins.forEach { pin ->
+                        Marker(
+                            state = MarkerState(position = pin.first),
+                            title = pin.second,
+                            snippet = pin.third
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun isValidLatLon(lat: Double?, lon: Double?): Boolean {
+    if (lat == null || lon == null) return false
+    if (!lat.isFinite() || !lon.isFinite()) return false
+    return lat in -90.0..90.0 && lon in -180.0..180.0
+}
+
+private fun hasGoogleMapsApiKey(context: android.content.Context): Boolean {
+    val appInfo = runCatching {
+        context.packageManager.getApplicationInfo(
+            context.packageName,
+            PackageManager.GET_META_DATA
+        )
+    }.getOrNull() ?: return false
+
+    val value = appInfo.metaData?.getString("com.google.android.geo.API_KEY")?.trim().orEmpty()
+    return value.isNotEmpty()
+}
+
+private fun getMapsApiKeyDiagnostic(context: android.content.Context): String {
+    val appInfo = runCatching {
+        context.packageManager.getApplicationInfo(
+            context.packageName,
+            PackageManager.GET_META_DATA
+        )
+    }.getOrNull() ?: return "metadata unavailable"
+
+    val value = appInfo.metaData?.getString("com.google.android.geo.API_KEY")?.trim().orEmpty()
+    if (value.isEmpty()) return "missing"
+    if (value.contains("MAPS_API_KEY")) return "placeholder unresolved"
+    return "present (${value.length} chars)"
+}
+
+private fun getPlayServicesDiagnostic(context: android.content.Context): String {
+    val code = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+    return when (code) {
+        ConnectionResult.SUCCESS -> "available"
+        ConnectionResult.SERVICE_MISSING -> "missing"
+        ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED -> "update required"
+        ConnectionResult.SERVICE_DISABLED -> "disabled"
+        ConnectionResult.SERVICE_INVALID -> "invalid"
+        else -> "error code $code"
+    }
+}
+
+private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
+    val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
+        ?: return false
+    val network = connectivityManager.activeNetwork ?: return false
+    val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 }
 
 @Composable

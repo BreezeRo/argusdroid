@@ -6,23 +6,73 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 object WorkScheduler {
     private const val WORK_NAME = "argus-periodic-scan"
 
-    fun start(context: Context) {
-        val request = PeriodicWorkRequestBuilder<ArgusWorker>(15, TimeUnit.MINUTES)
-            .setInitialDelay(1, TimeUnit.MINUTES)
-            .build()
+    data class StartResult(
+        val success: Boolean,
+        val message: String
+    )
 
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+    fun start(context: Context) {
+        val request = buildPeriodicRequest()
+        val workManager = WorkManager.getInstance(context)
+
+        workManager.enqueueUniquePeriodicWork(
             WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
+            ExistingPeriodicWorkPolicy.REPLACE,
             request
         )
     }
+
+    suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = buildPeriodicRequest()
+            val workManager = WorkManager.getInstance(context)
+
+            val operation = workManager.enqueueUniquePeriodicWork(
+                WORK_NAME,
+                ExistingPeriodicWorkPolicy.REPLACE,
+                request
+            )
+
+            // Wait for enqueue operation completion before checking active state.
+            operation.result.get()
+
+            // WorkManager DB updates can lag briefly after operation completion.
+            var latestInfos: List<WorkInfo> = emptyList()
+            var hasActiveOrPending = false
+            repeat(10) {
+                latestInfos = WorkManager.getInstance(context)
+                    .getWorkInfosForUniqueWork(WORK_NAME)
+                    .get()
+
+                hasActiveOrPending = latestInfos.any { info ->
+                    info.state == WorkInfo.State.ENQUEUED ||
+                        info.state == WorkInfo.State.RUNNING ||
+                        info.state == WorkInfo.State.BLOCKED
+                }
+                if (hasActiveOrPending) {
+                    return@withContext StartResult(true, "Tracking started successfully.")
+                }
+                delay(200)
+            }
+
+            val states = if (latestInfos.isEmpty()) "none" else latestInfos.joinToString { it.state.name }
+            StartResult(false, "Failed to start tracking. Observed WorkManager states: $states")
+        }.getOrElse { error ->
+            StartResult(false, "Failed to start tracking: ${error.message ?: "unknown error"}")
+        }
+    }
+
+    private fun buildPeriodicRequest() =
+        PeriodicWorkRequestBuilder<ArgusWorker>(15, TimeUnit.MINUTES)
+            .setInitialDelay(1, TimeUnit.MINUTES)
+            .build()
 
     fun stop(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)

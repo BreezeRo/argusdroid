@@ -8,7 +8,8 @@ class ArgusSensingService(
 ) {
     suspend fun collectBatch(): List<Encounter> = buildList {
         scanners.forEach { scanner ->
-            addAll(scanner.scanOnce())
+            val scannerBatch = runCatching { scanner.scanOnce() }.getOrDefault(emptyList())
+            addAll(scannerBatch)
         }
     }
 }

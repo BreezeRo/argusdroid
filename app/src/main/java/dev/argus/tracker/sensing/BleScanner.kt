@@ -110,8 +110,10 @@ class BleScanner(
     }
 
     private fun ScanResult.toEncounter(location: DetectionLocation?): Encounter {
-        val mac = device?.address ?: "unknown-ble"
-        val name = device?.name
+        val mac = runCatching { device?.address }.getOrNull() ?: "unknown-ble"
+        val name = runCatching {
+            if (hasBluetoothConnectPermission()) device?.name else null
+        }.getOrNull()
         return Encounter(
             timestampEpochMs = System.currentTimeMillis(),
             source = EncounterSource.BLUETOOTH_LE,
@@ -126,9 +128,13 @@ class BleScanner(
     }
 
     private fun buildBlePayload(result: ScanResult): String {
+        val address = runCatching { result.device?.address }.getOrNull()
+        val name = runCatching {
+            if (hasBluetoothConnectPermission()) result.device?.name else null
+        }.getOrNull()
         val payload = JSONObject()
-            .put("address", result.device?.address)
-            .put("name", result.device?.name)
+            .put("address", address)
+            .put("name", name)
             .put("rssi", result.rssi)
             .put("txPower", result.txPower)
             .put("primaryPhy", result.primaryPhy)
@@ -150,5 +156,16 @@ class BleScanner(
 
     private fun ByteArray.toHex(): String = joinToString(separator = "") { byte ->
         byte.toInt().and(0xFF).toString(16).padStart(2, '0')
+    }
+
+    private fun hasBluetoothConnectPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
     }
 }

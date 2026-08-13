@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.data.DefaultAppContainer
 
 class ArgusWorker(
     appContext: Context,
@@ -11,12 +12,13 @@ class ArgusWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        val app = applicationContext as? ArgusApplication ?: return Result.failure()
-        val sensingService = app.container.sensingService
-        val repository = app.container.repository
+        val container = (applicationContext as? ArgusApplication)?.container
+            ?: DefaultAppContainer(applicationContext)
+        val sensingService = container.sensingService
+        val repository = container.repository
 
-        val batch = sensingService.collectBatch()
-        repository.insertBatch(batch)
+        val batch = runCatching { sensingService.collectBatch() }.getOrDefault(emptyList())
+        runCatching { repository.insertBatch(batch) }
         return Result.success()
     }
 }
