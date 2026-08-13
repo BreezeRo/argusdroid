@@ -10,7 +10,11 @@ data class ChainHello(
     val nodeId: String,
     val app: String,
     val persistentChannelEnabled: Boolean,
-    val deviceName: String?
+    val deviceName: String?,
+    val sharedLocationLat: Double?,
+    val sharedLocationLon: Double?,
+    val sharedLocationAccuracyMeters: Float?,
+    val sharedLocationTimestampEpochMs: Long?
 )
 
 data class ChainSyncRequest(
@@ -27,11 +31,25 @@ data class ChainSyncResponse(
 )
 
 object ChainLinkJson {
-    fun encodeHello(nodeId: String, persistentChannelEnabled: Boolean, deviceName: String?): String = JSONObject().apply {
+    fun encodeHello(
+        nodeId: String,
+        persistentChannelEnabled: Boolean,
+        deviceName: String?,
+        sharedLocationLat: Double?,
+        sharedLocationLon: Double?,
+        sharedLocationAccuracyMeters: Float?,
+        sharedLocationTimestampEpochMs: Long?
+    ): String = JSONObject().apply {
         put("nodeId", nodeId)
         put("app", "argus")
         put("persistentChannelEnabled", persistentChannelEnabled)
         if (!deviceName.isNullOrBlank()) put("deviceName", deviceName)
+        if (sharedLocationLat != null && sharedLocationLon != null) {
+            put("sharedLocationLat", sharedLocationLat)
+            put("sharedLocationLon", sharedLocationLon)
+            if (sharedLocationAccuracyMeters != null) put("sharedLocationAccuracyMeters", sharedLocationAccuracyMeters)
+            if (sharedLocationTimestampEpochMs != null) put("sharedLocationTimestampEpochMs", sharedLocationTimestampEpochMs)
+        }
     }.toString()
 
     fun decodeHello(raw: String): ChainHello? {
@@ -42,7 +60,11 @@ object ChainLinkJson {
             nodeId = nodeId,
             app = obj.optString("app", "argus"),
             persistentChannelEnabled = obj.optBoolean("persistentChannelEnabled", false),
-            deviceName = obj.optString("deviceName", null)
+            deviceName = obj.optString("deviceName", null),
+            sharedLocationLat = if (obj.has("sharedLocationLat") && !obj.isNull("sharedLocationLat")) obj.optDouble("sharedLocationLat") else null,
+            sharedLocationLon = if (obj.has("sharedLocationLon") && !obj.isNull("sharedLocationLon")) obj.optDouble("sharedLocationLon") else null,
+            sharedLocationAccuracyMeters = if (obj.has("sharedLocationAccuracyMeters") && !obj.isNull("sharedLocationAccuracyMeters")) obj.optDouble("sharedLocationAccuracyMeters").toFloat() else null,
+            sharedLocationTimestampEpochMs = if (obj.has("sharedLocationTimestampEpochMs") && !obj.isNull("sharedLocationTimestampEpochMs")) obj.optLong("sharedLocationTimestampEpochMs") else null
         )
     }
 

@@ -5,6 +5,7 @@ import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.data.computeEncounterFingerprint
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterProvenance
+import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.worker.ScanSettings
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -63,7 +64,11 @@ data class ChainPeerStatus(
     val lastSeenEpochMs: Long,
     val lastSuccessfulSyncEpochMs: Long?,
     val lastLinkRequestEpochMs: Long?,
-    val lastFailure: String?
+    val lastFailure: String?,
+    val sharedLocationLat: Double?,
+    val sharedLocationLon: Double?,
+    val sharedLocationAccuracyMeters: Float?,
+    val sharedLocationTimestampEpochMs: Long?
 )
 
 data class IncomingLinkRequest(
@@ -131,6 +136,10 @@ class LocalMeshChainLinkCoordinator(
                 host = request.requesterHost,
                 state = ChainPeerState.REQUESTED,
                 failure = null,
+                sharedLocationLat = null,
+                sharedLocationLon = null,
+                sharedLocationAccuracyMeters = null,
+                sharedLocationTimestampEpochMs = null,
                 markLinkRequest = true
             )
             publishSnapshot()
@@ -175,6 +184,10 @@ class LocalMeshChainLinkCoordinator(
                 host = peer.host,
                 state = if (heartbeatOk) ChainPeerState.CONNECTED else ChainPeerState.DISCOVERED,
                 failure = null,
+                sharedLocationLat = peer.sharedLocationLat,
+                sharedLocationLon = peer.sharedLocationLon,
+                sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+                sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs,
                 lastSeen = now
             )
         }
@@ -202,7 +215,11 @@ class LocalMeshChainLinkCoordinator(
                 deviceName = null,
                 host = target,
                 state = ChainPeerState.FAILED,
-                failure = "Link request failed"
+                failure = "Link request failed",
+                sharedLocationLat = null,
+                sharedLocationLon = null,
+                sharedLocationAccuracyMeters = null,
+                sharedLocationTimestampEpochMs = null
             )
             publishSnapshot()
             return@withContext false
@@ -211,12 +228,28 @@ class LocalMeshChainLinkCoordinator(
         val responseObj = runCatching { JSONObject(response) }.getOrNull()
         val peerNodeId = responseObj?.optString("nodeId", "").orEmpty().ifBlank { "unknown@$target" }
         val peerDeviceName = responseObj?.optString("deviceName", null)
+        val peerSharedLocationLat = if (responseObj?.has("sharedLocationLat") == true && !responseObj.isNull("sharedLocationLat")) {
+            responseObj.optDouble("sharedLocationLat")
+        } else null
+        val peerSharedLocationLon = if (responseObj?.has("sharedLocationLon") == true && !responseObj.isNull("sharedLocationLon")) {
+            responseObj.optDouble("sharedLocationLon")
+        } else null
+        val peerSharedLocationAccuracyMeters = if (responseObj?.has("sharedLocationAccuracyMeters") == true && !responseObj.isNull("sharedLocationAccuracyMeters")) {
+            responseObj.optDouble("sharedLocationAccuracyMeters").toFloat()
+        } else null
+        val peerSharedLocationTimestampEpochMs = if (responseObj?.has("sharedLocationTimestampEpochMs") == true && !responseObj.isNull("sharedLocationTimestampEpochMs")) {
+            responseObj.optLong("sharedLocationTimestampEpochMs")
+        } else null
         mergePeerStatus(
             nodeId = peerNodeId,
             deviceName = peerDeviceName,
             host = target,
             state = ChainPeerState.REQUESTED,
             failure = null,
+            sharedLocationLat = peerSharedLocationLat,
+            sharedLocationLon = peerSharedLocationLon,
+            sharedLocationAccuracyMeters = peerSharedLocationAccuracyMeters,
+            sharedLocationTimestampEpochMs = peerSharedLocationTimestampEpochMs,
             markLinkRequest = true
         )
         publishSnapshot()
@@ -262,7 +295,11 @@ class LocalMeshChainLinkCoordinator(
                     host = it.host,
                     nodeId = it.nodeId,
                     persistentChannelEnabled = it.state == ChainPeerState.CONNECTED || it.state == ChainPeerState.REQUESTED,
-                    deviceName = it.deviceName
+                    deviceName = it.deviceName,
+                    sharedLocationLat = it.sharedLocationLat,
+                    sharedLocationLon = it.sharedLocationLon,
+                    sharedLocationAccuracyMeters = it.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = it.sharedLocationTimestampEpochMs
                 )
             }
             .take(CHAIN_MAX_PEERS)
@@ -288,7 +325,11 @@ class LocalMeshChainLinkCoordinator(
                     deviceName = peer.deviceName,
                     host = peer.host,
                     state = ChainPeerState.FAILED,
-                    failure = "Sync failed"
+                    failure = "Sync failed",
+                    sharedLocationLat = peer.sharedLocationLat,
+                    sharedLocationLon = peer.sharedLocationLon,
+                    sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs
                 )
             } else {
                 peersSynced += 1
@@ -299,6 +340,10 @@ class LocalMeshChainLinkCoordinator(
                     host = peer.host,
                     state = ChainPeerState.CONNECTED,
                     failure = null,
+                    sharedLocationLat = peer.sharedLocationLat,
+                    sharedLocationLon = peer.sharedLocationLon,
+                    sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs,
                     markSynced = true
                 )
             }
@@ -323,6 +368,10 @@ class LocalMeshChainLinkCoordinator(
         host: String,
         state: ChainPeerState,
         failure: String?,
+        sharedLocationLat: Double?,
+        sharedLocationLon: Double?,
+        sharedLocationAccuracyMeters: Float?,
+        sharedLocationTimestampEpochMs: Long?,
         lastSeen: Long = System.currentTimeMillis(),
         markSynced: Boolean = false,
         markLinkRequest: Boolean = false
@@ -337,7 +386,11 @@ class LocalMeshChainLinkCoordinator(
                 lastSeenEpochMs = lastSeen,
                 lastSuccessfulSyncEpochMs = if (markSynced) lastSeen else existing?.lastSuccessfulSyncEpochMs,
                 lastLinkRequestEpochMs = if (markLinkRequest) lastSeen else existing?.lastLinkRequestEpochMs,
-                lastFailure = failure
+                lastFailure = failure,
+                sharedLocationLat = sharedLocationLat ?: existing?.sharedLocationLat,
+                sharedLocationLon = sharedLocationLon ?: existing?.sharedLocationLon,
+                sharedLocationAccuracyMeters = sharedLocationAccuracyMeters ?: existing?.sharedLocationAccuracyMeters,
+                sharedLocationTimestampEpochMs = sharedLocationTimestampEpochMs ?: existing?.sharedLocationTimestampEpochMs
             )
             peerStatusByNode[nodeId] = updated
         }
@@ -388,7 +441,11 @@ class LocalMeshChainLinkCoordinator(
                         host = host,
                         nodeId = hello.nodeId,
                         persistentChannelEnabled = hello.persistentChannelEnabled,
-                        deviceName = hello.deviceName
+                        deviceName = hello.deviceName,
+                        sharedLocationLat = hello.sharedLocationLat,
+                        sharedLocationLon = hello.sharedLocationLon,
+                        sharedLocationAccuracyMeters = hello.sharedLocationAccuracyMeters,
+                        sharedLocationTimestampEpochMs = hello.sharedLocationTimestampEpochMs
                     )
                 }
             }
@@ -430,6 +487,10 @@ class LocalMeshChainLinkCoordinator(
             host = peer.host,
             state = ChainPeerState.CONNECTED,
             failure = null,
+            sharedLocationLat = peer.sharedLocationLat,
+            sharedLocationLon = peer.sharedLocationLon,
+            sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+            sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs,
             markSynced = true
         )
         val receivedAt = System.currentTimeMillis()
@@ -586,8 +647,31 @@ private data class DiscoveredPeer(
     val host: String,
     val nodeId: String,
     val persistentChannelEnabled: Boolean,
-    val deviceName: String?
+    val deviceName: String?,
+    val sharedLocationLat: Double?,
+    val sharedLocationLon: Double?,
+    val sharedLocationAccuracyMeters: Float?,
+    val sharedLocationTimestampEpochMs: Long?
 )
+
+private data class SharedLocationPayload(
+    val lat: Double,
+    val lon: Double,
+    val accuracyMeters: Float?,
+    val timestampEpochMs: Long
+)
+
+private fun currentSharedLocationPayload(context: Context): SharedLocationPayload? {
+    if (!ScanSettings.isChainSharePreciseLocationEnabled(context)) return null
+    val current = LocationSnapshotProvider.read(context) ?: return null
+    if (current.lat !in -90.0..90.0 || current.lon !in -180.0..180.0) return null
+    return SharedLocationPayload(
+        lat = current.lat,
+        lon = current.lon,
+        accuracyMeters = null,
+        timestampEpochMs = System.currentTimeMillis()
+    )
+}
 
 private data class PeerSyncResult(
     val imported: Int
@@ -682,10 +766,15 @@ private class ChainLinkServer(
                 }
 
                 if (method == "GET" && path == CHAIN_HELLO_PATH) {
+                    val sharedLocation = currentSharedLocationPayload(context)
                     val hello = ChainLinkJson.encodeHello(
                         nodeId = nodeId,
                         persistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context),
-                        deviceName = ScanSettings.getChainDeviceName(context)
+                        deviceName = ScanSettings.getChainDeviceName(context),
+                        sharedLocationLat = sharedLocation?.lat,
+                        sharedLocationLon = sharedLocation?.lon,
+                        sharedLocationAccuracyMeters = sharedLocation?.accuracyMeters,
+                        sharedLocationTimestampEpochMs = sharedLocation?.timestampEpochMs
                     )
                     writeHttpResponse(writer, statusCode = 200, body = hello)
                     return@runCatching
@@ -784,10 +873,19 @@ private class ChainLinkServer(
                     }
 
                     val heartbeatAck = JSONObject().apply {
+                        val sharedLocation = currentSharedLocationPayload(context)
                         put("ok", true)
                         put("nodeId", nodeId)
                         put("deviceName", ScanSettings.getChainDeviceName(context))
                         put("persistentChannelEnabled", ScanSettings.isChainPersistentChannelEnabled(context))
+                        if (sharedLocation != null) {
+                            put("sharedLocationLat", sharedLocation.lat)
+                            put("sharedLocationLon", sharedLocation.lon)
+                            if (sharedLocation.accuracyMeters != null) {
+                                put("sharedLocationAccuracyMeters", sharedLocation.accuracyMeters)
+                            }
+                            put("sharedLocationTimestampEpochMs", sharedLocation.timestampEpochMs)
+                        }
                     }.toString()
                     writeHttpResponse(writer, statusCode = 200, body = heartbeatAck)
                     return@runCatching
@@ -820,10 +918,19 @@ private class ChainLinkServer(
                     )
 
                     val response = JSONObject().apply {
+                        val sharedLocation = currentSharedLocationPayload(context)
                         put("accepted", true)
                         put("nodeId", nodeId)
                         put("deviceName", ScanSettings.getChainDeviceName(context))
                         put("authRequired", authSecretProvider().trim().isNotBlank())
+                        if (sharedLocation != null) {
+                            put("sharedLocationLat", sharedLocation.lat)
+                            put("sharedLocationLon", sharedLocation.lon)
+                            if (sharedLocation.accuracyMeters != null) {
+                                put("sharedLocationAccuracyMeters", sharedLocation.accuracyMeters)
+                            }
+                            put("sharedLocationTimestampEpochMs", sharedLocation.timestampEpochMs)
+                        }
                     }.toString()
                     writeHttpResponse(writer, statusCode = 200, body = response)
                     return@runCatching

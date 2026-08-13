@@ -25,6 +25,7 @@ object ScanSettings {
     private const val KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED = "chain_persistent_channel_enabled"
     private const val KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS = "chain_heartbeat_interval_seconds"
     private const val KEY_CHAIN_DEVICE_NAME = "chain_device_name"
+    private const val KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED = "chain_share_precise_location_enabled"
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -304,6 +305,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_CHAIN_DEVICE_NAME, normalized)
+            .apply()
+    }
+
+    fun isChainSharePreciseLocationEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED, false)
+
+    fun setChainSharePreciseLocationEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED, enabled)
             .apply()
     }
 
