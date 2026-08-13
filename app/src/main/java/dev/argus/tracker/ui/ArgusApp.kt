@@ -18,6 +18,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -25,20 +29,24 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.worker.WorkScheduler
+import kotlinx.coroutines.launch
 
 @Composable
 fun ArgusApp() {
     val context = LocalContext.current
     val app = context.applicationContext as ArgusApplication
+    val scope = rememberCoroutineScope()
     val viewModel = viewModel<ArgusViewModel>(
         factory = ArgusViewModel.Factory(app.container.repository)
     )
+    var trackingActive by remember { mutableStateOf(false) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
 
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
+        trackingActive = WorkScheduler.isTrackingActive(context)
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
@@ -50,16 +58,38 @@ fun ArgusApp() {
         ) {
             Text("Argus Tracker", style = MaterialTheme.typography.headlineMedium)
             Text("Long-term encounter intelligence across mobile sensors.")
+            Text(
+                text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
+                fontWeight = FontWeight.Medium
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { WorkScheduler.start(context) }) {
-                    Text("Start Tracking")
+                if (!trackingActive) {
+                    Button(onClick = {
+                        WorkScheduler.start(context)
+                        scope.launch {
+                            trackingActive = WorkScheduler.isTrackingActive(context)
+                        }
+                    }) {
+                        Text("Start Tracking")
+                    }
                 }
                 Button(onClick = {
                     WorkScheduler.stop(context)
                     viewModel.refreshSummary()
-                }) {
+                    scope.launch {
+                        trackingActive = WorkScheduler.isTrackingActive(context)
+                    }
+                }, enabled = trackingActive) {
                     Text("Stop")
+                }
+                Button(onClick = {
+                    viewModel.refreshSummary()
+                    scope.launch {
+                        trackingActive = WorkScheduler.isTrackingActive(context)
+                    }
+                }) {
+                    Text("Refresh")
                 }
             }
 

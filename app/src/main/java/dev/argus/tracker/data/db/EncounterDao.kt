@@ -11,7 +11,15 @@ interface EncounterDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(items: List<EncounterEntity>)
 
-    @Query("SELECT * FROM encounters ORDER BY timestampEpochMs DESC LIMIT :limit")
+    @Query(
+        """
+        SELECT *
+        FROM encounters
+        WHERE NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
+        ORDER BY timestampEpochMs DESC
+        LIMIT :limit
+        """
+    )
     fun observeRecent(limit: Int): Flow<List<EncounterEntity>>
 
     @Query(
@@ -19,6 +27,7 @@ interface EncounterDao {
         SELECT source, COUNT(*) as count
         FROM encounters
         WHERE timestampEpochMs >= :sinceEpochMs
+                    AND NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
         GROUP BY source
         ORDER BY count DESC
         """
