@@ -5459,7 +5459,7 @@ private fun readRemoteIdFields(rawPayloadJson: String): List<Pair<String, String
         it.droneLon?.let { value -> semantic += "Drone Lon" to formatCoordinate(value) }
         it.operatorLat?.let { value -> semantic += "Operator Lat" to formatCoordinate(value) }
         it.operatorLon?.let { value -> semantic += "Operator Lon" to formatCoordinate(value) }
-        it.altitudeMeters?.let { value -> semantic += "Altitude" to String.format(Locale.US, "%.1f m", value) }
+        it.altitudeMeters?.let { value -> semantic += "Aircraft Altitude" to String.format(Locale.US, "%.1f m", value) }
         it.speedMetersPerSecond?.let { value -> semantic += "Speed" to String.format(Locale.US, "%.1f m/s", value) }
         it.headingDegrees?.let { value -> semantic += "Heading" to String.format(Locale.US, "%.0f deg", value) }
         it.emergencyStatus?.takeIf { value -> value.isNotBlank() }?.let { value ->
