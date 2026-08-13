@@ -256,13 +256,21 @@ function extractMeshLocationDetails(enc) {
     ['location.lng', 'location.lon', 'coords.lng', 'coords.lon', 'longitude']
   );
 
+  const remoteId = pickCoordinatePair(
+    objects,
+    ['remoteIdLat', 'remoteIdDecoded.droneLat', 'droneLat'],
+    ['remoteIdLng', 'remoteIdLon', 'remoteIdDecoded.droneLon', 'droneLon']
+  );
+
   return {
     estimatedLat: estimated?.lat ?? null,
     estimatedLng: estimated?.lng ?? null,
     deviceLat: device?.lat ?? null,
     deviceLng: device?.lng ?? null,
     detailLat: details?.lat ?? null,
-    detailLng: details?.lng ?? null
+    detailLng: details?.lng ?? null,
+    remoteIdLat: remoteId?.lat ?? null,
+    remoteIdLng: remoteId?.lng ?? null
   };
 }
 
@@ -350,9 +358,6 @@ async function buildLiveSnapshot() {
 
     for (const enc of sync?.encounters || []) {
       try {
-        if (enc?.lat === null || enc?.lat === undefined || enc?.lon === null || enc?.lon === undefined) {
-          continue;
-        }
         if (enc?.timestampEpochMs === null || enc?.timestampEpochMs === undefined) {
           continue;
         }
@@ -364,6 +369,27 @@ async function buildLiveSnapshot() {
         const source = enc.source ? String(enc.source) : 'UNKNOWN_RF';
         const signal = enc.rssiDbm !== null && enc.rssiDbm !== undefined ? Number(enc.rssiDbm) : -120;
         const detailLoc = extractMeshLocationDetails(enc);
+        const observerLat = toFiniteNumber(enc.lat);
+        const observerLng = toFiniteNumber(enc.lon);
+        const remoteIdLat = detailLoc.remoteIdLat;
+        const remoteIdLng = detailLoc.remoteIdLng;
+
+        let effectiveLat = observerLat;
+        let effectiveLng = observerLng;
+
+        if (source === 'REMOTE_ID') {
+          if (isValidLatLng(remoteIdLat, remoteIdLng)) {
+            effectiveLat = remoteIdLat;
+            effectiveLng = remoteIdLng;
+          } else {
+            effectiveLat = null;
+            effectiveLng = null;
+          }
+        }
+
+        const zoneLabel = isValidLatLng(effectiveLat, effectiveLng)
+          ? getZoneLabel(effectiveLat, effectiveLng, peerHost)
+          : `unknown (${peerHost})`;
 
         allEncounters.push({
           id: `${peerHost}:${source}:${enc.timestampEpochMs}`,
@@ -376,15 +402,19 @@ async function buildLiveSnapshot() {
           frequencyMhz: enc.frequencyMhz !== null && enc.frequencyMhz !== undefined ? Number(enc.frequencyMhz) : null,
           rawPayloadJson: typeof enc.rawPayloadJson === 'string' ? enc.rawPayloadJson : '',
           distanceMeters: estimateDistanceMeters(enc.rssiDbm),
-          lat: Number(enc.lat),
-          lng: Number(enc.lon),
+          lat: effectiveLat,
+          lng: effectiveLng,
+          observerLat,
+          observerLng,
           estimatedLat: detailLoc.estimatedLat,
           estimatedLng: detailLoc.estimatedLng,
           deviceLat: detailLoc.deviceLat,
           deviceLng: detailLoc.deviceLng,
           detailLat: detailLoc.detailLat,
           detailLng: detailLoc.detailLng,
-          zone: getZoneLabel(Number(enc.lat), Number(enc.lon), peerHost)
+          remoteIdLat,
+          remoteIdLng,
+          zone: zoneLabel
         });
       } catch {
         continue;
