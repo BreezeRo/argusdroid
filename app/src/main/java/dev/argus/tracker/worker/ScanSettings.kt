@@ -26,6 +26,15 @@ object ScanSettings {
     private const val KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS = "chain_heartbeat_interval_seconds"
     private const val KEY_CHAIN_DEVICE_NAME = "chain_device_name"
     private const val KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED = "chain_share_precise_location_enabled"
+    private const val KEY_EVASION_PROFILE = "evasion_profile"
+    private const val KEY_EVASION_AUTO_ESCALATE_ENABLED = "evasion_auto_escalate_enabled"
+    private const val KEY_EVASION_AUTO_ESCALATE_DURATION_SECONDS = "evasion_auto_escalate_duration_seconds"
+    private const val KEY_EVASION_JITTER_ENABLED = "evasion_jitter_enabled"
+    private const val KEY_EVASION_JITTER_PERCENT = "evasion_jitter_percent"
+    private const val KEY_EVASION_BURST_ENABLED = "evasion_burst_enabled"
+    private const val KEY_EVASION_BURST_WATCH_SECONDS = "evasion_burst_watch_seconds"
+    private const val KEY_EVASION_BURST_COOLDOWN_SECONDS = "evasion_burst_cooldown_seconds"
+    private const val KEY_EVASION_ACTION_LOG = "evasion_action_log"
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -39,6 +48,7 @@ object ScanSettings {
     private const val KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX = "_last_scan_epoch_ms"
     private const val SOURCE_TIMING_WINDOW_SIZE = 120
     private const val MAX_INTERVAL_CHANGE_EVENTS = 50
+    private const val MAX_EVASION_ACTION_LOG_ENTRIES = 80
     const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L * 60L
     const val MIN_PERIODIC_INTERVAL_SECONDS = 15L * 60L
     const val DEFAULT_CHAIN_SYNC_WINDOW_MINUTES = 120L
@@ -46,12 +56,22 @@ object ScanSettings {
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 5L
+    const val DEFAULT_EVASION_PROFILE = "BALANCED"
+    const val DEFAULT_EVASION_AUTO_ESCALATE_DURATION_SECONDS = 300L
+    const val DEFAULT_EVASION_JITTER_PERCENT = 15
+    const val DEFAULT_EVASION_BURST_WATCH_SECONDS = 45L
+    const val DEFAULT_EVASION_BURST_COOLDOWN_SECONDS = 300L
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     val ALLOWED_INTERVALS_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
+    val ALLOWED_EVASION_PROFILES = listOf("QUIET", "BALANCED", "WATCH")
+    val ALLOWED_EVASION_ESCALATE_DURATION_SECONDS = listOf(60L, 180L, 300L, 600L, 900L, 1800L)
+    val ALLOWED_EVASION_JITTER_PERCENT = listOf(5, 10, 15, 20, 25, 30)
+    val ALLOWED_EVASION_BURST_WATCH_SECONDS = listOf(15L, 30L, 45L, 60L, 90L, 120L)
+    val ALLOWED_EVASION_BURST_COOLDOWN_SECONDS = listOf(60L, 120L, 180L, 300L, 600L, 900L)
     val SOURCE_TYPES = listOf(
         "wifi",
         "wifi_direct",
@@ -80,6 +100,12 @@ object ScanSettings {
         val fromSeconds: Long,
         val toSeconds: Long,
         val reason: String
+    )
+
+    data class EvasionActionLogEntry(
+        val timestampEpochMs: Long,
+        val action: String,
+        val detail: String
     )
 
     fun getScanIntervalSeconds(context: Context): Long {
@@ -319,6 +345,137 @@ object ScanSettings {
             .apply()
     }
 
+    fun getEvasionProfile(context: Context): String {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_EVASION_PROFILE, DEFAULT_EVASION_PROFILE)
+            .orEmpty()
+            .trim()
+            .uppercase()
+        return raw.takeIf { it in ALLOWED_EVASION_PROFILES } ?: DEFAULT_EVASION_PROFILE
+    }
+
+    fun setEvasionProfile(context: Context, profile: String) {
+        val safe = profile.trim().uppercase().takeIf { it in ALLOWED_EVASION_PROFILES }
+            ?: DEFAULT_EVASION_PROFILE
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_EVASION_PROFILE, safe)
+            .apply()
+    }
+
+    fun isEvasionAutoEscalateEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_EVASION_AUTO_ESCALATE_ENABLED, true)
+
+    fun setEvasionAutoEscalateEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_EVASION_AUTO_ESCALATE_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getEvasionAutoEscalateDurationSeconds(context: Context): Long {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_EVASION_AUTO_ESCALATE_DURATION_SECONDS, DEFAULT_EVASION_AUTO_ESCALATE_DURATION_SECONDS)
+        return value.takeIf { it in ALLOWED_EVASION_ESCALATE_DURATION_SECONDS }
+            ?: DEFAULT_EVASION_AUTO_ESCALATE_DURATION_SECONDS
+    }
+
+    fun setEvasionAutoEscalateDurationSeconds(context: Context, seconds: Long) {
+        val safe = seconds.takeIf { it in ALLOWED_EVASION_ESCALATE_DURATION_SECONDS }
+            ?: DEFAULT_EVASION_AUTO_ESCALATE_DURATION_SECONDS
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_EVASION_AUTO_ESCALATE_DURATION_SECONDS, safe)
+            .apply()
+    }
+
+    fun isEvasionJitterEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_EVASION_JITTER_ENABLED, false)
+
+    fun setEvasionJitterEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_EVASION_JITTER_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getEvasionJitterPercent(context: Context): Int {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_EVASION_JITTER_PERCENT, DEFAULT_EVASION_JITTER_PERCENT)
+        return value.takeIf { it in ALLOWED_EVASION_JITTER_PERCENT } ?: DEFAULT_EVASION_JITTER_PERCENT
+    }
+
+    fun setEvasionJitterPercent(context: Context, percent: Int) {
+        val safe = percent.takeIf { it in ALLOWED_EVASION_JITTER_PERCENT } ?: DEFAULT_EVASION_JITTER_PERCENT
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_EVASION_JITTER_PERCENT, safe)
+            .apply()
+    }
+
+    fun isEvasionBurstEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_EVASION_BURST_ENABLED, false)
+
+    fun setEvasionBurstEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_EVASION_BURST_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getEvasionBurstWatchSeconds(context: Context): Long {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_EVASION_BURST_WATCH_SECONDS, DEFAULT_EVASION_BURST_WATCH_SECONDS)
+        return value.takeIf { it in ALLOWED_EVASION_BURST_WATCH_SECONDS } ?: DEFAULT_EVASION_BURST_WATCH_SECONDS
+    }
+
+    fun setEvasionBurstWatchSeconds(context: Context, seconds: Long) {
+        val safe = seconds.takeIf { it in ALLOWED_EVASION_BURST_WATCH_SECONDS } ?: DEFAULT_EVASION_BURST_WATCH_SECONDS
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_EVASION_BURST_WATCH_SECONDS, safe)
+            .apply()
+    }
+
+    fun getEvasionBurstCooldownSeconds(context: Context): Long {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_EVASION_BURST_COOLDOWN_SECONDS, DEFAULT_EVASION_BURST_COOLDOWN_SECONDS)
+        return value.takeIf { it in ALLOWED_EVASION_BURST_COOLDOWN_SECONDS } ?: DEFAULT_EVASION_BURST_COOLDOWN_SECONDS
+    }
+
+    fun setEvasionBurstCooldownSeconds(context: Context, seconds: Long) {
+        val safe = seconds.takeIf { it in ALLOWED_EVASION_BURST_COOLDOWN_SECONDS } ?: DEFAULT_EVASION_BURST_COOLDOWN_SECONDS
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_EVASION_BURST_COOLDOWN_SECONDS, safe)
+            .apply()
+    }
+
+    fun appendEvasionActionLog(
+        context: Context,
+        action: String,
+        detail: String,
+        timestampEpochMs: Long = System.currentTimeMillis()
+    ) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = decodeEvasionActionLog(prefs.getString(KEY_EVASION_ACTION_LOG, null))
+        val updated = (existing + EvasionActionLogEntry(
+            timestampEpochMs = timestampEpochMs,
+            action = action.trim().ifBlank { "unknown" },
+            detail = detail.trim().ifBlank { "none" }
+        )).takeLast(MAX_EVASION_ACTION_LOG_ENTRIES)
+        prefs.edit().putString(KEY_EVASION_ACTION_LOG, encodeEvasionActionLog(updated)).apply()
+    }
+
+    fun getEvasionActionLog(context: Context, limit: Int = 20): List<EvasionActionLogEntry> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val all = decodeEvasionActionLog(prefs.getString(KEY_EVASION_ACTION_LOG, null))
+        return all.takeLast(limit.coerceAtLeast(1)).asReversed()
+    }
+
     fun getLiveMapUpdateIntervalSeconds(context: Context): Long {
         val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS)
@@ -524,6 +681,31 @@ object ScanSettings {
                 val to = parts[2].toLongOrNull() ?: return@mapNotNull null
                 val reason = parts[3].trim().ifBlank { "unknown" }
                 IntervalChangeEvent(timestamp, from, to, reason)
+            }
+            ?.toList()
+            ?: emptyList()
+
+    private fun encodeEvasionActionLog(entries: List<EvasionActionLogEntry>): String =
+        entries.joinToString(separator = "\n") { entry ->
+            listOf(
+                entry.timestampEpochMs.toString(),
+                entry.action.replace("|", "/"),
+                entry.detail.replace("|", "/")
+            ).joinToString("|")
+        }
+
+    private fun decodeEvasionActionLog(raw: String?): List<EvasionActionLogEntry> =
+        raw
+            ?.lineSequence()
+            ?.mapNotNull { line ->
+                val parts = line.split("|", limit = 3)
+                if (parts.size < 3) return@mapNotNull null
+                val timestamp = parts[0].toLongOrNull() ?: return@mapNotNull null
+                EvasionActionLogEntry(
+                    timestampEpochMs = timestamp,
+                    action = parts[1].trim().ifBlank { "unknown" },
+                    detail = parts[2].trim().ifBlank { "none" }
+                )
             }
             ?.toList()
             ?: emptyList()

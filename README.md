@@ -87,6 +87,23 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Chain settings now support manual Sync Now and background auto-sync.
 - Chain settings include peer refresh, link requests, connected vs unconnected peer counts, and a mesh visualizer.
 - Chain peers can be assigned human-readable device names, propagated across the mesh.
+- Device Details and Encounter Details use a responsive split layout:
+	- Two-column layout on wider displays (for example foldables/tablets).
+	- Automatic single-column collapse on narrower screens.
+- Device Details includes an embedded Device Location Map card with a Real-time updates toggle:
+	- ON: map follows incoming device location updates while the details page is visible.
+	- OFF: map stays pinned to the last captured location.
+	- Updates naturally stop when leaving the details page.
+
+### Evasion posture controls
+
+- Evasion tab provides posture profiles (Quiet, Balanced, Watch) that control in-app sensor gates and cadence behavior.
+- Current Posture includes explicit per-profile sensor/cadence details.
+- Current Posture now includes a compact Posture Readiness table:
+	- Shows required state vs current state for key permissions/settings relevant to the selected posture.
+	- Provides one-tap Open actions to jump into the matching Android settings pages.
+	- Includes quick Refresh to re-evaluate readiness after returning from settings.
+- Truth-in-advertising note is surfaced in UI: posture presets cannot directly revoke Android permissions or force global radio state outside app scope.
 
 ### Scan interval tuning and telemetry
 

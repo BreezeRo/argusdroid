@@ -16,11 +16,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,6 +45,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.runtime.Composable
@@ -59,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -106,6 +110,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.random.Random
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
@@ -123,16 +128,24 @@ private enum class DeviceSortMode {
     MOST_SEEN
 }
 
+private enum class EvasionProfile {
+    QUIET,
+    BALANCED,
+    WATCH
+}
+
 private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
+private const val EVASION_ROUTE = "evasion"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
 private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primaryId}"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
+private val DETAIL_TWO_COLUMN_MIN_WIDTH: Dp = 720.dp
 
-private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, DEVICES_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
+private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, EVASION_ROUTE, DEVICES_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
@@ -431,6 +444,24 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var chainPersistentChannelEnabled by remember { mutableStateOf(ScanSettings.isChainPersistentChannelEnabled(context)) }
     var chainHeartbeatIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainHeartbeatIntervalSeconds(context)) }
     var chainSharePreciseLocationEnabled by remember { mutableStateOf(ScanSettings.isChainSharePreciseLocationEnabled(context)) }
+    var evasionProfile by remember {
+        mutableStateOf(
+            runCatching { EvasionProfile.valueOf(ScanSettings.getEvasionProfile(context)) }
+                .getOrDefault(EvasionProfile.BALANCED)
+        )
+    }
+    var evasionAutoEscalateEnabled by remember { mutableStateOf(ScanSettings.isEvasionAutoEscalateEnabled(context)) }
+    var evasionEscalateDurationSeconds by remember { mutableStateOf(ScanSettings.getEvasionAutoEscalateDurationSeconds(context)) }
+    var evasionJitterEnabled by remember { mutableStateOf(ScanSettings.isEvasionJitterEnabled(context)) }
+    var evasionJitterPercent by remember { mutableStateOf(ScanSettings.getEvasionJitterPercent(context)) }
+    var evasionBurstEnabled by remember { mutableStateOf(ScanSettings.isEvasionBurstEnabled(context)) }
+    var evasionBurstWatchSeconds by remember { mutableStateOf(ScanSettings.getEvasionBurstWatchSeconds(context)) }
+    var evasionBurstCooldownSeconds by remember { mutableStateOf(ScanSettings.getEvasionBurstCooldownSeconds(context)) }
+    var evasionActionLog by remember { mutableStateOf(ScanSettings.getEvasionActionLog(context, 25)) }
+    var evasionEscalationActiveUntilEpochMs by remember { mutableStateOf<Long?>(null) }
+    var evasionEscalationBaselineProfile by remember { mutableStateOf<EvasionProfile?>(null) }
+    var evasionBurstActiveUntilEpochMs by remember { mutableStateOf<Long?>(null) }
+    var evasionBurstBaselineProfile by remember { mutableStateOf<EvasionProfile?>(null) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
     var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
     var lastScanDurationMs by remember { mutableStateOf(ScanSettings.getLastScanDurationMs(context)) }
@@ -509,6 +540,171 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             ?: scanIntervalSeconds
     }
 
+    fun appendEvasionAction(action: String, detail: String) {
+        ScanSettings.appendEvasionActionLog(context, action = action, detail = detail)
+        evasionActionLog = ScanSettings.getEvasionActionLog(context, 25)
+    }
+
+    fun evasionBaseCadence(profile: EvasionProfile): Pair<Map<String, Long>, Long> = when (profile) {
+        EvasionProfile.QUIET -> {
+            ScanSettings.SOURCE_TYPES.associateWith { 300L } to (15L * 60L)
+        }
+
+        EvasionProfile.BALANCED -> {
+            mapOf(
+                "wifi" to 15L,
+                "wifi_direct" to 30L,
+                "ble" to 15L,
+                "bt_classic" to 30L,
+                "cellular" to 30L,
+                "remote_id" to 60L,
+                "uwb" to 30L,
+                "sdr" to 30L
+            ) to 15L
+        }
+
+        EvasionProfile.WATCH -> {
+            ScanSettings.SOURCE_TYPES.associateWith { 3L } to 3L
+        }
+    }
+
+    fun jitterSeconds(baseSeconds: Long, percent: Int): Long {
+        val pct = percent.coerceIn(1, 50) / 100.0
+        val factor = Random.nextDouble(1.0 - pct, 1.0 + pct)
+        val raw = (baseSeconds * factor).toLong().coerceAtLeast(1L)
+        return raw.coerceIn(ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS, ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+    }
+
+    fun nearestAllowedGlobalInterval(seconds: Long): Long {
+        return ScanSettings.ALLOWED_INTERVALS_SECONDS.minByOrNull { abs(it - seconds) }
+            ?: ScanSettings.DEFAULT_SCAN_INTERVAL_SECONDS
+    }
+
+    suspend fun applyEvasionCadence(
+        profile: EvasionProfile,
+        reasonCode: String,
+        jitterEnabled: Boolean,
+        jitterPercent: Int,
+        appendLog: Boolean
+    ) {
+        val (baseSourceIntervals, baseGlobalTick) = evasionBaseCadence(profile)
+        val resolvedSourceIntervals = if (jitterEnabled) {
+            baseSourceIntervals.mapValues { (_, value) -> jitterSeconds(value, jitterPercent) }
+        } else {
+            baseSourceIntervals
+        }
+
+        resolvedSourceIntervals.forEach { (source, seconds) ->
+            ScanSettings.setSourceScanIntervalSeconds(context, source, seconds)
+        }
+        sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+
+        val targetGlobalTick = if (jitterEnabled) {
+            nearestAllowedGlobalInterval(jitterSeconds(baseGlobalTick, jitterPercent))
+        } else {
+            nearestAllowedGlobalInterval(baseGlobalTick)
+        }
+
+        if (scanIntervalSeconds != targetGlobalTick) {
+            ScanSettings.appendScanIntervalChangeEvent(
+                context = context,
+                fromSeconds = scanIntervalSeconds,
+                toSeconds = targetGlobalTick,
+                reason = reasonCode
+            )
+            scanIntervalSeconds = targetGlobalTick
+            ScanSettings.setScanIntervalSeconds(context, targetGlobalTick)
+            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+        }
+
+        if (appendLog) {
+            appendEvasionAction(
+                action = "JITTER_APPLIED",
+                detail = "${profile.name} cadence jittered by +/-${jitterPercent}%"
+            )
+        }
+    }
+
+    suspend fun applyEvasionProfile(
+        profile: EvasionProfile,
+        reason: String,
+        allowClearEscalation: Boolean = false
+    ) {
+        val previous = evasionProfile
+
+        val wifiEnabled: Boolean
+        val bluetoothEnabled: Boolean
+        val cellularEnabled: Boolean
+        val remoteIdEnabled: Boolean
+
+        when (profile) {
+            EvasionProfile.QUIET -> {
+                wifiEnabled = false
+                bluetoothEnabled = false
+                cellularEnabled = false
+                remoteIdEnabled = false
+            }
+
+            EvasionProfile.BALANCED -> {
+                wifiEnabled = true
+                bluetoothEnabled = true
+                cellularEnabled = true
+                remoteIdEnabled = false
+            }
+
+            EvasionProfile.WATCH -> {
+                wifiEnabled = true
+                bluetoothEnabled = true
+                cellularEnabled = true
+                remoteIdEnabled = true
+            }
+        }
+
+        ScanSettings.setWifiSensorEnabled(context, wifiEnabled)
+        ScanSettings.setBleSensorEnabled(context, bluetoothEnabled)
+        ScanSettings.setCellularSensorEnabled(context, cellularEnabled)
+        ScanSettings.setRemoteIdSensorEnabled(context, remoteIdEnabled)
+        sensorGateSettings = readSensorGateSettings(context)
+
+        applyEvasionCadence(
+            profile = profile,
+            reasonCode = "evasion-${profile.name.lowercase()}",
+            jitterEnabled = evasionJitterEnabled,
+            jitterPercent = evasionJitterPercent,
+            appendLog = false
+        )
+
+        if (trackingActive) {
+            WorkScheduler.stop(context)
+            val restartResult = WorkScheduler.startAndVerify(context)
+            trackingActive = WorkScheduler.isTrackingActive(context)
+            appendEvasionAction(
+                action = "TRACKING_RESTART",
+                detail = if (restartResult.success) {
+                    "Restarted for ${profile.name} policy"
+                } else {
+                    "Restart failed: ${restartResult.message}"
+                }
+            )
+        }
+
+        evasionProfile = profile
+        ScanSettings.setEvasionProfile(context, profile.name)
+        appendEvasionAction(
+            action = "PROFILE_APPLIED",
+            detail = "${previous.name} -> ${profile.name} ($reason)"
+        )
+
+        if (allowClearEscalation && evasionEscalationActiveUntilEpochMs != null && profile != EvasionProfile.WATCH) {
+            evasionEscalationActiveUntilEpochMs = null
+            evasionEscalationBaselineProfile = null
+            appendEvasionAction(
+                action = "AUTO_ESCALATION_CANCELLED",
+                detail = "Manual profile change to ${profile.name}"
+            )
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
@@ -522,6 +718,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
         chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+        evasionProfile = runCatching { EvasionProfile.valueOf(ScanSettings.getEvasionProfile(context)) }
+            .getOrDefault(EvasionProfile.BALANCED)
+        evasionAutoEscalateEnabled = ScanSettings.isEvasionAutoEscalateEnabled(context)
+        evasionEscalateDurationSeconds = ScanSettings.getEvasionAutoEscalateDurationSeconds(context)
+        evasionJitterEnabled = ScanSettings.isEvasionJitterEnabled(context)
+        evasionJitterPercent = ScanSettings.getEvasionJitterPercent(context)
+        evasionBurstEnabled = ScanSettings.isEvasionBurstEnabled(context)
+        evasionBurstWatchSeconds = ScanSettings.getEvasionBurstWatchSeconds(context)
+        evasionBurstCooldownSeconds = ScanSettings.getEvasionBurstCooldownSeconds(context)
+        evasionActionLog = ScanSettings.getEvasionActionLog(context, 25)
         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
@@ -689,7 +895,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, trackerNotificationsEnabled) {
+    LaunchedEffect(
+        allEncounters,
+        ownedDeviceKeys,
+        approachDetectionEnabled,
+        trackerNotificationsEnabled,
+        evasionAutoEscalateEnabled,
+        evasionProfile,
+        evasionEscalateDurationSeconds
+    ) {
         if (!approachDetectionEnabled) return@LaunchedEffect
         val now = System.currentTimeMillis()
         val devices = withContext(Dispatchers.Default) {
@@ -724,6 +938,20 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     sendTrackerRiskNotification(context, device)
                     lastTrackerNotificationEpochByDevice[key] = now
                 }
+
+                if (evasionAutoEscalateEnabled && evasionProfile != EvasionProfile.WATCH) {
+                    evasionEscalationBaselineProfile = evasionProfile
+                    evasionEscalationActiveUntilEpochMs = now + (evasionEscalateDurationSeconds * 1000L)
+                    applyEvasionProfile(
+                        profile = EvasionProfile.WATCH,
+                        reason = "Auto escalation: tracker risk HIGH",
+                        allowClearEscalation = false
+                    )
+                    appendEvasionAction(
+                        action = "AUTO_ESCALATION_STARTED",
+                        detail = "Tracker HIGH on ${device.source}:${device.primaryId} for ${evasionEscalateDurationSeconds}s"
+                    )
+                }
             }
 
             trackerStateByDevice[key] = currentRisk
@@ -740,6 +968,103 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         staleKeys.forEach { staleKey ->
             trackerStateByDevice.remove(staleKey)
             lastTrackerNotificationEpochByDevice.remove(staleKey)
+        }
+    }
+
+    LaunchedEffect(evasionEscalationActiveUntilEpochMs) {
+        val until = evasionEscalationActiveUntilEpochMs ?: return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val remaining = (until - now).coerceAtLeast(0L)
+        if (remaining > 0L) {
+            delay(remaining)
+        }
+        if (evasionEscalationActiveUntilEpochMs == null) return@LaunchedEffect
+        val baseline = evasionEscalationBaselineProfile ?: EvasionProfile.BALANCED
+        applyEvasionProfile(
+            profile = baseline,
+            reason = "Auto escalation timeout",
+            allowClearEscalation = false
+        )
+        appendEvasionAction(
+            action = "AUTO_ESCALATION_ENDED",
+            detail = "Reverted to ${baseline.name}"
+        )
+        evasionEscalationActiveUntilEpochMs = null
+        evasionEscalationBaselineProfile = null
+    }
+
+    LaunchedEffect(
+        evasionJitterEnabled,
+        evasionJitterPercent,
+        evasionProfile,
+        evasionEscalationActiveUntilEpochMs,
+        evasionBurstActiveUntilEpochMs
+    ) {
+        if (!evasionJitterEnabled) return@LaunchedEffect
+        while (evasionJitterEnabled) {
+            delay(45_000L)
+            if (!evasionJitterEnabled) break
+            if (evasionEscalationActiveUntilEpochMs != null) continue
+            if (evasionBurstActiveUntilEpochMs != null) continue
+            applyEvasionCadence(
+                profile = evasionProfile,
+                reasonCode = "evasion-jitter-${evasionProfile.name.lowercase()}",
+                jitterEnabled = true,
+                jitterPercent = evasionJitterPercent,
+                appendLog = true
+            )
+        }
+    }
+
+    LaunchedEffect(
+        evasionBurstEnabled,
+        evasionBurstWatchSeconds,
+        evasionBurstCooldownSeconds,
+        evasionEscalationActiveUntilEpochMs,
+        evasionProfile
+    ) {
+        if (!evasionBurstEnabled) return@LaunchedEffect
+        while (evasionBurstEnabled) {
+            if (evasionEscalationActiveUntilEpochMs != null || evasionProfile == EvasionProfile.WATCH) {
+                delay(5_000L)
+                continue
+            }
+
+            delay(evasionBurstCooldownSeconds * 1000L)
+            if (!evasionBurstEnabled) break
+            if (evasionEscalationActiveUntilEpochMs != null || evasionProfile == EvasionProfile.WATCH) continue
+
+            val baseline = evasionProfile
+            evasionBurstBaselineProfile = baseline
+            val burstStart = System.currentTimeMillis()
+            evasionBurstActiveUntilEpochMs = burstStart + (evasionBurstWatchSeconds * 1000L)
+
+            applyEvasionProfile(
+                profile = EvasionProfile.WATCH,
+                reason = "Burst cycle start",
+                allowClearEscalation = false
+            )
+            appendEvasionAction(
+                action = "BURST_STARTED",
+                detail = "WATCH for ${ScanSettings.formatInterval(evasionBurstWatchSeconds)}"
+            )
+
+            delay(evasionBurstWatchSeconds * 1000L)
+
+            if (evasionEscalationActiveUntilEpochMs == null && evasionBurstEnabled && evasionProfile == EvasionProfile.WATCH) {
+                val revertProfile = evasionBurstBaselineProfile ?: EvasionProfile.BALANCED
+                applyEvasionProfile(
+                    profile = revertProfile,
+                    reason = "Burst cooldown return",
+                    allowClearEscalation = false
+                )
+                appendEvasionAction(
+                    action = "BURST_ENDED",
+                    detail = "Reverted to ${revertProfile.name}"
+                )
+            }
+            evasionBurstActiveUntilEpochMs = null
+            evasionBurstBaselineProfile = null
         }
     }
 
@@ -781,6 +1106,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         onClick = { navController.navigate(DETECTION_ROUTE) },
                         icon = { Text("R") },
                         label = { Text("Detection") }
+                    )
+                    NavigationBarItem(
+                        selected = currentRoute == EVASION_ROUTE,
+                        onClick = { navController.navigate(EVASION_ROUTE) },
+                        icon = { Text("E") },
+                        label = { Text("Evasion") }
                     )
                     NavigationBarItem(
                         selected = currentRoute == DEVICES_ENCOUNTERS_ROUTE,
@@ -1116,6 +1447,109 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         } else {
                             "Peers ${stats.peersSynced}/${stats.peersDiscovered}, imported ${stats.importedRecords}, exported ${stats.exportedRecords}, failures ${stats.failures}."
                         }
+                    }
+                )
+            }
+
+            composable(EVASION_ROUTE) {
+                EvasionPage(
+                    profile = evasionProfile,
+                    autoEscalateEnabled = evasionAutoEscalateEnabled,
+                    autoEscalateDurationSeconds = evasionEscalateDurationSeconds,
+                    escalationActiveUntilEpochMs = evasionEscalationActiveUntilEpochMs,
+                    jitterEnabled = evasionJitterEnabled,
+                    jitterPercent = evasionJitterPercent,
+                    burstEnabled = evasionBurstEnabled,
+                    burstWatchSeconds = evasionBurstWatchSeconds,
+                    burstCooldownSeconds = evasionBurstCooldownSeconds,
+                    burstActiveUntilEpochMs = evasionBurstActiveUntilEpochMs,
+                    actionLog = evasionActionLog,
+                    onProfileSelected = { selected ->
+                        scope.launch {
+                            applyEvasionProfile(
+                                profile = selected,
+                                reason = "Manual selection",
+                                allowClearEscalation = true
+                            )
+                        }
+                    },
+                    onAutoEscalateEnabledChanged = { enabled ->
+                        evasionAutoEscalateEnabled = enabled
+                        ScanSettings.setEvasionAutoEscalateEnabled(context, enabled)
+                        appendEvasionAction(
+                            action = "AUTO_ESCALATE_TOGGLE",
+                            detail = if (enabled) "Enabled" else "Disabled"
+                        )
+                    },
+                    onAutoEscalateDurationSelected = { seconds ->
+                        evasionEscalateDurationSeconds = seconds
+                        ScanSettings.setEvasionAutoEscalateDurationSeconds(context, seconds)
+                        appendEvasionAction(
+                            action = "AUTO_ESCALATE_DURATION",
+                            detail = "Set to ${ScanSettings.formatInterval(seconds)}"
+                        )
+                    },
+                    onJitterEnabledChanged = { enabled ->
+                        evasionJitterEnabled = enabled
+                        ScanSettings.setEvasionJitterEnabled(context, enabled)
+                        appendEvasionAction(
+                            action = "JITTER_TOGGLE",
+                            detail = if (enabled) "Enabled" else "Disabled"
+                        )
+                        if (enabled) {
+                            scope.launch {
+                                applyEvasionCadence(
+                                    profile = evasionProfile,
+                                    reasonCode = "evasion-jitter-enable",
+                                    jitterEnabled = true,
+                                    jitterPercent = evasionJitterPercent,
+                                    appendLog = false
+                                )
+                            }
+                        }
+                    },
+                    onJitterPercentSelected = { percent ->
+                        evasionJitterPercent = percent
+                        ScanSettings.setEvasionJitterPercent(context, percent)
+                        appendEvasionAction(
+                            action = "JITTER_PERCENT",
+                            detail = "Set to +/-${percent}%"
+                        )
+                        if (evasionJitterEnabled) {
+                            scope.launch {
+                                applyEvasionCadence(
+                                    profile = evasionProfile,
+                                    reasonCode = "evasion-jitter-percent",
+                                    jitterEnabled = true,
+                                    jitterPercent = percent,
+                                    appendLog = false
+                                )
+                            }
+                        }
+                    },
+                    onBurstEnabledChanged = { enabled ->
+                        evasionBurstEnabled = enabled
+                        ScanSettings.setEvasionBurstEnabled(context, enabled)
+                        appendEvasionAction(
+                            action = "BURST_TOGGLE",
+                            detail = if (enabled) "Enabled" else "Disabled"
+                        )
+                    },
+                    onBurstWatchSecondsSelected = { seconds ->
+                        evasionBurstWatchSeconds = seconds
+                        ScanSettings.setEvasionBurstWatchSeconds(context, seconds)
+                        appendEvasionAction(
+                            action = "BURST_WATCH_DURATION",
+                            detail = "Set to ${ScanSettings.formatInterval(seconds)}"
+                        )
+                    },
+                    onBurstCooldownSecondsSelected = { seconds ->
+                        evasionBurstCooldownSeconds = seconds
+                        ScanSettings.setEvasionBurstCooldownSeconds(context, seconds)
+                        appendEvasionAction(
+                            action = "BURST_COOLDOWN_DURATION",
+                            detail = "Set to ${ScanSettings.formatInterval(seconds)}"
+                        )
                     }
                 )
             }
@@ -2013,6 +2447,417 @@ private fun AppSettingsPage(
                     }
                     Text("Notifications trigger when a tracked device changes into approaching state.")
                     Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun EvasionPage(
+    profile: EvasionProfile,
+    autoEscalateEnabled: Boolean,
+    autoEscalateDurationSeconds: Long,
+    escalationActiveUntilEpochMs: Long?,
+    jitterEnabled: Boolean,
+    jitterPercent: Int,
+    burstEnabled: Boolean,
+    burstWatchSeconds: Long,
+    burstCooldownSeconds: Long,
+    burstActiveUntilEpochMs: Long?,
+    actionLog: List<ScanSettings.EvasionActionLogEntry>,
+    onProfileSelected: (EvasionProfile) -> Unit,
+    onAutoEscalateEnabledChanged: (Boolean) -> Unit,
+    onAutoEscalateDurationSelected: (Long) -> Unit,
+    onJitterEnabledChanged: (Boolean) -> Unit,
+    onJitterPercentSelected: (Int) -> Unit,
+    onBurstEnabledChanged: (Boolean) -> Unit,
+    onBurstWatchSecondsSelected: (Long) -> Unit,
+    onBurstCooldownSecondsSelected: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    var durationExpanded by remember { mutableStateOf(false) }
+    var jitterPercentExpanded by remember { mutableStateOf(false) }
+    var burstWatchExpanded by remember { mutableStateOf(false) }
+    var burstCooldownExpanded by remember { mutableStateOf(false) }
+    var postureReadinessRefreshToken by remember { mutableStateOf(0) }
+    val postureReadinessRows = remember(profile, postureReadinessRefreshToken) {
+        val readinessItemsById = DetectionReadinessAdvisor.evaluate(context).associateBy { it.id }
+        evasionPostureReadinessRows(profile, readinessItemsById)
+    }
+    val remainingEscalationSeconds = escalationActiveUntilEpochMs
+        ?.let { ((it - System.currentTimeMillis()).coerceAtLeast(0L)) / 1000L }
+    val remainingBurstSeconds = burstActiveUntilEpochMs
+        ?.let { ((it - System.currentTimeMillis()).coerceAtLeast(0L)) / 1000L }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Text("Evasion", style = MaterialTheme.typography.headlineMedium)
+        }
+        item {
+            Text("Minimize exposure while preserving situational awareness with adaptive posture presets.")
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Current Posture", fontWeight = FontWeight.Bold)
+                    Text(evasionProfileSummary(profile))
+                    Text("Posture controls in-app scan gates/cadence. Android radios/permissions still require OS settings.")
+                    evasionProfileDetailLines(profile).forEach { detailLine ->
+                        Text(detailLine)
+                    }
+                    EvasionPostureReadinessTable(
+                        rows = postureReadinessRows,
+                        onRefresh = { postureReadinessRefreshToken++ },
+                        onOpenReadinessSetting = { item ->
+                            runCatching {
+                                context.startActivity(item.settingsIntent)
+                            }.recoverCatching {
+                                context.startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                                )
+                            }
+                        }
+                    )
+                    if (remainingEscalationSeconds != null && remainingEscalationSeconds > 0L) {
+                        Text(
+                            "Auto-escalation active for ${ScanSettings.formatInterval(remainingEscalationSeconds)}",
+                            color = Color(0xFFB3261E),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        EvasionProfile.entries.forEach { option ->
+                            FilterChip(
+                                selected = option == profile,
+                                onClick = {
+                                    if (option != profile) {
+                                        onProfileSelected(option)
+                                    }
+                                },
+                                label = { Text(evasionProfileLabel(option)) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Auto Escalation", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Escalate to WATCH on tracker risk HIGH")
+                        Switch(
+                            checked = autoEscalateEnabled,
+                            onCheckedChange = onAutoEscalateEnabledChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Escalation hold")
+                        Button(onClick = { durationExpanded = true }) {
+                            Text(ScanSettings.formatInterval(autoEscalateDurationSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = durationExpanded,
+                            onDismissRequest = { durationExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_EVASION_ESCALATE_DURATION_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text(ScanSettings.formatInterval(seconds)) },
+                                    onClick = {
+                                        onAutoEscalateDurationSelected(seconds)
+                                        durationExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Anti-Correlation Jitter", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable cadence jitter")
+                        Switch(
+                            checked = jitterEnabled,
+                            onCheckedChange = onJitterEnabledChanged
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Jitter range")
+                        Button(onClick = { jitterPercentExpanded = true }) {
+                            Text("+/-${jitterPercent}%")
+                        }
+                        DropdownMenu(
+                            expanded = jitterPercentExpanded,
+                            onDismissRequest = { jitterPercentExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_EVASION_JITTER_PERCENT.forEach { percent ->
+                                DropdownMenuItem(
+                                    text = { Text("+/-${percent}%") },
+                                    onClick = {
+                                        onJitterPercentSelected(percent)
+                                        jitterPercentExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Text("Randomizes scan cadence around posture defaults to reduce stable timing fingerprints.")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Burst Scheduler", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable burst cycle")
+                        Switch(
+                            checked = burstEnabled,
+                            onCheckedChange = onBurstEnabledChanged
+                        )
+                    }
+                    if (remainingBurstSeconds != null && remainingBurstSeconds > 0L) {
+                        Text(
+                            "Burst active for ${ScanSettings.formatInterval(remainingBurstSeconds)}",
+                            color = Color(0xFF1565C0),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Watch burst")
+                        Button(onClick = { burstWatchExpanded = true }) {
+                            Text(ScanSettings.formatInterval(burstWatchSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = burstWatchExpanded,
+                            onDismissRequest = { burstWatchExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_EVASION_BURST_WATCH_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text(ScanSettings.formatInterval(seconds)) },
+                                    onClick = {
+                                        onBurstWatchSecondsSelected(seconds)
+                                        burstWatchExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Cooldown")
+                        Button(onClick = { burstCooldownExpanded = true }) {
+                            Text(ScanSettings.formatInterval(burstCooldownSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = burstCooldownExpanded,
+                            onDismissRequest = { burstCooldownExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_EVASION_BURST_COOLDOWN_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text(ScanSettings.formatInterval(seconds)) },
+                                    onClick = {
+                                        onBurstCooldownSecondsSelected(seconds)
+                                        burstCooldownExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Text("Runs periodic WATCH bursts followed by cooldown to balance awareness with reduced persistent exposure.")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Action Log", fontWeight = FontWeight.Bold)
+                    if (actionLog.isEmpty()) {
+                        Text("No evasion actions yet.")
+                    } else {
+                        actionLog.take(20).forEach { entry ->
+                            Text("${formatEpoch(entry.timestampEpochMs)} • ${entry.action} • ${entry.detail}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun evasionProfileLabel(profile: EvasionProfile): String = when (profile) {
+    EvasionProfile.QUIET -> "Quiet"
+    EvasionProfile.BALANCED -> "Balanced"
+    EvasionProfile.WATCH -> "Watch"
+}
+
+private fun evasionProfileSummary(profile: EvasionProfile): String = when (profile) {
+    EvasionProfile.QUIET -> "Quiet: sensors gated down and slower scan cadence to reduce emitted/observable surface."
+    EvasionProfile.BALANCED -> "Balanced: core awareness enabled with moderate cadence and reduced nonessential sources."
+    EvasionProfile.WATCH -> "Watch: full awareness with faster scan cadence for short elevated-risk windows."
+}
+
+private fun evasionProfileDetailLines(profile: EvasionProfile): List<String> = when (profile) {
+    EvasionProfile.QUIET -> listOf(
+        "Sensors: Wi-Fi OFF • Bluetooth OFF • Cellular OFF • Remote ID OFF",
+        "Global cadence: every 15 min",
+        "Per-source cadence: every 5 min"
+    )
+
+    EvasionProfile.BALANCED -> listOf(
+        "Sensors: Wi-Fi ON • Bluetooth ON • Cellular ON • Remote ID OFF",
+        "Global cadence: every 15 sec",
+        "Per-source cadence: Wi-Fi/BLE 15s • Wi-Fi Direct/BT Classic/Cell/UWB/SDR 30s • Remote ID 60s"
+    )
+
+    EvasionProfile.WATCH -> listOf(
+        "Sensors: Wi-Fi ON • Bluetooth ON • Cellular ON • Remote ID ON",
+        "Global cadence: every 3 sec",
+        "Per-source cadence: every 3 sec"
+    )
+}
+
+private data class EvasionPostureReadinessRow(
+    val label: String,
+    val neededState: String,
+    val currentState: String,
+    val isCompliant: Boolean,
+    val readinessItem: DetectionReadinessItem?
+)
+
+private fun evasionPostureReadinessRows(
+    profile: EvasionProfile,
+    readinessItemsById: Map<String, DetectionReadinessItem>
+): List<EvasionPostureReadinessRow> {
+    val targetIds = when (profile) {
+        EvasionProfile.QUIET -> listOf(
+            "setting_wifi",
+            "setting_bluetooth",
+            "setting_location_services",
+            "setting_battery_optimization"
+        )
+
+        EvasionProfile.BALANCED -> listOf(
+            "perm_fine_location",
+            "perm_background_location",
+            "perm_ble_scan",
+            "setting_location_services",
+            "setting_wifi",
+            "setting_bluetooth",
+            "setting_battery_optimization"
+        )
+
+        EvasionProfile.WATCH -> listOf(
+            "perm_fine_location",
+            "perm_background_location",
+            "perm_ble_scan",
+            "perm_nearby_wifi",
+            "setting_location_services",
+            "setting_wifi_scanning",
+            "setting_bluetooth_scanning",
+            "setting_wifi",
+            "setting_bluetooth",
+            "setting_battery_optimization",
+            "perm_notifications"
+        )
+    }
+
+    return targetIds.mapNotNull { id ->
+        val item = readinessItemsById[id] ?: return@mapNotNull null
+        val neededState = when {
+            profile == EvasionProfile.QUIET && id == "setting_wifi" -> "Disabled"
+            profile == EvasionProfile.QUIET && id == "setting_bluetooth" -> "Disabled"
+            profile == EvasionProfile.QUIET && id == "setting_location_services" -> "Enabled"
+            else -> item.recommendedValue
+        }
+        val currentState = item.currentValue
+        EvasionPostureReadinessRow(
+            label = item.title,
+            neededState = neededState,
+            currentState = currentState,
+            isCompliant = currentState.equals(neededState, ignoreCase = true),
+            readinessItem = item
+        )
+    }
+}
+
+@Composable
+private fun EvasionPostureReadinessTable(
+    rows: List<EvasionPostureReadinessRow>,
+    onRefresh: () -> Unit,
+    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
+) {
+    if (rows.isEmpty()) return
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Posture readiness", fontWeight = FontWeight.Bold)
+            Button(onClick = onRefresh) {
+                Text("Refresh")
+            }
+        }
+        rows.forEach { row ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(row.label, modifier = Modifier.weight(1.2f))
+                    Text(
+                        "Need ${row.neededState}",
+                        modifier = Modifier.weight(0.8f),
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        row.currentState,
+                        modifier = Modifier.weight(0.8f),
+                        color = if (row.isCompliant) Color(0xFF2E7D32) else Color(0xFFB3261E),
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (!row.isCompliant && row.readinessItem != null) {
+                        AssistChip(
+                            onClick = { onOpenReadinessSetting(row.readinessItem) },
+                            label = { Text("Open") }
+                        )
+                    }
                 }
             }
         }
@@ -5287,6 +6132,36 @@ private fun DeviceDetailPage(
     val context = LocalContext.current
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var isOwnedState by remember(item?.source, item?.primaryId) { mutableStateOf(item?.isOwned == true) }
+    var realtimeMapEnabled by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(false) }
+    var pinnedMapLat by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(item?.lastLat) }
+    var pinnedMapLon by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(item?.lastLon) }
+
+    LaunchedEffect(realtimeMapEnabled, item?.lastLat, item?.lastLon) {
+        if (realtimeMapEnabled) {
+            pinnedMapLat = item?.lastLat
+            pinnedMapLon = item?.lastLon
+        }
+    }
+
+    val source = remember(item?.source) {
+        runCatching { EncounterSource.valueOf(item?.source ?: "") }
+            .getOrDefault(EncounterSource.UNKNOWN_RF)
+    }
+    val deviceEncounter = remember(item, source) {
+        item?.let {
+            Encounter(
+                timestampEpochMs = it.lastSeenEpochMs,
+                source = source,
+                primaryId = it.primaryId,
+                secondaryId = it.secondaryId,
+                rssiDbm = it.lastRssiDbm,
+                frequencyMhz = it.lastFrequencyMhz,
+                lat = it.lastLat,
+                lon = it.lastLon,
+                rawPayloadJson = it.lastRawPayloadJson ?: "{}"
+            )
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -5302,114 +6177,123 @@ private fun DeviceDetailPage(
             Text("Device not found in current encounter window.")
             return
         }
-        DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
-        DetailRow("Data Origin", provenanceLabel(item.lastProvenance, item.lastProvenanceNodeId))
-        ProvenanceGraphSection(
-            provenance = item.lastProvenance,
-            provenanceNodeId = item.lastProvenanceNodeId,
-            provenanceOriginNodeId = item.lastProvenanceOriginNodeId,
-            provenancePathNodeIds = item.lastProvenancePathNodeIds,
-            provenanceReceivedAtEpochMs = item.lastProvenanceReceivedAtEpochMs,
-            provenanceHopCount = item.lastProvenanceHopCount,
-            localNodeId = ScanSettings.getChainNodeId(context)
-        )
-        DetailRow("Primary ID", item.primaryId)
-        DetailRow("Secondary ID", item.secondaryId ?: "n/a")
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text("Mark as My Device", fontWeight = FontWeight.Medium)
-            Switch(
-                checked = isOwnedState,
-                onCheckedChange = { enabled ->
-                    isOwnedState = enabled
-                    onOwnedChanged(item.source, item.primaryId, enabled)
-                }
-            )
-        }
-        DetailRow("Seen Count", item.seenCount.toString())
-        DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
-        DetailRow(
-            "Approach Status",
-            if (item.isApproaching) {
-                val confidencePct = ((item.approachConfidence ?: 0.0) * 100.0).toInt()
-                val deltaLabel = item.approachDeltaMeters
-                    ?.let { formatDistanceFeetMiles(it.coerceAtLeast(0.0)) }
-                    ?: "n/a"
-                "Approaching (${confidencePct}% confidence, trend ${deltaLabel})"
-            } else {
-                "Not approaching"
-            }
-        )
-        DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
-        DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
-        DetailRow(
-            "Motion Status",
-            when {
-                item.motionSpeedMps == null || item.motionHeadingDeg == null -> "Insufficient motion samples"
-                item.isInMotion -> "In motion"
-                else -> "Not moving"
-            }
-        )
-        if (item.motionSpeedMps != null) {
-            DetailRow("Estimated Speed", formatSpeedLabel(item.motionSpeedMps))
-        }
-        if (item.motionHeadingDeg != null) {
-            DetailRow("Estimated Direction", formatHeadingCardinal(item.motionHeadingDeg))
-        }
-        DetailRow(
-            "Top Speed Record",
-            DeviceSpeedRecordStore
-                .getRecordSpeedMps(context, item.source, item.primaryId)
-                ?.let(::formatSpeedLabel)
-                ?: "n/a"
-        )
-        DetailRow(
-            "Tracker Risk",
-            when (item.trackerRisk?.level) {
-                TrackerRiskLevel.HIGH -> "HIGH"
-                TrackerRiskLevel.MEDIUM -> "MEDIUM"
-                TrackerRiskLevel.LOW -> "LOW"
-                else -> "NONE"
-            }
-        )
-        if (item.trackerRisk != null) {
-            DetailRow("Tracker Confidence", String.format(Locale.US, "%.0f%%", item.trackerRisk.confidence * 100.0))
-            DetailRow("Cross-Location Cells", item.trackerRisk.uniqueLocationCells.toString())
-            DetailRow("Observed Spread", formatDistanceFeetMiles(item.trackerRisk.spreadMeters))
-            DetailRow("Observed Window", String.format(Locale.US, "%.1f min", item.trackerRisk.activeWindowMinutes))
-            DetailRow("Assessment", item.trackerRisk.summary)
-        }
-        DetailRow(
-            "Last Device Location",
-            if (isValidLatLon(item.lastLat, item.lastLon)) {
-                String.format(Locale.US, "%.6f, %.6f", item.lastLat!!, item.lastLon!!)
-            } else {
-                "n/a"
-            }
-        )
-
-        if (!item.lastRawPayloadJson.isNullOrBlank()) {
-            val source = remember(item.source) {
-                runCatching { EncounterSource.valueOf(item.source) }
-                    .getOrDefault(EncounterSource.UNKNOWN_RF)
-            }
-            val deviceEncounter = remember(item, source) {
-                Encounter(
-                    timestampEpochMs = item.lastSeenEpochMs,
-                    source = source,
-                    primaryId = item.primaryId,
-                    secondaryId = item.secondaryId,
-                    rssiDbm = item.lastRssiDbm,
-                    frequencyMhz = item.lastFrequencyMhz,
-                    lat = item.lastLat,
-                    lon = item.lastLon,
-                    rawPayloadJson = item.lastRawPayloadJson ?: "{}"
+        ResponsiveDetailColumns(
+            left = {
+                DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
+                DetailRow("Data Origin", provenanceLabel(item.lastProvenance, item.lastProvenanceNodeId))
+                ProvenanceGraphSection(
+                    provenance = item.lastProvenance,
+                    provenanceNodeId = item.lastProvenanceNodeId,
+                    provenanceOriginNodeId = item.lastProvenanceOriginNodeId,
+                    provenancePathNodeIds = item.lastProvenancePathNodeIds,
+                    provenanceReceivedAtEpochMs = item.lastProvenanceReceivedAtEpochMs,
+                    provenanceHopCount = item.lastProvenanceHopCount,
+                    localNodeId = ScanSettings.getChainNodeId(context)
                 )
+                DetailRow("Primary ID", item.primaryId)
+                DetailRow("Secondary ID", item.secondaryId ?: "n/a")
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Mark as My Device", fontWeight = FontWeight.Medium)
+                        Switch(
+                            checked = isOwnedState,
+                            onCheckedChange = { enabled ->
+                                isOwnedState = enabled
+                                onOwnedChanged(item.source, item.primaryId, enabled)
+                            }
+                        )
+                    }
+                }
+                DetailRow("Seen Count", item.seenCount.toString())
+                DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
+                DetailRow(
+                    "Approach Status",
+                    if (item.isApproaching) {
+                        val confidencePct = ((item.approachConfidence ?: 0.0) * 100.0).toInt()
+                        val deltaLabel = item.approachDeltaMeters
+                            ?.let { formatDistanceFeetMiles(it.coerceAtLeast(0.0)) }
+                            ?: "n/a"
+                        "Approaching (${confidencePct}% confidence, trend ${deltaLabel})"
+                    } else {
+                        "Not approaching"
+                    }
+                )
+                DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
+                DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
+                DetailRow(
+                    "Motion Status",
+                    when {
+                        item.motionSpeedMps == null || item.motionHeadingDeg == null -> "Insufficient motion samples"
+                        item.isInMotion -> "In motion"
+                        else -> "Not moving"
+                    }
+                )
+                if (item.motionSpeedMps != null) {
+                    DetailRow("Estimated Speed", formatSpeedLabel(item.motionSpeedMps))
+                }
+                if (item.motionHeadingDeg != null) {
+                    DetailRow("Estimated Direction", formatHeadingCardinal(item.motionHeadingDeg))
+                }
+            },
+
+            right = {
+                DetailRow(
+                    "Top Speed Record",
+                    DeviceSpeedRecordStore
+                        .getRecordSpeedMps(context, item.source, item.primaryId)
+                        ?.let(::formatSpeedLabel)
+                        ?: "n/a"
+                )
+                DetailRow(
+                    "Tracker Risk",
+                    when (item.trackerRisk?.level) {
+                        TrackerRiskLevel.HIGH -> "HIGH"
+                        TrackerRiskLevel.MEDIUM -> "MEDIUM"
+                        TrackerRiskLevel.LOW -> "LOW"
+                        else -> "NONE"
+                    }
+                )
+                if (item.trackerRisk != null) {
+                    DetailRow("Tracker Confidence", String.format(Locale.US, "%.0f%%", item.trackerRisk.confidence * 100.0))
+                    DetailRow("Cross-Location Cells", item.trackerRisk.uniqueLocationCells.toString())
+                    DetailRow("Observed Spread", formatDistanceFeetMiles(item.trackerRisk.spreadMeters))
+                    DetailRow("Observed Window", String.format(Locale.US, "%.1f min", item.trackerRisk.activeWindowMinutes))
+                    DetailRow("Assessment", item.trackerRisk.summary)
+                }
+                DetailRow(
+                    "Last Device Location",
+                    if (isValidLatLon(item.lastLat, item.lastLon)) {
+                        String.format(Locale.US, "%.6f, %.6f", item.lastLat!!, item.lastLon!!)
+                    } else {
+                        "n/a"
+                    }
+                )
+                DeviceDetailMapSection(
+                    source = item.source,
+                    primaryId = item.primaryId,
+                    lat = pinnedMapLat,
+                    lon = pinnedMapLon,
+                    lastSeenEpochMs = item.lastSeenEpochMs,
+                    realtimeEnabled = realtimeMapEnabled,
+                    onRealtimeEnabledChanged = { enabled ->
+                        realtimeMapEnabled = enabled
+                        if (enabled) {
+                            pinnedMapLat = item.lastLat
+                            pinnedMapLon = item.lastLon
+                        }
+                    }
+                )
+
+                if (!item.lastRawPayloadJson.isNullOrBlank() && deviceEncounter != null) {
+                    SourceSpecificDetailsSection(encounter = deviceEncounter, currentLocation = currentLocation)
+                }
             }
-            SourceSpecificDetailsSection(encounter = deviceEncounter, currentLocation = currentLocation)
-        }
+        )
     }
 }
 
@@ -5435,26 +6319,143 @@ private fun EncounterDetailPage(
             Text("Encounter not found in current encounter window.")
             return
         }
-        DetailRow("Source", encounter.source.name)
-        DetailRow("Data Origin", provenanceLabel(encounter.provenance, encounter.provenanceNodeId))
-        ProvenanceGraphSection(
-            provenance = encounter.provenance,
-            provenanceNodeId = encounter.provenanceNodeId,
-            provenanceOriginNodeId = encounter.provenanceOriginNodeId,
-            provenancePathNodeIds = encounter.provenancePathNodeIds,
-            provenanceReceivedAtEpochMs = encounter.provenanceReceivedAtEpochMs,
-            provenanceHopCount = encounter.provenanceHopCount,
-            localNodeId = ScanSettings.getChainNodeId(context)
+        ResponsiveDetailColumns(
+            left = {
+                DetailRow("Source", encounter.source.name)
+                DetailRow("Data Origin", provenanceLabel(encounter.provenance, encounter.provenanceNodeId))
+                ProvenanceGraphSection(
+                    provenance = encounter.provenance,
+                    provenanceNodeId = encounter.provenanceNodeId,
+                    provenanceOriginNodeId = encounter.provenanceOriginNodeId,
+                    provenancePathNodeIds = encounter.provenancePathNodeIds,
+                    provenanceReceivedAtEpochMs = encounter.provenanceReceivedAtEpochMs,
+                    provenanceHopCount = encounter.provenanceHopCount,
+                    localNodeId = ScanSettings.getChainNodeId(context)
+                )
+                DetailRow("Primary ID", encounter.primaryId)
+                DetailRow("Secondary ID", encounter.secondaryId ?: "n/a")
+                DetailRow("Timestamp", formatEpoch(encounter.timestampEpochMs))
+            },
+
+            right = {
+                DetailRow("RSSI", encounter.rssiDbm?.toString() ?: "n/a")
+                DetailRow("Frequency", encounter.frequencyMhz?.toString() ?: "n/a")
+                if (encounter.rawPayloadJson.isNotBlank()) {
+                    SourceSpecificDetailsSection(encounter = encounter, currentLocation = currentLocation)
+                }
+                DetailRow("Payload", encounter.rawPayloadJson)
+            }
         )
-        DetailRow("Primary ID", encounter.primaryId)
-        DetailRow("Secondary ID", encounter.secondaryId ?: "n/a")
-        DetailRow("Timestamp", formatEpoch(encounter.timestampEpochMs))
-        DetailRow("RSSI", encounter.rssiDbm?.toString() ?: "n/a")
-        DetailRow("Frequency", encounter.frequencyMhz?.toString() ?: "n/a")
-        if (encounter.rawPayloadJson.isNotBlank()) {
-            SourceSpecificDetailsSection(encounter = encounter, currentLocation = currentLocation)
+    }
+}
+
+@Composable
+private fun ResponsiveDetailColumns(
+    left: @Composable ColumnScope.() -> Unit,
+    right: @Composable ColumnScope.() -> Unit
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val twoColumn = maxWidth >= DETAIL_TWO_COLUMN_MIN_WIDTH
+        if (twoColumn) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    content = left
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    content = right
+                )
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                left()
+                right()
+            }
         }
-        DetailRow("Payload", encounter.rawPayloadJson)
+    }
+}
+
+@Composable
+private fun DeviceDetailMapSection(
+    source: String,
+    primaryId: String,
+    lat: Double?,
+    lon: Double?,
+    lastSeenEpochMs: Long,
+    realtimeEnabled: Boolean,
+    onRealtimeEnabledChanged: (Boolean) -> Unit
+) {
+    val hasFix = isValidLatLon(lat, lon)
+    val markerLatLng = remember(lat, lon, hasFix) {
+        if (hasFix) {
+            LatLng(lat!!, lon!!)
+        } else {
+            null
+        }
+    }
+    val fallbackLatLng = remember { LatLng(37.4219999, -122.0840575) }
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(markerLatLng ?: fallbackLatLng, if (hasFix) 16f else 12f)
+    }
+
+    LaunchedEffect(markerLatLng) {
+        markerLatLng?.let {
+            cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(it, 16f))
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Device Location Map", fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Real-time updates")
+                Switch(
+                    checked = realtimeEnabled,
+                    onCheckedChange = onRealtimeEnabledChanged
+                )
+            }
+            Text(
+                if (realtimeEnabled) {
+                    "Map follows latest fixes while this page is open."
+                } else {
+                    "Map is pinned. Enable real-time to follow incoming updates."
+                }
+            )
+
+            if (markerLatLng == null) {
+                Text("No valid device location available yet.")
+            } else {
+                Text(
+                    "${String.format(Locale.US, "%.6f, %.6f", markerLatLng.latitude, markerLatLng.longitude)} • ${formatEpoch(lastSeenEpochMs)}"
+                )
+                GoogleMap(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp),
+                    cameraPositionState = cameraPositionState,
+                    uiSettings = MapUiSettings(zoomControlsEnabled = false)
+                ) {
+                    Marker(
+                        state = MarkerState(position = markerLatLng),
+                        title = "$source • $primaryId",
+                        snippet = formatEpoch(lastSeenEpochMs),
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                    )
+                }
+            }
+        }
     }
 }
 
