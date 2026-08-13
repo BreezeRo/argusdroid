@@ -259,6 +259,12 @@ function getFilteredEncountersUncapped() {
   return dedupeEncountersByDevice(filtered);
 }
 
+function getFilteredEncounterSightings() {
+  return state.data.encounters
+    .filter((e) => state.enabledSources.has(e.source))
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+}
+
 function dedupeEncountersByDevice(encounters) {
   const deduped = [];
   const seen = new Set();
@@ -635,8 +641,7 @@ function renderMapControlsForTab(tabName, mapRef, hostId) {
     {
       label: "Center Latest",
       onClick: () => {
-        const latest = getLatestAutoFocusEncounter(mapRef);
-        const point = latest ? getPrecisePosition(latest) : null;
+        const point = getLatestCenterPointForTab(tabName);
         if (point && isValidLatLng(Number(point.lat), Number(point.lng))) {
           mapRef.setCenter({ lat: Number(point.lat), lng: Number(point.lng) });
           mapRef.setZoom(16);
@@ -978,6 +983,35 @@ function getLatestAutoFocusEncounter(mapRef = null) {
   return nearby || null;
 }
 
+function getLatestCenterPointForTab(tabName) {
+  if (tabName === "hotspots") {
+    const regions = buildHotspotRegions(getFilteredEncounters(), state.mapPinLimits.hotspots);
+    const latestRegion = regions[0];
+    if (latestRegion?.center && isValidLatLng(Number(latestRegion.center.lat), Number(latestRegion.center.lng))) {
+      return latestRegion.center;
+    }
+    return null;
+  }
+
+  if (tabName === "device-locations") {
+    const rows = buildLatestDeviceRows();
+    const latestRow = rows[0];
+    if (latestRow?.position && isValidLatLng(Number(latestRow.position.lat), Number(latestRow.position.lng))) {
+      return latestRow.position;
+    }
+    return null;
+  }
+
+  const encounters = getMapRenderEncounters();
+  for (const encounter of encounters) {
+    const point = getMarkerPosition(encounter);
+    if (point && isValidLatLng(Number(point.lat), Number(point.lng))) {
+      return point;
+    }
+  }
+  return null;
+}
+
 function shouldAutoFocusPoint(point, anchor, maxDistanceMeters) {
   if (!point || !isValidLatLng(Number(point.lat), Number(point.lng))) {
     return false;
@@ -991,7 +1025,7 @@ function shouldAutoFocusPoint(point, anchor, maxDistanceMeters) {
 }
 
 function buildLatestDeviceRows() {
-  const encounters = [...getFilteredEncounters()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  const encounters = [...getFilteredEncounterSightings()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
   const grouped = new Map();
 
   for (const encounter of encounters) {
