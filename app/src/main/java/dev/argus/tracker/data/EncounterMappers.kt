@@ -20,7 +20,11 @@ fun Encounter.toEntity(): EncounterEntity = EncounterEntity(
     rawPayloadJson = rawPayloadJson,
     encounterFingerprint = encounterFingerprint ?: computeEncounterFingerprint(this),
     provenance = provenance.name,
-    provenanceNodeId = provenanceNodeId
+    provenanceNodeId = provenanceNodeId,
+    provenanceOriginNodeId = provenanceOriginNodeId,
+    provenancePathNodeIds = provenancePathNodeIds,
+    provenanceReceivedAtEpochMs = provenanceReceivedAtEpochMs,
+    provenanceHopCount = provenanceHopCount
 )
 
 fun EncounterEntity.toDomain(): Encounter = Encounter(
@@ -37,7 +41,11 @@ fun EncounterEntity.toDomain(): Encounter = Encounter(
     encounterFingerprint = encounterFingerprint,
     provenance = runCatching { EncounterProvenance.valueOf(provenance) }
         .getOrDefault(EncounterProvenance.LOCAL),
-    provenanceNodeId = provenanceNodeId
+    provenanceNodeId = provenanceNodeId,
+    provenanceOriginNodeId = provenanceOriginNodeId,
+    provenancePathNodeIds = provenancePathNodeIds,
+    provenanceReceivedAtEpochMs = provenanceReceivedAtEpochMs,
+    provenanceHopCount = provenanceHopCount
 )
 
 fun computeEncounterFingerprint(encounter: Encounter): String {

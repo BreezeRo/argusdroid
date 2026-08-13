@@ -7,7 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [EncounterEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class ArgusDatabase : RoomDatabase() {
@@ -22,6 +22,16 @@ abstract class ArgusDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_encounters_encounterFingerprint ON encounters(encounterFingerprint)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_encounters_provenance ON encounters(provenance)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_encounters_provenanceNodeId ON encounters(provenanceNodeId)")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE encounters ADD COLUMN provenanceOriginNodeId TEXT")
+                db.execSQL("ALTER TABLE encounters ADD COLUMN provenancePathNodeIds TEXT")
+                db.execSQL("ALTER TABLE encounters ADD COLUMN provenanceReceivedAtEpochMs INTEGER")
+                db.execSQL("ALTER TABLE encounters ADD COLUMN provenanceHopCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_encounters_provenanceOriginNodeId ON encounters(provenanceOriginNodeId)")
             }
         }
     }

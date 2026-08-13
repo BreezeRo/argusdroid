@@ -101,6 +101,10 @@ object ChainLinkJson {
                 put("encounterFingerprint", encounter.encounterFingerprint)
                 put("provenance", encounter.provenance.name)
                 put("provenanceNodeId", encounter.provenanceNodeId)
+                put("provenanceOriginNodeId", encounter.provenanceOriginNodeId)
+                put("provenancePathNodeIds", encounter.provenancePathNodeIds)
+                put("provenanceReceivedAtEpochMs", encounter.provenanceReceivedAtEpochMs)
+                put("provenanceHopCount", encounter.provenanceHopCount)
             })
         }
         return array
@@ -126,7 +130,11 @@ object ChainLinkJson {
                     provenance = runCatching {
                         EncounterProvenance.valueOf(obj.optString("provenance", EncounterProvenance.LOCAL.name))
                     }.getOrDefault(EncounterProvenance.LOCAL),
-                    provenanceNodeId = if (obj.has("provenanceNodeId") && !obj.isNull("provenanceNodeId")) obj.optString("provenanceNodeId") else null
+                    provenanceNodeId = if (obj.has("provenanceNodeId") && !obj.isNull("provenanceNodeId")) obj.optString("provenanceNodeId") else null,
+                    provenanceOriginNodeId = if (obj.has("provenanceOriginNodeId") && !obj.isNull("provenanceOriginNodeId")) obj.optString("provenanceOriginNodeId") else null,
+                    provenancePathNodeIds = if (obj.has("provenancePathNodeIds") && !obj.isNull("provenancePathNodeIds")) obj.optString("provenancePathNodeIds") else null,
+                    provenanceReceivedAtEpochMs = if (obj.has("provenanceReceivedAtEpochMs") && !obj.isNull("provenanceReceivedAtEpochMs")) obj.optLong("provenanceReceivedAtEpochMs") else null,
+                    provenanceHopCount = obj.optInt("provenanceHopCount", 0)
                 )
             )
         }

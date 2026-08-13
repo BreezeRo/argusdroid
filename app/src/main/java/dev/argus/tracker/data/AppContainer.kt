@@ -27,6 +27,7 @@ class DefaultAppContainer(
             "argus.db"
         )
             .addMigrations(ArgusDatabase.MIGRATION_1_2)
+            .addMigrations(ArgusDatabase.MIGRATION_2_3)
             .build()
     }
 
@@ -40,6 +41,7 @@ class DefaultAppContainer(
 
     override val sensingService: ArgusSensingService by lazy {
         ArgusSensingService(
+            context = context,
             scanners = listOf(
                 WifiScanner(context),
                 BleScanner(context),

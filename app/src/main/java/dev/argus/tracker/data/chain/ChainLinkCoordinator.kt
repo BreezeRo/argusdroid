@@ -255,6 +255,7 @@ class LocalMeshChainLinkCoordinator(
         val now = System.currentTimeMillis()
         val since = now - (ScanSettings.getChainSyncWindowMinutes(context) * 60_000L)
         val exportDataset = repository.listSince(since, CHAIN_MAX_DATASET)
+            .map { encounter -> encounter.withExportProvenance(localNodeId = nodeId) }
         val peers = refreshPeers().peers
             .map {
                 DiscoveredPeer(
@@ -431,14 +432,12 @@ class LocalMeshChainLinkCoordinator(
             failure = null,
             markSynced = true
         )
+        val receivedAt = System.currentTimeMillis()
         val normalizedRemote = response.encounters.map { incoming ->
-            incoming.copy(
-                id = 0,
-                provenance = EncounterProvenance.CHAIN_LINKED,
-                provenanceNodeId = response.responderNodeId,
-                encounterFingerprint = incoming.encounterFingerprint
-                    ?: computeEncounterFingerprint(incoming)
-            )
+            incoming.withInboundProvenance(
+                senderNodeId = response.responderNodeId,
+                receivedAtEpochMs = receivedAt
+            ).copy(id = 0)
         }
         val imported = repository.insertBatch(normalizedRemote)
         PeerSyncResult(imported = imported)
@@ -731,17 +730,17 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
+                    val receivedAt = System.currentTimeMillis()
                     val normalizedRemote = request.encounters.map { incoming ->
-                        incoming.copy(
-                            id = 0,
-                            provenance = EncounterProvenance.CHAIN_LINKED,
-                            provenanceNodeId = request.requesterNodeId,
-                            encounterFingerprint = incoming.encounterFingerprint
-                                ?: computeEncounterFingerprint(incoming)
-                        )
+                        incoming.withInboundProvenance(
+                            senderNodeId = request.requesterNodeId,
+                            receivedAtEpochMs = receivedAt
+                        ).copy(id = 0)
                     }
                     val importedCount = repository.insertBatch(normalizedRemote)
-                    val localDataset = repository.listSince(request.sinceEpochMs, CHAIN_MAX_DATASET)
+                    val localDataset = repository
+                        .listSince(request.sinceEpochMs, CHAIN_MAX_DATASET)
+                        .map { encounter -> encounter.withExportProvenance(localNodeId = nodeId) }
 
                     val response = ChainLinkJson.encodeSyncResponse(
                         ChainSyncResponse(
@@ -940,3 +939,94 @@ private const val CHAIN_DISCOVERY_CONCURRENCY = 24
 private const val CHAIN_SERVER_ACCEPT_TIMEOUT_MS = 1000
 private const val CHAIN_MAX_AUTH_CLOCK_SKEW_MS = 2 * 60 * 1000L
 private const val CHAIN_MAX_INCOMING_REQUESTS = 50
+
+private fun Encounter.withExportProvenance(localNodeId: String): Encounter {
+    val isLocal = provenance == EncounterProvenance.LOCAL
+    val existingPath = decodeProvenancePath(provenancePathNodeIds).toMutableList()
+    val originNodeId = when {
+        !provenanceOriginNodeId.isNullOrBlank() -> provenanceOriginNodeId
+        isLocal -> localNodeId
+        !provenanceNodeId.isNullOrBlank() -> provenanceNodeId
+        else -> localNodeId
+    }
+
+    if (existingPath.isEmpty()) {
+        existingPath += originNodeId.orEmpty()
+    }
+    if (existingPath.lastOrNull() != localNodeId) {
+        existingPath += localNodeId
+    }
+
+    val hopCount = if (isLocal) {
+        0
+    } else {
+        (existingPath.size - 1).coerceAtLeast(1)
+    }
+
+    return copy(
+        encounterFingerprint = encounterFingerprint ?: computeEncounterFingerprint(this),
+        provenance = if (isLocal) EncounterProvenance.LOCAL else EncounterProvenance.CHAIN_LINKED,
+        provenanceNodeId = provenanceNodeId,
+        provenanceOriginNodeId = originNodeId,
+        provenancePathNodeIds = encodeProvenancePath(existingPath),
+        provenanceReceivedAtEpochMs = provenanceReceivedAtEpochMs,
+        provenanceHopCount = hopCount
+    )
+}
+
+private fun Encounter.withInboundProvenance(
+    senderNodeId: String,
+    receivedAtEpochMs: Long
+): Encounter {
+    val existingPath = decodeProvenancePath(provenancePathNodeIds).toMutableList()
+    val inferredOrigin = when {
+        !provenanceOriginNodeId.isNullOrBlank() -> provenanceOriginNodeId
+        !provenanceNodeId.isNullOrBlank() -> provenanceNodeId
+        provenance == EncounterProvenance.LOCAL -> senderNodeId
+        else -> senderNodeId
+    }
+    if (existingPath.isEmpty()) {
+        existingPath += inferredOrigin.orEmpty()
+    }
+    if (existingPath.lastOrNull() != senderNodeId) {
+        existingPath += senderNodeId
+    }
+
+    val normalizedPath = existingPath
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .fold(mutableListOf<String>()) { acc, node ->
+            if (acc.lastOrNull() != node) acc += node
+            acc
+        }
+
+    val hops = (normalizedPath.size - 1).coerceAtLeast(1)
+
+    return copy(
+        encounterFingerprint = encounterFingerprint ?: computeEncounterFingerprint(this),
+        provenance = EncounterProvenance.CHAIN_LINKED,
+        provenanceNodeId = senderNodeId,
+        provenanceOriginNodeId = inferredOrigin,
+        provenancePathNodeIds = encodeProvenancePath(normalizedPath),
+        provenanceReceivedAtEpochMs = receivedAtEpochMs,
+        provenanceHopCount = hops
+    )
+}
+
+private fun decodeProvenancePath(raw: String?): List<String> =
+    raw
+        ?.split("|")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?: emptyList()
+
+private fun encodeProvenancePath(path: List<String>): String? {
+    val normalized = path
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .fold(mutableListOf<String>()) { acc, node ->
+            if (acc.lastOrNull() != node) acc += node
+            acc
+        }
+    return normalized.takeIf { it.isNotEmpty() }?.joinToString("|")
+}

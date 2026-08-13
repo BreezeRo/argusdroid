@@ -25,6 +25,8 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 ### Home and readiness
 
 - Tracking controls: start, stop, refresh, and last scan visibility.
+- Tracking status now shows both last scan-cycle total duration and per-source last durations.
+- Home warning cards are freshness-aware and per-source (current overruns vs previous overruns).
 - Sensor-level gating (Wi-Fi, Bluetooth LE, Cellular, Remote ID) persisted in app settings and enforced in scanners.
 - Readiness advisor with deep links to system settings for missing prerequisites.
 - Clear encounters and clear devices actions for rapid reset.
@@ -35,6 +37,8 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 	- Readiness
 	- Device Encounters Map
 	- Device Location Map
+	- Alert Logs
+	- Mesh Network
 - Device Encounters Map shows direct encounter points.
 - Device Location Map shows best-effort approximate device locations:
 	- Cellular: tower lookup estimate with observed-location fallback.
@@ -43,12 +47,21 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Source-colored map pins and an in-app pin color legend.
 - Map controls:
 	- Live map updates (default ON)
+	- Live map update interval selection (1s through 1h)
 	- Pin limit selection (default 1000)
 	- Optional diagnostics panel (default OFF)
 	- Compact LIVE badge in header when live updates are enabled
 
+### Mesh Network tab
+
+- Chain linking controls were moved from Settings into Detection > Mesh Network.
+- Peer operations include refresh, manual link requests, sync now, and peer-state inspection.
+- Mesh visualizer shows local node + peer labels and connection state.
+- Foreground mesh service keeps persistent channel behavior active more reliably while backgrounded when chain linking and persistent channel are both enabled.
+
 ### Devices and encounters workflows
 
+- Unified Devices and Encounters page with tabs replaces separate top-level menu items.
 - Scope filters (Recent 100 or All).
 - Source and text filtering.
 - Optional secondary ID visibility.
@@ -59,6 +72,14 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Chain settings now support manual Sync Now and background auto-sync.
 - Chain settings include peer refresh, link requests, connected vs unconnected peer counts, and a mesh visualizer.
 - Chain peers can be assigned human-readable device names, propagated across the mesh.
+
+### Scan interval tuning and telemetry
+
+- Global scan interval supports fast options including 1s and 3s.
+- Per-source scan intervals are configurable independently (Wi-Fi, BLE, Cellular, Remote ID).
+- Per-source timing telemetry tracks last, avg, p50, p95, and max durations.
+- Auto-adjust mode can increase/decrease source intervals based on overrun/stability behavior.
+- Settings include a recent auto-adjust/manual interval change activity log.
 
 ### Cellular enrichment
 
@@ -136,6 +157,7 @@ If a sensor is disabled from Home, that scanner is skipped in both scheduled and
 
 - Under 15 minutes: chained one-time work requests.
 - 15 minutes and above: periodic WorkManager requests.
+- Scheduler alignment may set the global scheduler tick to the fastest enabled source interval when per-source intervals are used.
 
 This behavior is intentional to support short intervals while still supporting periodic scheduling for longer cadences.
 
@@ -177,6 +199,7 @@ This behavior is intentional to support short intervals while still supporting p
 - Confirm both devices use the exact same Chain Shared Passphrase.
 - Use Settings > Refresh Peers to force discovery.
 - If using persistent channel, enable it on both devices and verify heartbeat interval is set.
+- In Mesh Network, confirm the foreground mesh chip shows active when persistent channel is enabled.
 - Try sending a Link Request using peer host IP from one device to the other.
 
 ## Repository layout

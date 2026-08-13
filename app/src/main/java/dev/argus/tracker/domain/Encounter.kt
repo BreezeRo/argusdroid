@@ -18,5 +18,9 @@ data class Encounter(
     val rawPayloadJson: String,
     val encounterFingerprint: String? = null,
     val provenance: EncounterProvenance = EncounterProvenance.LOCAL,
-    val provenanceNodeId: String? = null
+    val provenanceNodeId: String? = null,
+    val provenanceOriginNodeId: String? = null,
+    val provenancePathNodeIds: String? = null,
+    val provenanceReceivedAtEpochMs: Long? = null,
+    val provenanceHopCount: Int = 0
 )

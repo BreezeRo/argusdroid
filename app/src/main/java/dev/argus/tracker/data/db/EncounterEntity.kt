@@ -12,7 +12,8 @@ import androidx.room.PrimaryKey
         Index(value = ["source"]),
         Index(value = ["encounterFingerprint"], unique = true),
         Index(value = ["provenance"]),
-        Index(value = ["provenanceNodeId"])
+        Index(value = ["provenanceNodeId"]),
+        Index(value = ["provenanceOriginNodeId"])
     ]
 )
 data class EncounterEntity(
@@ -28,5 +29,9 @@ data class EncounterEntity(
     val rawPayloadJson: String,
     val encounterFingerprint: String?,
     val provenance: String,
-    val provenanceNodeId: String?
+    val provenanceNodeId: String?,
+    val provenanceOriginNodeId: String?,
+    val provenancePathNodeIds: String?,
+    val provenanceReceivedAtEpochMs: Long?,
+    val provenanceHopCount: Int
 )
