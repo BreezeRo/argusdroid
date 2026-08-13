@@ -91,7 +91,9 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.cos
@@ -124,6 +126,21 @@ private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val ALERT_LOG_MAX_ENTRIES = 400
+
+private enum class AlertLogType {
+    APPROACH,
+    TRACKER
+}
+
+private data class AlertLogEntry(
+    val timestampEpochMs: Long,
+    val type: AlertLogType,
+    val source: String,
+    val primaryId: String,
+    val message: String,
+    val confidence: Double?
+)
 
 private enum class TrackerRiskLevel {
     NONE,
@@ -219,6 +236,72 @@ private object OwnedDeviceRegistry {
     }
 }
 
+private object AlertLogStore {
+    private const val PREFS_NAME = "argus_settings"
+    private const val KEY_ALERT_LOG_ENTRIES = "alert_log_entries"
+
+    fun read(context: android.content.Context): List<AlertLogEntry> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_ALERT_LOG_ENTRIES, "[]") ?: "[]"
+        val array = runCatching { org.json.JSONArray(raw) }.getOrElse { org.json.JSONArray() }
+        return buildList {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val type = runCatching { AlertLogType.valueOf(item.optString("type")) }
+                    .getOrDefault(AlertLogType.APPROACH)
+                add(
+                    AlertLogEntry(
+                        timestampEpochMs = item.optLong("timestampEpochMs", 0L),
+                        type = type,
+                        source = item.optString("source", "UNKNOWN_RF"),
+                        primaryId = item.optString("primaryId", "unknown"),
+                        message = item.optString("message", ""),
+                        confidence = if (item.has("confidence")) item.optDouble("confidence") else null
+                    )
+                )
+            }
+        }
+    }
+
+    fun append(context: android.content.Context, entry: AlertLogEntry) {
+        val combined = (listOf(entry) + read(context))
+            .sortedByDescending { it.timestampEpochMs }
+            .take(ALERT_LOG_MAX_ENTRIES)
+        write(context, combined)
+    }
+
+    fun appendAll(context: android.content.Context, entries: List<AlertLogEntry>) {
+        if (entries.isEmpty()) return
+        val combined = (entries + read(context))
+            .sortedByDescending { it.timestampEpochMs }
+            .take(ALERT_LOG_MAX_ENTRIES)
+        write(context, combined)
+    }
+
+    fun clear(context: android.content.Context) {
+        write(context, emptyList())
+    }
+
+    private fun write(context: android.content.Context, entries: List<AlertLogEntry>) {
+        val array = org.json.JSONArray()
+        entries.forEach { entry ->
+            val obj = org.json.JSONObject().apply {
+                put("timestampEpochMs", entry.timestampEpochMs)
+                put("type", entry.type.name)
+                put("source", entry.source)
+                put("primaryId", entry.primaryId)
+                put("message", entry.message)
+                if (entry.confidence != null) put("confidence", entry.confidence)
+            }
+            array.put(obj)
+        }
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ALERT_LOG_ENTRIES, array.toString())
+            .apply()
+    }
+}
+
 private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
     SensorGateSettings(
         wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
@@ -245,6 +328,7 @@ fun ArgusApp() {
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
+    var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
     val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
@@ -274,17 +358,17 @@ fun ArgusApp() {
     }
 
     LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, approachNotificationsEnabled) {
-        if (!approachDetectionEnabled || !approachNotificationsEnabled) return@LaunchedEffect
-        if (!hasPostNotificationsPermission(context)) return@LaunchedEffect
-
-        ensureApproachNotificationChannel(context)
+        if (!approachDetectionEnabled) return@LaunchedEffect
         val now = System.currentTimeMillis()
-        val devices = buildDeviceItems(
-            encounters = allEncounters,
-            approachDetectionEnabled = true,
-            ownedDeviceKeys = ownedDeviceKeys
-        )
+        val devices = withContext(Dispatchers.Default) {
+            buildDeviceItems(
+                encounters = allEncounters,
+                approachDetectionEnabled = true,
+                ownedDeviceKeys = ownedDeviceKeys
+            )
+        }
         val seenKeys = mutableSetOf<String>()
+        val approachLogsToAppend = mutableListOf<AlertLogEntry>()
 
         devices.forEach { device ->
             val key = "${device.source}|${device.primaryId}"
@@ -293,14 +377,36 @@ fun ArgusApp() {
             val isApproaching = device.isApproaching
 
             if (isApproaching && !wasApproaching) {
+                val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt().coerceIn(0, 100)
+                val trend = device.approachDeltaMeters
+                    ?.takeIf { it > 0.0 }
+                    ?.let { formatDistanceFeetMiles(it) }
+                    ?: "unknown"
+                approachLogsToAppend += AlertLogEntry(
+                    timestampEpochMs = now,
+                    type = AlertLogType.APPROACH,
+                    source = device.source,
+                    primaryId = device.primaryId,
+                    message = "Approaching ${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId} (${confidencePct}% confidence, trend ${trend})",
+                    confidence = device.approachConfidence
+                )
+
                 val lastNotified = lastApproachNotificationEpochByDevice[key] ?: 0L
-                if (now - lastNotified >= APPROACH_ALERT_COOLDOWN_MS) {
+                if (approachNotificationsEnabled && hasPostNotificationsPermission(context) && now - lastNotified >= APPROACH_ALERT_COOLDOWN_MS) {
+                    ensureApproachNotificationChannel(context)
                     sendApproachNotification(context, device)
                     lastApproachNotificationEpochByDevice[key] = now
                 }
             }
 
             approachStateByDevice[key] = isApproaching
+        }
+
+        if (approachLogsToAppend.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                AlertLogStore.appendAll(context, approachLogsToAppend)
+            }
+            alertLogs = AlertLogStore.read(context)
         }
 
         val staleKeys = approachStateByDevice.keys.filter { it !in seenKeys }
@@ -311,17 +417,17 @@ fun ArgusApp() {
     }
 
     LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, trackerNotificationsEnabled) {
-        if (!approachDetectionEnabled || !trackerNotificationsEnabled) return@LaunchedEffect
-        if (!hasPostNotificationsPermission(context)) return@LaunchedEffect
-
-        ensureTrackerNotificationChannel(context)
+        if (!approachDetectionEnabled) return@LaunchedEffect
         val now = System.currentTimeMillis()
-        val devices = buildDeviceItems(
-            encounters = allEncounters,
-            approachDetectionEnabled = approachDetectionEnabled,
-            ownedDeviceKeys = ownedDeviceKeys
-        )
+        val devices = withContext(Dispatchers.Default) {
+            buildDeviceItems(
+                encounters = allEncounters,
+                approachDetectionEnabled = approachDetectionEnabled,
+                ownedDeviceKeys = ownedDeviceKeys
+            )
+        }
         val seenKeys = mutableSetOf<String>()
+        val trackerLogsToAppend = mutableListOf<AlertLogEntry>()
 
         devices.forEach { device ->
             val key = "${device.source}|${device.primaryId}"
@@ -330,14 +436,31 @@ fun ArgusApp() {
             val previousRisk = trackerStateByDevice[key] ?: TrackerRiskLevel.NONE
 
             if (currentRisk == TrackerRiskLevel.HIGH && previousRisk != TrackerRiskLevel.HIGH && !device.isOwned) {
+                trackerLogsToAppend += AlertLogEntry(
+                    timestampEpochMs = now,
+                    type = AlertLogType.TRACKER,
+                    source = device.source,
+                    primaryId = device.primaryId,
+                    message = "Tracker risk HIGH for ${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId}",
+                    confidence = device.trackerRisk?.confidence
+                )
+
                 val lastNotified = lastTrackerNotificationEpochByDevice[key] ?: 0L
-                if (now - lastNotified >= TRACKER_ALERT_COOLDOWN_MS) {
+                if (trackerNotificationsEnabled && hasPostNotificationsPermission(context) && now - lastNotified >= TRACKER_ALERT_COOLDOWN_MS) {
+                    ensureTrackerNotificationChannel(context)
                     sendTrackerRiskNotification(context, device)
                     lastTrackerNotificationEpochByDevice[key] = now
                 }
             }
 
             trackerStateByDevice[key] = currentRisk
+        }
+
+        if (trackerLogsToAppend.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                AlertLogStore.appendAll(context, trackerLogsToAppend)
+            }
+            alertLogs = AlertLogStore.read(context)
         }
 
         val staleKeys = trackerStateByDevice.keys.filter { it !in seenKeys }
@@ -515,6 +638,7 @@ fun ArgusApp() {
                     encounters = recent,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
+                    alertLogs = alertLogs,
                     onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
@@ -551,6 +675,10 @@ fun ArgusApp() {
                                 android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
                             )
                         }
+                    },
+                    onClearAlertLogs = {
+                        AlertLogStore.clear(context)
+                        alertLogs = emptyList()
                     }
                 )
             }
@@ -878,16 +1006,18 @@ private fun DetectionPage(
     encounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
+    alertLogs: List<AlertLogEntry>,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
-    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
+    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
+    onClearAlertLogs: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
-    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map")
+    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs")
 
     val encounterPins = remember(encounters) {
         encounters
@@ -1140,7 +1270,7 @@ private fun DetectionPage(
                 },
                 onLiveCollect = onLiveCollect
             )
-        } else {
+        } else if (selectedTab == 2) {
             DetectionMapPage(
                 mapTitle = "Device Location Map",
                 mapDescription = "Pins show estimated cell tower locations and inferred Wi-Fi/BLE device locations.",
@@ -1152,6 +1282,109 @@ private fun DetectionPage(
                 },
                 onLiveCollect = onLiveCollect
             )
+        } else {
+            DetectionLogsPage(
+                logs = alertLogs,
+                onClearLogs = onClearAlertLogs
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun DetectionLogsPage(
+    logs: List<AlertLogEntry>,
+    onClearLogs: () -> Unit
+) {
+    var showApproachLogs by rememberSaveable { mutableStateOf(true) }
+    var showTrackerLogs by rememberSaveable { mutableStateOf(true) }
+
+    val filteredLogs = remember(logs, showApproachLogs, showTrackerLogs) {
+        logs.filter { entry ->
+            (showApproachLogs && entry.type == AlertLogType.APPROACH) ||
+                (showTrackerLogs && entry.type == AlertLogType.TRACKER)
+        }.sortedByDescending { it.timestampEpochMs }
+    }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Alert Logs", style = MaterialTheme.typography.headlineSmall)
+                Button(onClick = onClearLogs, enabled = logs.isNotEmpty()) {
+                    Text("Clear")
+                }
+            }
+        }
+        item {
+            Text("Review historical approach and tracker-risk events.")
+        }
+        item {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Approach")
+                    Switch(
+                        checked = showApproachLogs,
+                        onCheckedChange = { showApproachLogs = it }
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Tracker")
+                    Switch(
+                        checked = showTrackerLogs,
+                        onCheckedChange = { showTrackerLogs = it }
+                    )
+                }
+            }
+        }
+        item {
+            Text("Showing ${filteredLogs.size} of ${logs.size} logs")
+        }
+
+        if (filteredLogs.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "No alert logs for current filters.",
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+
+        items(filteredLogs) { entry ->
+            val typeColor = when (entry.type) {
+                AlertLogType.APPROACH -> Color(0xFF1565C0)
+                AlertLogType.TRACKER -> Color(0xFFB3261E)
+            }
+            val confidenceLabel = entry.confidence
+                ?.let { " • ${String.format(Locale.US, "%.0f%%", it * 100.0)} confidence" }
+                .orEmpty()
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "${entry.type.name} • ${listSourceLabel(entry.source, null)} • ${entry.primaryId}",
+                        color = typeColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(entry.message + confidenceLabel)
+                    Text(formatEpoch(entry.timestampEpochMs))
+                }
+            }
         }
     }
 }
@@ -1861,7 +2094,9 @@ private fun analyzeTrackerRisk(
         )
     }
 
-    val ordered = encounters.sortedBy { it.timestampEpochMs }
+    val ordered = encounters
+        .sortedBy { it.timestampEpochMs }
+        .takeLast(24)
     if (ordered.size < 3) return null
 
     val validLocations = ordered
