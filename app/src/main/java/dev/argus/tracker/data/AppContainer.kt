@@ -5,6 +5,7 @@ import androidx.room.Room
 import dev.argus.tracker.data.db.ArgusDatabase
 import dev.argus.tracker.sensing.ArgusSensingService
 import dev.argus.tracker.sensing.BleScanner
+import dev.argus.tracker.sensing.CellularScanner
 import dev.argus.tracker.sensing.RemoteIdScanner
 import dev.argus.tracker.sensing.WifiScanner
 
@@ -33,6 +34,7 @@ class DefaultAppContainer(
             scanners = listOf(
                 WifiScanner(context),
                 BleScanner(context),
+                CellularScanner(context),
                 RemoteIdScanner()
             )
         )

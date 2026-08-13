@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import org.json.JSONObject
 
 class WifiScanner(
     private val context: Context
@@ -32,9 +33,27 @@ class WifiScanner(
                 frequencyMhz = result.frequency,
                 lat = null,
                 lon = null,
-                rawPayloadJson = "{\"capabilities\":\"${result.capabilities}\"}"
+                rawPayloadJson = buildWifiPayload(result)
             )
         }
+    }
+
+    private fun buildWifiPayload(result: android.net.wifi.ScanResult): String {
+        val payload = JSONObject()
+            .put("ssid", result.SSID)
+            .put("bssid", result.BSSID)
+            .put("capabilities", result.capabilities)
+            .put("channelWidth", result.channelWidth)
+            .put("centerFreq0", result.centerFreq0)
+            .put("centerFreq1", result.centerFreq1)
+            .put("wifiStandard", result.wifiStandard)
+            .put("isPasspoint", result.isPasspointNetwork)
+            .put("is80211mcResponder", result.is80211mcResponder)
+            .put("timestampMicros", result.timestamp)
+
+        runCatching { payload.put("operatorFriendlyName", result.operatorFriendlyName?.toString()) }
+        runCatching { payload.put("venueName", result.venueName?.toString()) }
+        return payload.toString()
     }
 
     private fun hasWifiPermissions(): Boolean {

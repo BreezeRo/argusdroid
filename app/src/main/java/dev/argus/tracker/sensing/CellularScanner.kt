@@ -1,0 +1,234 @@
+package dev.argus.tracker.sensing
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.telephony.CellInfo
+import android.telephony.CellInfoCdma
+import android.telephony.CellInfoGsm
+import android.telephony.CellInfoLte
+import android.telephony.CellInfoNr
+import android.telephony.CellInfoWcdma
+import android.telephony.TelephonyManager
+import androidx.core.content.ContextCompat
+import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.domain.EncounterSource
+import dev.argus.tracker.domain.SignalScanner
+import org.json.JSONObject
+
+class CellularScanner(
+    private val context: Context
+) : SignalScanner {
+    override suspend fun scanOnce(): List<Encounter> {
+        if (!hasCellPermissions()) return emptyList()
+        val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            ?: return emptyList()
+
+        val allCells = runCatching { telephonyManager.allCellInfo }.getOrNull() ?: return emptyList()
+        val now = System.currentTimeMillis()
+
+        return allCells.mapNotNull { info -> info.toEncounter(now, telephonyManager) }
+    }
+
+    private fun hasCellPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun CellInfo.toEncounter(now: Long, telephonyManager: TelephonyManager): Encounter? {
+        val payload = JSONObject()
+            .put("registered", isRegistered)
+            .put("timestampMillis", timestampMillis)
+            .put("networkOperator", telephonyManager.networkOperator)
+            .put("networkOperatorName", telephonyManager.networkOperatorName)
+            .put("dataNetworkType", telephonyManager.dataNetworkType)
+
+        return when (this) {
+            is CellInfoLte -> {
+                val id = cellIdentity
+                payload
+                    .put("radio", "LTE")
+                    .put("ci", id.ci)
+                    .put("pci", id.pci)
+                    .put("tac", id.tac)
+                    .put("earfcn", id.earfcn)
+                    .put("bandwidth", id.bandwidth)
+                    .put("mcc", id.mccString)
+                    .put("mnc", id.mncString)
+                    .put("ta", cellSignalStrength.timingAdvance)
+                    .put("asu", cellSignalStrength.asuLevel)
+                    .put("level", cellSignalStrength.level)
+
+                Encounter(
+                    timestampEpochMs = now,
+                    source = EncounterSource.CELL,
+                    primaryId = "lte:${id.ci}:${id.pci}:${id.tac}",
+                    secondaryId = "LTE",
+                    rssiDbm = cellSignalStrength.dbm,
+                    frequencyMhz = null,
+                    lat = null,
+                    lon = null,
+                    rawPayloadJson = payload.toString()
+                )
+            }
+
+            is CellInfoNr -> {
+                val id = cellIdentity
+                val nci = runCatching {
+                    id.javaClass.getMethod("getNci").invoke(id) as Long
+                }.getOrElse {
+                    Long.MAX_VALUE
+                }
+                val pci = runCatching {
+                    id.javaClass.getMethod("getPci").invoke(id) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val tac = runCatching {
+                    id.javaClass.getMethod("getTac").invoke(id) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val nrarfcn = runCatching {
+                    id.javaClass.getMethod("getNrarfcn").invoke(id) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val mcc = runCatching {
+                    id.javaClass.getMethod("getMccString").invoke(id) as String?
+                }.getOrNull()
+                val mnc = runCatching {
+                    id.javaClass.getMethod("getMncString").invoke(id) as String?
+                }.getOrNull()
+                val asu = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getAsuLevel").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val level = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getLevel").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val csiRsrp = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getCsiRsrp").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val ssRsrp = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getSsRsrp").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val dbm = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getDbm").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MIN_VALUE
+                }
+                payload
+                    .put("radio", "NR")
+                    .put("nci", nci)
+                    .put("pci", if (pci == Int.MAX_VALUE) JSONObject.NULL else pci)
+                    .put("tac", if (tac == Int.MAX_VALUE) JSONObject.NULL else tac)
+                    .put("nrarfcn", if (nrarfcn == Int.MAX_VALUE) JSONObject.NULL else nrarfcn)
+                    .put("mcc", mcc ?: JSONObject.NULL)
+                    .put("mnc", mnc ?: JSONObject.NULL)
+                    .put("asu", if (asu == Int.MAX_VALUE) JSONObject.NULL else asu)
+                    .put("level", if (level == Int.MAX_VALUE) JSONObject.NULL else level)
+                    .put("csiRsrp", if (csiRsrp == Int.MAX_VALUE) JSONObject.NULL else csiRsrp)
+                    .put("ssRsrp", if (ssRsrp == Int.MAX_VALUE) JSONObject.NULL else ssRsrp)
+
+                Encounter(
+                    timestampEpochMs = now,
+                    source = EncounterSource.CELL,
+                    primaryId = "nr:${if (nci == Long.MAX_VALUE) "unknown" else nci}:${if (pci == Int.MAX_VALUE) "unknown" else pci}:${if (tac == Int.MAX_VALUE) "unknown" else tac}",
+                    secondaryId = "NR",
+                    rssiDbm = if (dbm == Int.MIN_VALUE) null else dbm,
+                    frequencyMhz = null,
+                    lat = null,
+                    lon = null,
+                    rawPayloadJson = payload.toString()
+                )
+            }
+
+            is CellInfoWcdma -> {
+                val id = cellIdentity
+                payload
+                    .put("radio", "WCDMA")
+                    .put("cid", id.cid)
+                    .put("lac", id.lac)
+                    .put("psc", id.psc)
+                    .put("uarfcn", id.uarfcn)
+                    .put("mcc", id.mccString)
+                    .put("mnc", id.mncString)
+                    .put("asu", cellSignalStrength.asuLevel)
+                    .put("level", cellSignalStrength.level)
+
+                Encounter(
+                    timestampEpochMs = now,
+                    source = EncounterSource.CELL,
+                    primaryId = "wcdma:${id.cid}:${id.psc}:${id.lac}",
+                    secondaryId = "WCDMA",
+                    rssiDbm = cellSignalStrength.dbm,
+                    frequencyMhz = null,
+                    lat = null,
+                    lon = null,
+                    rawPayloadJson = payload.toString()
+                )
+            }
+
+            is CellInfoGsm -> {
+                val id = cellIdentity
+                payload
+                    .put("radio", "GSM")
+                    .put("cid", id.cid)
+                    .put("lac", id.lac)
+                    .put("arfcn", id.arfcn)
+                    .put("bsic", id.bsic)
+                    .put("mcc", id.mccString)
+                    .put("mnc", id.mncString)
+                    .put("asu", cellSignalStrength.asuLevel)
+                    .put("level", cellSignalStrength.level)
+
+                Encounter(
+                    timestampEpochMs = now,
+                    source = EncounterSource.CELL,
+                    primaryId = "gsm:${id.cid}:${id.lac}:${id.arfcn}",
+                    secondaryId = "GSM",
+                    rssiDbm = cellSignalStrength.dbm,
+                    frequencyMhz = null,
+                    lat = null,
+                    lon = null,
+                    rawPayloadJson = payload.toString()
+                )
+            }
+
+            is CellInfoCdma -> {
+                val id = cellIdentity
+                payload
+                    .put("radio", "CDMA")
+                    .put("basestationId", id.basestationId)
+                    .put("networkId", id.networkId)
+                    .put("systemId", id.systemId)
+                    .put("asu", cellSignalStrength.asuLevel)
+                    .put("level", cellSignalStrength.level)
+
+                Encounter(
+                    timestampEpochMs = now,
+                    source = EncounterSource.CELL,
+                    primaryId = "cdma:${id.basestationId}:${id.networkId}:${id.systemId}",
+                    secondaryId = "CDMA",
+                    rssiDbm = cellSignalStrength.dbm,
+                    frequencyMhz = null,
+                    lat = null,
+                    lon = null,
+                    rawPayloadJson = payload.toString()
+                )
+            }
+
+            else -> null
+        }
+    }
+}

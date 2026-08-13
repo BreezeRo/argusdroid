@@ -28,6 +28,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.sensing.SensorStatus
+import dev.argus.tracker.sensing.SensorStatusProvider
 import dev.argus.tracker.worker.WorkScheduler
 import kotlinx.coroutines.launch
 
@@ -40,6 +42,7 @@ fun ArgusApp() {
         factory = ArgusViewModel.Factory(app.container.repository)
     )
     var trackingActive by remember { mutableStateOf(false) }
+    var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
@@ -47,6 +50,7 @@ fun ArgusApp() {
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
+        sensorStatuses = SensorStatusProvider.read(context)
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
@@ -69,6 +73,7 @@ fun ArgusApp() {
                         WorkScheduler.start(context)
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
+                            sensorStatuses = SensorStatusProvider.read(context)
                         }
                     }) {
                         Text("Start Tracking")
@@ -79,6 +84,7 @@ fun ArgusApp() {
                     viewModel.refreshSummary()
                     scope.launch {
                         trackingActive = WorkScheduler.isTrackingActive(context)
+                        sensorStatuses = SensorStatusProvider.read(context)
                     }
                 }, enabled = trackingActive) {
                     Text("Stop")
@@ -87,9 +93,25 @@ fun ArgusApp() {
                     viewModel.refreshSummary()
                     scope.launch {
                         trackingActive = WorkScheduler.isTrackingActive(context)
+                        sensorStatuses = SensorStatusProvider.read(context)
                     }
                 }) {
                     Text("Refresh")
+                }
+            }
+
+            Text("Sensors", fontWeight = FontWeight.Bold)
+            sensorStatuses.forEach { sensor ->
+                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(sensor.name)
+                        Text(
+                            "${if (sensor.isOn) "On" else "Off"} | ${if (sensor.factoredByArgus) "Factored" else "Not factored"}"
+                        )
+                    }
                 }
             }
 
