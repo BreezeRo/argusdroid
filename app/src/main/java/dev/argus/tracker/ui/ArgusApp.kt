@@ -2815,8 +2815,12 @@ private data class PinLegendItem(
 private fun markerHueForSource(source: String): Float = when (source) {
     "CELL" -> BitmapDescriptorFactory.HUE_AZURE
     "WIFI" -> BitmapDescriptorFactory.HUE_ORANGE
+    "WIFI_DIRECT" -> BitmapDescriptorFactory.HUE_YELLOW
     "BLUETOOTH_LE" -> BitmapDescriptorFactory.HUE_GREEN
+    "BLUETOOTH_CLASSIC" -> BitmapDescriptorFactory.HUE_CYAN
     "REMOTE_ID" -> BitmapDescriptorFactory.HUE_VIOLET
+    "UWB" -> BitmapDescriptorFactory.HUE_MAGENTA
+    "SDR" -> BitmapDescriptorFactory.HUE_RED
     "UNKNOWN_RF" -> BitmapDescriptorFactory.HUE_ROSE
     else -> BitmapDescriptorFactory.HUE_RED
 }
@@ -2824,8 +2828,12 @@ private fun markerHueForSource(source: String): Float = when (source) {
 private fun markerLegendColorForSource(source: String): Color = when (source) {
     "CELL" -> Color(0xFF1E88E5)
     "WIFI" -> Color(0xFFFB8C00)
+    "WIFI_DIRECT" -> Color(0xFFFBC02D)
     "BLUETOOTH_LE" -> Color(0xFF43A047)
+    "BLUETOOTH_CLASSIC" -> Color(0xFF00ACC1)
     "REMOTE_ID" -> Color(0xFF8E24AA)
+    "UWB" -> Color(0xFFAB47BC)
+    "SDR" -> Color(0xFFE53935)
     "UNKNOWN_RF" -> Color(0xFFE91E63)
     else -> Color(0xFFD32F2F)
 }
@@ -2833,14 +2841,28 @@ private fun markerLegendColorForSource(source: String): Color = when (source) {
 private fun markerLegendLabelForSource(source: String): String = when (source) {
     "CELL" -> "CELL TOWER"
     "WIFI" -> "WIFI"
+    "WIFI_DIRECT" -> "WIFI DIRECT"
     "BLUETOOTH_LE" -> "BLUETOOTH LE"
+    "BLUETOOTH_CLASSIC" -> "BLUETOOTH CLASSIC"
     "REMOTE_ID" -> "REMOTE ID"
+    "UWB" -> "UWB"
+    "SDR" -> "SDR"
     "UNKNOWN_RF" -> "UNKNOWN RF"
     else -> source
 }
 
 private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
-    val preferredOrder = listOf("CELL", "WIFI", "BLUETOOTH_LE", "REMOTE_ID", "UNKNOWN_RF")
+    val preferredOrder = listOf(
+        "CELL",
+        "WIFI",
+        "WIFI_DIRECT",
+        "BLUETOOTH_LE",
+        "BLUETOOTH_CLASSIC",
+        "REMOTE_ID",
+        "UWB",
+        "SDR",
+        "UNKNOWN_RF"
+    )
     val sourcesInPins = pins.map { it.source }.toSet()
     val orderedSources = preferredOrder.filter { it in sourcesInPins } +
         sourcesInPins.filterNot { it in preferredOrder }.sorted()
@@ -2877,9 +2899,13 @@ private fun formatScanDuration(durationMs: Long): String {
 
 private fun formatSourceTypeLabel(sourceType: String): String = when (sourceType) {
     "wifi" -> "Wi-Fi"
+    "wifi_direct" -> "Wi-Fi Direct"
     "ble" -> "Bluetooth LE"
+    "bt_classic" -> "Bluetooth Classic"
     "cellular" -> "Cellular"
     "remote_id" -> "Remote ID"
+    "uwb" -> "UWB"
+    "sdr" -> "SDR"
     else -> sourceType.replace('_', ' ').uppercase()
 }
 
@@ -2897,10 +2923,20 @@ private fun computeRecommendedIntervalSeconds(
     sensorGateSettings: SensorGateSettings
 ): Long {
     val enabledTypes = buildSet {
-        if (sensorGateSettings.wifiEnabled) add("wifi")
-        if (sensorGateSettings.bluetoothEnabled) add("ble")
+        if (sensorGateSettings.wifiEnabled) {
+            add("wifi")
+            add("wifi_direct")
+        }
+        if (sensorGateSettings.bluetoothEnabled) {
+            add("ble")
+            add("bt_classic")
+        }
         if (sensorGateSettings.cellularEnabled) add("cellular")
-        if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+        if (sensorGateSettings.remoteIdEnabled) {
+            add("remote_id")
+            add("uwb")
+            add("sdr")
+        }
     }
     val suggested = timings
         .filter { it.sourceType in enabledTypes }
@@ -2917,10 +2953,20 @@ private fun nextLowerInterval(currentIntervalSeconds: Long): Long {
 }
 
 private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
-    if (sensorGateSettings.wifiEnabled) add("wifi")
-    if (sensorGateSettings.bluetoothEnabled) add("ble")
+    if (sensorGateSettings.wifiEnabled) {
+        add("wifi")
+        add("wifi_direct")
+    }
+    if (sensorGateSettings.bluetoothEnabled) {
+        add("ble")
+        add("bt_classic")
+    }
     if (sensorGateSettings.cellularEnabled) add("cellular")
-    if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+    if (sensorGateSettings.remoteIdEnabled) {
+        add("remote_id")
+        add("uwb")
+        add("sdr")
+    }
 }
 
 private fun formatIntervalChangeReason(reason: String): String = when (reason) {
@@ -2931,16 +2977,28 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "scheduler-align" -> "Scheduler alignment to source intervals"
     "manual-wifi" -> "Manual Wi-Fi interval change"
     "manual-ble" -> "Manual Bluetooth LE interval change"
+    "manual-bt_classic" -> "Manual Bluetooth Classic interval change"
     "manual-cellular" -> "Manual Cellular interval change"
     "manual-remote_id" -> "Manual Remote ID interval change"
+    "manual-wifi_direct" -> "Manual Wi-Fi Direct interval change"
+    "manual-uwb" -> "Manual UWB interval change"
+    "manual-sdr" -> "Manual SDR interval change"
     "auto-overrun-wifi" -> "Auto-adjust Wi-Fi overrun protection"
+    "auto-overrun-wifi_direct" -> "Auto-adjust Wi-Fi Direct overrun protection"
     "auto-overrun-ble" -> "Auto-adjust Bluetooth LE overrun protection"
+    "auto-overrun-bt_classic" -> "Auto-adjust Bluetooth Classic overrun protection"
     "auto-overrun-cellular" -> "Auto-adjust Cellular overrun protection"
     "auto-overrun-remote_id" -> "Auto-adjust Remote ID overrun protection"
+    "auto-overrun-uwb" -> "Auto-adjust UWB overrun protection"
+    "auto-overrun-sdr" -> "Auto-adjust SDR overrun protection"
     "auto-stable-wifi" -> "Auto-adjust Wi-Fi stable downshift"
+    "auto-stable-wifi_direct" -> "Auto-adjust Wi-Fi Direct stable downshift"
     "auto-stable-ble" -> "Auto-adjust Bluetooth LE stable downshift"
+    "auto-stable-bt_classic" -> "Auto-adjust Bluetooth Classic stable downshift"
     "auto-stable-cellular" -> "Auto-adjust Cellular stable downshift"
     "auto-stable-remote_id" -> "Auto-adjust Remote ID stable downshift"
+    "auto-stable-uwb" -> "Auto-adjust UWB stable downshift"
+    "auto-stable-sdr" -> "Auto-adjust SDR stable downshift"
     else -> reason.replace('-', ' ').replace('_', ' ')
 }
 
@@ -2989,11 +3047,16 @@ private fun getPlayServicesDiagnostic(context: android.content.Context): String 
 }
 
 private fun supportsSecondaryIdInList(source: String): Boolean =
-    source == "WIFI" || source == "BLUETOOTH_LE"
+    source == "WIFI" ||
+        source == "WIFI_DIRECT" ||
+        source == "BLUETOOTH_LE" ||
+        source == "BLUETOOTH_CLASSIC"
 
 private fun secondaryIdLabel(source: String): String = when (source) {
     "WIFI" -> "SSID"
+    "WIFI_DIRECT" -> "Peer Name"
     "BLUETOOTH_LE" -> "Device Name"
+    "BLUETOOTH_CLASSIC" -> "Device Name"
     else -> "Secondary ID"
 }
 
@@ -3004,6 +3067,8 @@ private fun listSourceLabel(source: String, secondaryId: String?): String {
         }
         return "CELL TOWER"
     }
+    if (source == "WIFI_DIRECT") return "WIFI DIRECT"
+    if (source == "BLUETOOTH_CLASSIC") return "BLUETOOTH CLASSIC"
     return source
 }
 
@@ -3096,9 +3161,13 @@ private fun readGenericPayloadFields(rawPayloadJson: String): List<Pair<String, 
 private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
     when (encounter.source) {
         EncounterSource.WIFI -> "Wi-Fi Access Point Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
+        EncounterSource.WIFI_DIRECT -> "Wi-Fi Direct Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
+        EncounterSource.BLUETOOTH_CLASSIC -> "Bluetooth Classic Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.CELL -> "Cell Tower Details" to readCellTowerFields(encounter.rawPayloadJson)
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.UWB -> "UWB Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.SDR -> "SDR Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.UNKNOWN_RF -> "Unknown RF Details" to readGenericPayloadFields(encounter.rawPayloadJson)
     }
 

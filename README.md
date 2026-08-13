@@ -12,7 +12,8 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 
 ### Core collection and storage
 
-- Multi-source sensing for Wi-Fi, Bluetooth LE, and Cellular.
+- Multi-source sensing for Wi-Fi, Wi-Fi Direct peers, Bluetooth LE, Bluetooth Classic, and Cellular.
+- BLE heuristics now classify likely device classes (for example tracker-tag, wearable, audio, sensor) and can promote likely Remote ID BLE signatures.
 - Encounter normalization into a shared model with timestamp, IDs, signal metadata, optional location, and raw payload JSON.
 - Room-backed local persistence for historical analysis.
 - Configurable scan interval with WorkManager-based scheduling.
@@ -58,6 +59,13 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Peer operations include refresh, manual link requests, sync now, and peer-state inspection.
 - Mesh visualizer shows local node + peer labels and connection state.
 - Foreground mesh service keeps persistent channel behavior active more reliably while backgrounded when chain linking and persistent channel are both enabled.
+
+### Additional source hooks
+
+- Remote ID ingest hook is active via JSONL feed file: app internal files path ingest/remote_id.jsonl.
+- UWB ingest hook is active via JSONL feed file: app internal files path ingest/uwb.jsonl.
+- SDR ingest hook is active via JSONL feed file: app internal files path ingest/sdr.jsonl.
+- Each JSON line should be a single object containing at minimum an id (or primaryId) and optional fields such as timestampEpochMs, label, rssiDbm, frequencyMhz, lat, and lon.
 
 ### Devices and encounters workflows
 
