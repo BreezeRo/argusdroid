@@ -10,6 +10,7 @@ import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -143,7 +144,7 @@ private const val EVASION_ROUTE = "evasion"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
 private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primaryId}"
-private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
+private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}?lat={lat}&lon={lon}&ts={ts}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 private val DETAIL_TWO_COLUMN_MIN_WIDTH: Dp = 720.dp
 
@@ -241,6 +242,14 @@ private data class InferredDeviceLocation(
     val lat: Double,
     val lon: Double,
     val estimatedRangeMeters: Double?
+)
+
+private data class ResolvedDeviceLocation(
+    val lat: Double,
+    val lon: Double,
+    val method: String,
+    val approximateRangeMeters: Double?,
+    val resolvedFromTimestampEpochMs: Long
 )
 
 private data class DeviceLocationCandidate(
@@ -495,6 +504,17 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
+
+    LaunchedEffect(allEncounters, ownedDeviceKeys) {
+        val updatedKeys = autoMarkConnectedWifiAsOwned(
+            context = context,
+            encounters = allEncounters,
+            ownedDeviceKeys = ownedDeviceKeys
+        )
+        if (updatedKeys != ownedDeviceKeys) {
+            ownedDeviceKeys = updatedKeys
+        }
+    }
 
     LaunchedEffect(notificationIntent) {
         val intent = notificationIntent ?: return@LaunchedEffect
@@ -878,7 +898,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     type = AlertLogType.APPROACH,
                     source = device.source,
                     primaryId = device.primaryId,
-                    message = "Approaching ${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId} (${confidencePct}% confidence, trend ${trend})",
+                    message = "Approaching ${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId}${if (device.isOwned) " [OWNED DEVICE]" else ""} (${confidencePct}% confidence, trend ${trend})",
                     confidence = device.approachConfidence
                 )
 
@@ -1458,9 +1478,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
                         )
                     },
-                    onDeviceMapPinClick = { source, primaryId ->
+                    onDeviceMapPinClick = { source, primaryId, lat, lon, timestampEpochMs ->
+                        val queryParts = buildList {
+                            lat?.let { add("lat=${Uri.encode(it.toString())}") }
+                            lon?.let { add("lon=${Uri.encode(it.toString())}") }
+                            timestampEpochMs?.let { add("ts=$it") }
+                        }
+                        val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}" 
                         navController.navigate(
-                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}$query"
                         )
                     },
                     onMovingDeviceMapPinClick = { source, primaryId ->
@@ -1739,6 +1765,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             composable(DEVICE_DETAIL_ROUTE) { entry ->
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
+                val selectedPinLat = entry.arguments?.getString("lat")?.toDoubleOrNull()
+                val selectedPinLon = entry.arguments?.getString("lon")?.toDoubleOrNull()
+                val selectedPinTs = entry.arguments?.getString("ts")?.toLongOrNull()
+                val deviceEncounters = allEncounters.filter {
+                    it.source.name == source && it.primaryId == primaryId
+                }
                 val item = buildDeviceItems(
                     encounters = allEncounters,
                     approachDetectionEnabled = approachDetectionEnabled,
@@ -1747,6 +1779,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     .firstOrNull { it.source == source && it.primaryId == primaryId }
                 DeviceDetailPage(
                     item = item,
+                    deviceEncounters = deviceEncounters,
+                    initialPinnedLat = selectedPinLat,
+                    initialPinnedLon = selectedPinLon,
+                    initialPinnedTimestampEpochMs = selectedPinTs,
                     onBack = { navController.popBackStack() },
                     onOwnedChanged = { changedSource, changedPrimaryId, owned ->
                         OwnedDeviceRegistry.setOwned(context, changedSource, changedPrimaryId, owned)
@@ -1770,9 +1806,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             composable(APPROACH_ALERT_MAP_ROUTE) { entry ->
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
+                val isOwnedTarget = OwnedDeviceRegistry.keyFor(source, primaryId) in ownedDeviceKeys
                 ApproachAlertMapPage(
                     source = source,
                     primaryId = primaryId,
+                    isOwnedTarget = isOwnedTarget,
                     encounters = allEncounters,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
@@ -1807,6 +1845,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 private fun ApproachAlertMapPage(
     source: String,
     primaryId: String,
+    isOwnedTarget: Boolean,
     encounters: List<Encounter>,
     liveMapUpdateIntervalSeconds: Long,
     onOpenDeviceDetails: (String, String) -> Unit,
@@ -1969,7 +2008,10 @@ private fun ApproachAlertMapPage(
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
-        Text("Target: ${listSourceLabel(source, null)} $primaryId")
+        Text("Target: ${listSourceLabel(source, null)} $primaryId${if (isOwnedTarget) " [OWNED DEVICE]" else ""}")
+        if (isOwnedTarget) {
+            Text("Notice: this approaching target is marked as your own device.")
+        }
         Text(
             "Tracking path since: ${trackStartEpochMs?.let(::formatEpoch) ?: "Not started"}"
         )
@@ -2004,8 +2046,8 @@ private fun ApproachAlertMapPage(
             targetEstimate?.first?.let { targetLatLng ->
                 Marker(
                     state = MarkerState(position = targetLatLng),
-                    title = "Approaching device",
-                    snippet = "$source $primaryId",
+                    title = if (isOwnedTarget) "Approaching owned device" else "Approaching device",
+                    snippet = "$source $primaryId${if (isOwnedTarget) " • owned" else ""}",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
                 )
             }
@@ -3332,7 +3374,7 @@ private fun DetectionPage(
     liveMapUpdateIntervalSeconds: Long,
     chainMeshSnapshot: ChainMeshSnapshot,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
-    onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
+    onDeviceMapPinClick: (source: String, primaryId: String, lat: Double?, lon: Double?, timestampEpochMs: Long?) -> Unit,
     onMovingDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
@@ -3437,71 +3479,17 @@ private fun DetectionPage(
         val resolvedCandidates = buildList {
             allDeviceCandidates.forEach { candidate ->
                 val latest = candidate.encounters.maxByOrNull { it.timestampEpochMs } ?: return@forEach
-                val sourceEnum = runCatching { EncounterSource.valueOf(candidate.source) }
-                    .getOrDefault(EncounterSource.UNKNOWN_RF)
-
-                val resolvedCandidate = when (sourceEnum) {
-                    EncounterSource.CELL -> {
-                        val lookup = CellTowerLookupService.lookup(latest)
-                        when (lookup) {
-                            is TowerLookupResult.Success -> {
-                                val estimate = lookup.estimate
-                                if (!isValidLatLon(estimate.latitude, estimate.longitude)) {
-                                    null
-                                } else {
-                                    candidate.copy(
-                                        approximateLocation = DetectionLocation(estimate.latitude, estimate.longitude),
-                                        approximateMethod = estimate.provider,
-                                        approximateRangeMeters = null
-                                    )
-                                }
-                            }
-
-                            is TowerLookupResult.Failure -> {
-                                if (isValidLatLon(latest.lat, latest.lon)) {
-                                    candidate.copy(
-                                        approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
-                                        approximateMethod = "Observed encounter location fallback",
-                                        approximateRangeMeters = null
-                                    )
-                                } else {
-                                    null
-                                }
-                            }
-                        }
-                    }
-
-                    EncounterSource.WIFI,
-                    EncounterSource.BLUETOOTH_LE -> {
-                        val inferred = inferLikelyDeviceLocation(candidate.encounters)
-                        if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
-                            candidate.copy(
-                                approximateLocation = DetectionLocation(inferred.lat, inferred.lon),
-                                approximateMethod = "Inferred location",
-                                approximateRangeMeters = inferred.estimatedRangeMeters
-                            )
-                        } else if (isValidLatLon(latest.lat, latest.lon)) {
-                            candidate.copy(
-                                approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
-                                approximateMethod = "Observed encounter location fallback",
-                                approximateRangeMeters = estimateRangeMeters(latest)
-                            )
-                        } else {
-                            null
-                        }
-                    }
-
-                    else -> {
-                        if (isValidLatLon(latest.lat, latest.lon)) {
-                            candidate.copy(
-                                approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
-                                approximateMethod = "Observed encounter location",
-                                approximateRangeMeters = null
-                            )
-                        } else {
-                            null
-                        }
-                    }
+                val sourceEnum = runCatching { EncounterSource.valueOf(candidate.source) }.getOrDefault(EncounterSource.UNKNOWN_RF)
+                val resolvedLocation = resolveDeviceLocation(
+                    source = sourceEnum,
+                    encounters = candidate.encounters
+                )
+                val resolvedCandidate = resolvedLocation?.let { resolved ->
+                    candidate.copy(
+                        approximateLocation = DetectionLocation(resolved.lat, resolved.lon),
+                        approximateMethod = resolved.method,
+                        approximateRangeMeters = resolved.approximateRangeMeters
+                    )
                 }
 
                 if (resolvedCandidate != null) {
@@ -3666,7 +3654,13 @@ private fun DetectionPage(
                     if (pin.motionBadge == "MOVING") {
                         onMovingDeviceMapPinClick(pin.source, pin.primaryId)
                     } else {
-                        onDeviceMapPinClick(pin.source, pin.primaryId)
+                        onDeviceMapPinClick(
+                            pin.source,
+                            pin.primaryId,
+                            pin.position.latitude,
+                            pin.position.longitude,
+                            pin.timestampEpochMs
+                        )
                     }
                 },
                 liveUpdatesAllowed = true,
@@ -5125,6 +5119,66 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
     }
 }
 
+private fun autoMarkConnectedWifiAsOwned(
+    context: android.content.Context,
+    encounters: List<Encounter>,
+    ownedDeviceKeys: Set<String>
+): Set<String> {
+    val connectivityManager = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        ?: return ownedDeviceKeys
+    val activeNetwork = connectivityManager.activeNetwork ?: return ownedDeviceKeys
+    val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return ownedDeviceKeys
+    if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return ownedDeviceKeys
+
+    val wifiManager = context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as? WifiManager
+        ?: return ownedDeviceKeys
+    val wifiInfo = runCatching { wifiManager.connectionInfo }.getOrNull() ?: return ownedDeviceKeys
+
+    val connectedBssid = wifiInfo.bssid
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && !it.equals("02:00:00:00:00:00", ignoreCase = true) }
+    val connectedSsid = normalizeWifiSsid(wifiInfo.ssid)
+
+    val matchedKeys = encounters
+        .asSequence()
+        .filter { it.source == EncounterSource.WIFI }
+        .mapNotNull { encounter ->
+            val primaryId = encounter.primaryId.trim()
+            if (primaryId.isBlank() || primaryId == "unknown-bssid") return@mapNotNull null
+
+            val bssidMatch = connectedBssid != null && primaryId.equals(connectedBssid, ignoreCase = true)
+            val encounterSsid = normalizeWifiSsid(encounter.secondaryId)
+            val ssidMatch = connectedSsid.isNotBlank() && encounterSsid.isNotBlank() &&
+                encounterSsid.equals(connectedSsid, ignoreCase = true)
+            if (!bssidMatch && !ssidMatch) return@mapNotNull null
+
+            OwnedDeviceRegistry.keyFor("WIFI", encounter.primaryId)
+        }
+        .toSet()
+
+    if (matchedKeys.isEmpty()) return ownedDeviceKeys
+
+    var changed = false
+    val updated = ownedDeviceKeys.toMutableSet()
+    matchedKeys.forEach { key ->
+        if (updated.add(key)) {
+            val primaryId = key.substringAfter("WIFI|", "")
+            if (primaryId.isNotBlank()) {
+                OwnedDeviceRegistry.setOwned(context, "WIFI", primaryId, true)
+                changed = true
+            }
+        }
+    }
+    return if (changed) updated else ownedDeviceKeys
+}
+
+private fun normalizeWifiSsid(raw: String?): String {
+    val trimmed = raw?.trim().orEmpty()
+    if (trimmed.isBlank()) return ""
+    if (trimmed.equals("<unknown ssid>", ignoreCase = true)) return ""
+    return trimmed.removePrefix("\"").removeSuffix("\"").trim()
+}
+
 private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "manual" -> "Manual change"
     "auto-bootstrap" -> "Auto-adjust startup alignment"
@@ -5559,6 +5613,85 @@ private fun distanceForDeviceMeters(
         rawPayloadJson = device.lastRawPayloadJson ?: "{}"
     )
     return distanceForEncounterMeters(pseudoEncounter, currentLocation)
+}
+
+private suspend fun resolveDeviceLocation(
+    source: EncounterSource,
+    encounters: List<Encounter>
+): ResolvedDeviceLocation? {
+    val latest = encounters.maxByOrNull { it.timestampEpochMs } ?: return null
+    return when (source) {
+        EncounterSource.CELL -> {
+            when (val lookup = CellTowerLookupService.lookup(latest)) {
+                is TowerLookupResult.Success -> {
+                    val estimate = lookup.estimate
+                    if (!isValidLatLon(estimate.latitude, estimate.longitude)) {
+                        null
+                    } else {
+                        ResolvedDeviceLocation(
+                            lat = estimate.latitude,
+                            lon = estimate.longitude,
+                            method = estimate.provider,
+                            approximateRangeMeters = null,
+                            resolvedFromTimestampEpochMs = latest.timestampEpochMs
+                        )
+                    }
+                }
+
+                is TowerLookupResult.Failure -> {
+                    if (!isValidLatLon(latest.lat, latest.lon)) {
+                        null
+                    } else {
+                        ResolvedDeviceLocation(
+                            lat = latest.lat!!,
+                            lon = latest.lon!!,
+                            method = "Observed encounter location fallback",
+                            approximateRangeMeters = null,
+                            resolvedFromTimestampEpochMs = latest.timestampEpochMs
+                        )
+                    }
+                }
+            }
+        }
+
+        EncounterSource.WIFI,
+        EncounterSource.BLUETOOTH_LE -> {
+            val inferred = inferLikelyDeviceLocation(encounters)
+            if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
+                ResolvedDeviceLocation(
+                    lat = inferred.lat,
+                    lon = inferred.lon,
+                    method = "Inferred location",
+                    approximateRangeMeters = inferred.estimatedRangeMeters,
+                    resolvedFromTimestampEpochMs = latest.timestampEpochMs
+                )
+            } else if (isValidLatLon(latest.lat, latest.lon)) {
+                ResolvedDeviceLocation(
+                    lat = latest.lat!!,
+                    lon = latest.lon!!,
+                    method = "Observed encounter location fallback",
+                    approximateRangeMeters = estimateRangeMeters(latest),
+                    resolvedFromTimestampEpochMs = latest.timestampEpochMs
+                )
+            } else {
+                null
+            }
+        }
+
+        else -> {
+            if (!isValidLatLon(latest.lat, latest.lon)) {
+                null
+            } else {
+                ResolvedDeviceLocation(
+                    lat = latest.lat!!,
+                    lon = latest.lon!!,
+                    method = "Observed encounter location",
+                    approximateRangeMeters = null,
+                    resolvedFromTimestampEpochMs = latest.timestampEpochMs
+                )
+            }
+        }
+    }
 }
 
 private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? {
@@ -6021,8 +6154,9 @@ private fun sendApproachNotification(context: android.content.Context, device: D
         ?.let { formatDistanceFeetMiles(it) }
         ?: "unknown"
 
-    val title = "Approaching device detected"
-    val content = "${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId} • Confidence ${confidencePct}% • Trend ${trend}"
+    val ownershipTag = if (device.isOwned) " [OWNED DEVICE]" else ""
+    val title = if (device.isOwned) "Approaching owned device" else "Approaching device detected"
+    val content = "${listSourceLabel(device.source, device.secondaryId)} ${device.primaryId}${ownershipTag} • Confidence ${confidencePct}% • Trend ${trend}"
     val notificationId = ("${device.source}|${device.primaryId}").hashCode()
     val tapIntent = Intent(context, MainActivity::class.java).apply {
         action = ACTION_OPEN_APPROACH_MAP
@@ -6118,6 +6252,7 @@ private fun DevicesEncountersPage(
                 EncountersPage(
                     recentEncounters = recentEncounters,
                     allEncounters = allEncounters,
+                    ownedDeviceKeys = ownedDeviceKeys,
                     onEncounterClick = onEncounterClick
                 )
             }
@@ -6237,7 +6372,7 @@ private fun DevicesPage(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Owned Only")
+                Text("Show Owned Only")
                 Switch(
                     checked = showOwnedOnly,
                     onCheckedChange = { showOwnedOnly = it }
@@ -6355,6 +6490,7 @@ private fun DevicesPage(
 private fun EncountersPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
+    ownedDeviceKeys: Set<String>,
     onEncounterClick: (Encounter) -> Unit
 ) {
     val context = LocalContext.current
@@ -6365,16 +6501,19 @@ private fun EncountersPage(
     var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
+    var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val sourceOptions = remember(encounters) { encounters.map { it.source.name }.distinct().sorted() }
-    val filteredEncounters = remember(encounters, sourceFilter, queryFilter) {
+    val filteredEncounters = remember(encounters, sourceFilter, queryFilter, showOwnedOnly, ownedDeviceKeys) {
         encounters.filter { encounter ->
             val sourceMatches = sourceFilter == null || encounter.source.name == sourceFilter
             val queryMatches = queryFilter.isBlank() ||
                 encounter.primaryId.contains(queryFilter, ignoreCase = true) ||
                 (encounter.secondaryId?.contains(queryFilter, ignoreCase = true) == true) ||
                 encounter.rawPayloadJson.contains(queryFilter, ignoreCase = true)
-            sourceMatches && queryMatches
+            val ownedMatches = !showOwnedOnly ||
+                (OwnedDeviceRegistry.keyFor(encounter.source.name, encounter.primaryId) in ownedDeviceKeys)
+            sourceMatches && queryMatches && ownedMatches
         }
     }
     val displayedEncounters = remember(filteredEncounters, showDistance, sortByDistance, currentLocation) {
@@ -6442,6 +6581,13 @@ private fun EncountersPage(
                     )
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Show Owned Only")
+                Switch(
+                    checked = showOwnedOnly,
+                    onCheckedChange = { showOwnedOnly = it }
+                )
+            }
         }
         Text("Showing ${displayedEncounters.size} of ${encounters.size}")
         LazyColumn {
@@ -6459,6 +6605,13 @@ private fun EncountersPage(
                             Text(
                                 provenanceLabel.trimStart(' ', '-', '•'),
                                 color = Color(0xFF1565C0),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        if (OwnedDeviceRegistry.keyFor(encounter.source.name, encounter.primaryId) in ownedDeviceKeys) {
+                            Text(
+                                text = "Marked as My Device",
+                                color = Color(0xFF2E7D32),
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -6614,6 +6767,10 @@ private fun ScopeFilterDropdown(
 @Composable
 private fun DeviceDetailPage(
     item: DeviceItem?,
+    deviceEncounters: List<Encounter>,
+    initialPinnedLat: Double?,
+    initialPinnedLon: Double?,
+    initialPinnedTimestampEpochMs: Long?,
     onBack: () -> Unit,
     onOwnedChanged: (source: String, primaryId: String, owned: Boolean) -> Unit
 ) {
@@ -6621,13 +6778,44 @@ private fun DeviceDetailPage(
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var isOwnedState by remember(item?.source, item?.primaryId) { mutableStateOf(item?.isOwned == true) }
     var realtimeMapEnabled by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(false) }
-    var pinnedMapLat by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(item?.lastLat) }
-    var pinnedMapLon by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(item?.lastLon) }
+    var pinnedMapLat by rememberSaveable(item?.source, item?.primaryId, initialPinnedLat) {
+        mutableStateOf(initialPinnedLat ?: item?.lastLat)
+    }
+    var pinnedMapLon by rememberSaveable(item?.source, item?.primaryId, initialPinnedLon) {
+        mutableStateOf(initialPinnedLon ?: item?.lastLon)
+    }
+    var pinnedMapTimestampEpochMs by rememberSaveable(item?.source, item?.primaryId, initialPinnedTimestampEpochMs) {
+        mutableStateOf(initialPinnedTimestampEpochMs ?: item?.lastSeenEpochMs)
+    }
+    var mapLocationMethod by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf<String?>(null) }
+    var mapApproximateRangeMeters by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf<Double?>(null) }
 
     LaunchedEffect(realtimeMapEnabled, item?.lastLat, item?.lastLon) {
         if (realtimeMapEnabled) {
             pinnedMapLat = item?.lastLat
             pinnedMapLon = item?.lastLon
+            pinnedMapTimestampEpochMs = item?.lastSeenEpochMs
+            mapLocationMethod = "Live/latest device sample"
+            mapApproximateRangeMeters = null
+        }
+    }
+
+    LaunchedEffect(item?.source, item?.primaryId, deviceEncounters, realtimeMapEnabled) {
+        if (item == null || deviceEncounters.isEmpty()) return@LaunchedEffect
+        if (realtimeMapEnabled) return@LaunchedEffect
+
+        val sourceEnum = runCatching { EncounterSource.valueOf(item.source) }
+            .getOrDefault(EncounterSource.UNKNOWN_RF)
+        val resolved = resolveDeviceLocation(
+            source = sourceEnum,
+            encounters = deviceEncounters
+        )
+        if (resolved != null) {
+            pinnedMapLat = resolved.lat
+            pinnedMapLon = resolved.lon
+            pinnedMapTimestampEpochMs = resolved.resolvedFromTimestampEpochMs
+            mapLocationMethod = resolved.method
+            mapApproximateRangeMeters = resolved.approximateRangeMeters
         }
     }
 
@@ -6761,19 +6949,26 @@ private fun DeviceDetailPage(
                         "n/a"
                     }
                 )
+                if (!mapLocationMethod.isNullOrBlank()) {
+                    DetailRow("Map Location Method", mapLocationMethod!!)
+                }
+                if (mapApproximateRangeMeters != null) {
+                    DetailRow("Map Approx Range", formatDistanceFeetMiles(mapApproximateRangeMeters!!))
+                }
                 DeviceDetailMapSection(
                     source = item.source,
                     primaryId = item.primaryId,
                     lat = pinnedMapLat,
                     lon = pinnedMapLon,
                     currentLocation = currentLocation,
-                    lastSeenEpochMs = item.lastSeenEpochMs,
+                    lastSeenEpochMs = pinnedMapTimestampEpochMs ?: item.lastSeenEpochMs,
                     realtimeEnabled = realtimeMapEnabled,
                     onRealtimeEnabledChanged = { enabled ->
                         realtimeMapEnabled = enabled
                         if (enabled) {
                             pinnedMapLat = item.lastLat
                             pinnedMapLon = item.lastLon
+                            pinnedMapTimestampEpochMs = item.lastSeenEpochMs
                         }
                     }
                 )
