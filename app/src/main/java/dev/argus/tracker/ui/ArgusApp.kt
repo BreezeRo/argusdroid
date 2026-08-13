@@ -5056,7 +5056,11 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
     val key = "${pin.source}|${glyph}|${bgColor.toArgb()}"
     deviceMarkerIconCache[key]?.let { return it }
 
-    val width = 92
+    val width = when {
+        glyph.length > 9 -> 148
+        glyph.length > 6 -> 116
+        else -> 92
+    }
     val height = 42
     val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
@@ -5074,7 +5078,7 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
         style = android.graphics.Paint.Style.FILL
         color = android.graphics.Color.argb(255, 15, 21, 22)
         textAlign = android.graphics.Paint.Align.CENTER
-        textSize = 18f
+        textSize = if (glyph.length > 9) 14f else if (glyph.length > 6) 16f else 18f
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
     }
 
@@ -5104,7 +5108,7 @@ private fun deviceGlyphForSource(source: String): String = when (source) {
     "WIFI_DIRECT" -> "WFD"
     "BLUETOOTH_LE" -> "BLE"
     "BLUETOOTH_CLASSIC" -> "BT"
-    "REMOTE_ID" -> "RID"
+    "REMOTE_ID" -> "RID / Drone"
     "UWB" -> "UWB"
     "SDR" -> "SDR"
     "UNKNOWN_RF" -> "RF"
