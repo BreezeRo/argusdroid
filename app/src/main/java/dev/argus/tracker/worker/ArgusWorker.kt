@@ -12,6 +12,11 @@ class ArgusWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
+        if (ScanSettings.isMeshWipeGateEnabled(applicationContext)) {
+            runCatching { WorkScheduler.scheduleNextIfNeeded(applicationContext) }
+            return Result.success()
+        }
+
         val container = (applicationContext as? ArgusApplication)?.container
             ?: DefaultAppContainer(applicationContext)
         val sensingService = container.sensingService

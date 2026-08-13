@@ -1300,6 +1300,40 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onLiveMapUpdateIntervalSelected = { seconds ->
                         liveMapUpdateIntervalSeconds = seconds
                         ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
+                    },
+                    onSoftReset = {
+                        scope.launch {
+                            app.container.repository.clearEncounters()
+                            app.container.repository.clearDevices()
+                            ScanSettings.clearOperationalLogs(context)
+                            alertLogs = emptyList()
+                            evasionActionLog = emptyList()
+                            scanIntervalChangeEvents = emptyList()
+                            viewModel.refreshSummary()
+                        }
+                    },
+                    onHardReset = {
+                        scope.launch {
+                            app.container.repository.clearEncounters()
+                            app.container.repository.clearDevices()
+                            ScanSettings.clearOperationalLogs(context)
+                            ScanSettings.resetMeshNetworkSettings(context)
+                            app.container.chainLinkCoordinator.stopServer()
+                            MeshForegroundServiceController.ensureState(context)
+                            alertLogs = emptyList()
+                            evasionActionLog = emptyList()
+                            scanIntervalChangeEvents = emptyList()
+                            chainLinkEnabled = ScanSettings.isChainLinkEnabled(context)
+                            chainNodeId = ScanSettings.getChainNodeId(context)
+                            chainDeviceName = ScanSettings.getChainDeviceName(context)
+                            chainSharedSecret = ScanSettings.getChainSharedSecret(context)
+                            chainAutoSyncEnabled = ScanSettings.isChainAutoSyncEnabled(context)
+                            chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
+                            chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
+                            chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
+                            chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+                            viewModel.refreshSummary()
+                        }
                     }
                 )
             }
@@ -1343,6 +1377,14 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         readinessItems = DetectionReadinessAdvisor.evaluate(context)
                     },
                     onLiveCollect = {
+                        val meshGate = ScanSettings.getMeshWipeGateState(context)
+                        if (meshGate.enabled) {
+                            val initiator = meshGate.initiatorDeviceName
+                                ?: meshGate.initiatorNodeId
+                                ?: "mesh coordinator"
+                            return@DetectionPage "Live scan paused: mesh wipe gate active (initiated by $initiator)."
+                        }
+
                         runCatching {
                             val scanResult = app.container.sensingService.collectBatchWithMetrics()
                             app.container.repository.insertBatch(scanResult.encounters)
@@ -1456,6 +1498,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             "Set a shared chain passphrase on all devices before syncing."
                         } else {
                             "Peers ${stats.peersSynced}/${stats.peersDiscovered}, imported ${stats.importedRecords}, exported ${stats.exportedRecords}, failures ${stats.failures}."
+                        }
+                    },
+                    onWipeMeshData = {
+                        val wipe = app.container.chainLinkCoordinator.wipeMeshDataAcrossPeers()
+                        viewModel.refreshSummary()
+                        when {
+                            !wipe.enabled -> "Local soft reset applied (encounters/devices/logs). Chain link is disabled, so no remote peers were targeted."
+                            !wipe.authConfigured -> "Local soft reset applied (encounters/devices/logs). Configure a shared chain passphrase to wipe linked peers."
+                            wipe.failures > 0 -> "Soft reset incomplete across mesh: local cleared, peers reset ${wipe.peersWiped}/${wipe.peersTargeted}, failures ${wipe.failures}. Scan gate remains active until all targeted peers complete reset."
+                            else -> "Soft reset completed across mesh: local + peers reset ${wipe.peersWiped}/${wipe.peersTargeted}. Scan gate released across mesh."
                         }
                     }
                 )
@@ -2217,7 +2269,9 @@ private fun AppSettingsPage(
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
-    onLiveMapUpdateIntervalSelected: (Long) -> Unit
+    onLiveMapUpdateIntervalSelected: (Long) -> Unit,
+    onSoftReset: () -> Unit,
+    onHardReset: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     var liveMapIntervalExpanded by remember { mutableStateOf(false) }
@@ -2461,6 +2515,31 @@ private fun AppSettingsPage(
                     }
                     Text("Notifications trigger when a tracked device changes into approaching state.")
                     Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
+                }
+            }
+        }
+        item {
+            Text("Reset", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Soft reset clears local encounters/devices and all logs.")
+                    Text("Hard reset does soft reset plus wipes mesh network settings (chain link config, passphrase, and mesh toggles).")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(onClick = onSoftReset) {
+                            Text("Soft Reset")
+                        }
+                        Button(onClick = onHardReset) {
+                            Text("Hard Reset")
+                        }
+                    }
                 }
             }
         }
@@ -3065,7 +3144,8 @@ private fun DetectionPage(
     onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
     onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
-    onSyncNow: suspend () -> String
+    onSyncNow: suspend () -> String,
+    onWipeMeshData: suspend () -> String
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(0) }
@@ -3421,7 +3501,8 @@ private fun DetectionPage(
                 onChainSharePreciseLocationChanged = onChainSharePreciseLocationChanged,
                 onRefreshPeers = onRefreshPeers,
                 onSendLinkRequest = onSendLinkRequest,
-                onSyncNow = onSyncNow
+                onSyncNow = onSyncNow,
+                onWipeMeshData = onWipeMeshData
             )
         }
     }
@@ -3569,13 +3650,15 @@ private fun DetectionMeshNetworkPage(
     onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
     onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
-    onSyncNow: suspend () -> String
+    onSyncNow: suspend () -> String,
+    onWipeMeshData: suspend () -> String
 ) {
     val context = LocalContext.current
     var chainIntervalExpanded by remember { mutableStateOf(false) }
     var heartbeatExpanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var syncInProgress by remember { mutableStateOf(false) }
+    var wipeInProgress by remember { mutableStateOf(false) }
     var syncMessage by remember { mutableStateOf<String?>(null) }
     var refreshInProgress by remember { mutableStateOf(false) }
     var manualLinkRequestInProgress by remember { mutableStateOf(false) }
@@ -3583,10 +3666,12 @@ private fun DetectionMeshNetworkPage(
     var linkHostInput by remember { mutableStateOf("") }
     var linkMessageInput by remember { mutableStateOf("") }
     var meshServiceActive by remember { mutableStateOf(MeshForegroundServiceController.isActive(context)) }
+    var meshWipeGateState by remember { mutableStateOf(ScanSettings.getMeshWipeGateState(context)) }
 
     LaunchedEffect(chainLinkEnabled, chainPersistentChannelEnabled) {
         while (true) {
             meshServiceActive = MeshForegroundServiceController.isActive(context)
+            meshWipeGateState = ScanSettings.getMeshWipeGateState(context)
             delay(1500)
         }
     }
@@ -3630,6 +3715,38 @@ private fun DetectionMeshNetworkPage(
                 snapshot = chainMeshSnapshot,
                 sharePreciseLocationEnabled = chainSharePreciseLocationEnabled
             )
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("Mesh Wipe Coordination", fontWeight = FontWeight.Bold)
+                    if (meshWipeGateState.enabled) {
+                        val initiator = meshWipeGateState.initiatorDeviceName
+                            ?: meshWipeGateState.initiatorNodeId
+                            ?: "unknown"
+                        Text("Scan gate: ACTIVE")
+                        Text("Initiated by: $initiator")
+                        if (meshWipeGateState.sessionId != null) {
+                            Text("Session: ${meshWipeGateState.sessionId}")
+                        }
+                    } else {
+                        Text("Scan gate: INACTIVE")
+                    }
+
+                    if (chainMeshSnapshot.wipeNotices.isEmpty()) {
+                        Text("No mesh wipe notices yet.")
+                    } else {
+                        Text("Recent wipe notices", fontWeight = FontWeight.SemiBold)
+                        chainMeshSnapshot.wipeNotices.take(8).forEach { notice ->
+                            val who = notice.initiatorDeviceName ?: notice.initiatorNodeId
+                            Text("${formatEpoch(notice.timestampEpochMs)} • $who • ${notice.detail}")
+                        }
+                    }
+                }
+            }
         }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -3824,6 +3941,19 @@ private fun DetectionMeshNetworkPage(
                     ) {
                         Text(if (syncInProgress) "Syncing..." else "Sync Now")
                     }
+                    Button(
+                        enabled = !wipeInProgress,
+                        onClick = {
+                            scope.launch {
+                                wipeInProgress = true
+                                syncMessage = onWipeMeshData()
+                                wipeInProgress = false
+                            }
+                        }
+                    ) {
+                        Text(if (wipeInProgress) "Resetting Mesh..." else "Mesh Soft Reset (All Devices)")
+                    }
+                    Text("Clears encounters/devices/logs locally and on discovered peers with authenticated coordination to keep two (or more) mesh devices better synchronized.")
 
                     Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
                     OutlinedTextField(

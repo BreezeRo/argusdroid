@@ -49,6 +49,15 @@ data class ChainSyncStats(
     val failures: Int
 )
 
+data class ChainWipeStats(
+    val enabled: Boolean,
+    val authConfigured: Boolean,
+    val localCleared: Boolean,
+    val peersTargeted: Int,
+    val peersWiped: Int,
+    val failures: Int
+)
+
 enum class ChainPeerState {
     DISCOVERED,
     CONNECTED,
@@ -79,11 +88,20 @@ data class IncomingLinkRequest(
     val timestampEpochMs: Long
 )
 
+data class MeshWipeNotice(
+    val sessionId: String,
+    val initiatorNodeId: String,
+    val initiatorDeviceName: String?,
+    val detail: String,
+    val timestampEpochMs: Long
+)
+
 data class ChainMeshSnapshot(
     val localNodeId: String,
     val localDeviceName: String,
     val peers: List<ChainPeerStatus>,
     val incomingRequests: List<IncomingLinkRequest>,
+    val wipeNotices: List<MeshWipeNotice> = emptyList(),
     val lastRefreshEpochMs: Long?,
     val lastSyncEpochMs: Long?
 )
@@ -95,6 +113,7 @@ interface ChainLinkCoordinator {
     suspend fun refreshPeers(): ChainMeshSnapshot
     suspend fun sendLinkRequest(host: String, message: String? = null): Boolean
     suspend fun syncNow(): ChainSyncStats
+    suspend fun wipeMeshDataAcrossPeers(): ChainWipeStats
 }
 
 class LocalMeshChainLinkCoordinator(
@@ -106,12 +125,14 @@ class LocalMeshChainLinkCoordinator(
     private val nodeId: String = ScanSettings.getChainNodeId(context)
     private val peerStatusByNode = mutableMapOf<String, ChainPeerStatus>()
     private val incomingRequests = mutableListOf<IncomingLinkRequest>()
+    private val wipeNotices = mutableListOf<MeshWipeNotice>()
     private val meshState = MutableStateFlow(
         ChainMeshSnapshot(
             localNodeId = nodeId,
             localDeviceName = ScanSettings.getChainDeviceName(context),
             peers = emptyList(),
             incomingRequests = emptyList(),
+            wipeNotices = emptyList(),
             lastRefreshEpochMs = null,
             lastSyncEpochMs = null
         )
@@ -123,6 +144,10 @@ class LocalMeshChainLinkCoordinator(
         context = context,
         scope = scope,
         authSecretProvider = { ScanSettings.getChainSharedSecret(context) },
+        onWipeNotice = { notice ->
+            addWipeNotice(notice)
+            publishSnapshot()
+        },
         onIncomingLinkRequest = { request ->
             synchronized(incomingRequests) {
                 incomingRequests.add(0, request)
@@ -362,6 +387,190 @@ class LocalMeshChainLinkCoordinator(
         )
     }
 
+    override suspend fun wipeMeshDataAcrossPeers(): ChainWipeStats {
+        val initiatorName = ScanSettings.getChainDeviceName(context)
+        val sessionId = "wipe-${System.currentTimeMillis()}-$nodeId"
+        if (!ScanSettings.isChainLinkEnabled(context)) {
+            repository.clearEncounters()
+            repository.clearDevices()
+            ScanSettings.clearOperationalLogs(context)
+            addWipeNotice(
+                MeshWipeNotice(
+                    sessionId = sessionId,
+                    initiatorNodeId = nodeId,
+                    initiatorDeviceName = initiatorName,
+                    detail = "Local-only wipe completed (chain disabled).",
+                    timestampEpochMs = System.currentTimeMillis()
+                )
+            )
+            ScanSettings.completeMeshWipeGate(context)
+            publishSnapshot(lastSync = System.currentTimeMillis())
+            return ChainWipeStats(
+                enabled = false,
+                authConfigured = false,
+                localCleared = true,
+                peersTargeted = 0,
+                peersWiped = 0,
+                failures = 0
+            )
+        }
+
+        val sharedSecret = ScanSettings.getChainSharedSecret(context)
+        if (sharedSecret.isBlank()) {
+            repository.clearEncounters()
+            repository.clearDevices()
+            ScanSettings.clearOperationalLogs(context)
+            addWipeNotice(
+                MeshWipeNotice(
+                    sessionId = sessionId,
+                    initiatorNodeId = nodeId,
+                    initiatorDeviceName = initiatorName,
+                    detail = "Local wipe completed; remote wipe blocked (missing chain passphrase).",
+                    timestampEpochMs = System.currentTimeMillis()
+                )
+            )
+            ScanSettings.completeMeshWipeGate(context)
+            publishSnapshot(lastSync = System.currentTimeMillis())
+            return ChainWipeStats(
+                enabled = true,
+                authConfigured = false,
+                localCleared = true,
+                peersTargeted = 0,
+                peersWiped = 0,
+                failures = 1
+            )
+        }
+
+        server.start()
+        ScanSettings.beginMeshWipeGate(
+            context = context,
+            sessionId = sessionId,
+            initiatorNodeId = nodeId,
+            initiatorDeviceName = initiatorName
+        )
+        addWipeNotice(
+            MeshWipeNotice(
+                sessionId = sessionId,
+                initiatorNodeId = nodeId,
+                initiatorDeviceName = initiatorName,
+                detail = "Mesh wipe initiated by this device.",
+                timestampEpochMs = System.currentTimeMillis()
+            )
+        )
+        repository.clearEncounters()
+        repository.clearDevices()
+        ScanSettings.clearOperationalLogs(context)
+
+        val peers = refreshPeers().peers
+            .map {
+                DiscoveredPeer(
+                    host = it.host,
+                    nodeId = it.nodeId,
+                    persistentChannelEnabled = it.state == ChainPeerState.CONNECTED || it.state == ChainPeerState.REQUESTED,
+                    deviceName = it.deviceName,
+                    sharedLocationLat = it.sharedLocationLat,
+                    sharedLocationLon = it.sharedLocationLon,
+                    sharedLocationAccuracyMeters = it.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = it.sharedLocationTimestampEpochMs
+                )
+            }
+            .take(CHAIN_MAX_PEERS)
+
+        var peersWiped = 0
+        var failures = 0
+        peers.forEach { peer ->
+            val wiped = runCatching {
+                sendWipeToPeer(peer, sharedSecret, sessionId, initiatorName)
+            }.getOrDefault(false)
+
+            if (wiped) {
+                peersWiped += 1
+                mergePeerStatus(
+                    nodeId = peer.nodeId,
+                    deviceName = peer.deviceName,
+                    host = peer.host,
+                    state = ChainPeerState.CONNECTED,
+                    failure = null,
+                    sharedLocationLat = peer.sharedLocationLat,
+                    sharedLocationLon = peer.sharedLocationLon,
+                    sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs,
+                    markSynced = true
+                )
+                addWipeNotice(
+                    MeshWipeNotice(
+                        sessionId = sessionId,
+                        initiatorNodeId = nodeId,
+                        initiatorDeviceName = initiatorName,
+                        detail = "${peer.deviceName ?: peer.nodeId} acknowledged wipe.",
+                        timestampEpochMs = System.currentTimeMillis()
+                    )
+                )
+            } else {
+                failures += 1
+                mergePeerStatus(
+                    nodeId = peer.nodeId,
+                    deviceName = peer.deviceName,
+                    host = peer.host,
+                    state = ChainPeerState.FAILED,
+                    failure = "Remote wipe failed",
+                    sharedLocationLat = peer.sharedLocationLat,
+                    sharedLocationLon = peer.sharedLocationLon,
+                    sharedLocationAccuracyMeters = peer.sharedLocationAccuracyMeters,
+                    sharedLocationTimestampEpochMs = peer.sharedLocationTimestampEpochMs
+                )
+                addWipeNotice(
+                    MeshWipeNotice(
+                        sessionId = sessionId,
+                        initiatorNodeId = nodeId,
+                        initiatorDeviceName = initiatorName,
+                        detail = "${peer.deviceName ?: peer.nodeId} failed wipe acknowledgement.",
+                        timestampEpochMs = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+
+        if (failures == 0) {
+            peers.forEach { peer ->
+                runCatching {
+                    sendWipeReleaseToPeer(peer, sharedSecret, sessionId, initiatorName)
+                }
+            }
+            ScanSettings.completeMeshWipeGate(context)
+            addWipeNotice(
+                MeshWipeNotice(
+                    sessionId = sessionId,
+                    initiatorNodeId = nodeId,
+                    initiatorDeviceName = initiatorName,
+                    detail = "Mesh wipe completed across all targeted peers; scan gate released.",
+                    timestampEpochMs = System.currentTimeMillis()
+                )
+            )
+        } else {
+            addWipeNotice(
+                MeshWipeNotice(
+                    sessionId = sessionId,
+                    initiatorNodeId = nodeId,
+                    initiatorDeviceName = initiatorName,
+                    detail = "Mesh wipe incomplete; scan gate remains active until all peers complete wipe.",
+                    timestampEpochMs = System.currentTimeMillis()
+                )
+            )
+        }
+
+        publishSnapshot(lastSync = System.currentTimeMillis())
+
+        return ChainWipeStats(
+            enabled = true,
+            authConfigured = true,
+            localCleared = true,
+            peersTargeted = peers.size,
+            peersWiped = peersWiped,
+            failures = failures
+        )
+    }
+
     private fun mergePeerStatus(
         nodeId: String,
         deviceName: String?,
@@ -406,14 +615,27 @@ class LocalMeshChainLinkCoordinator(
         val requests = synchronized(incomingRequests) {
             incomingRequests.toList().sortedByDescending { it.timestampEpochMs }
         }
+        val notices = synchronized(wipeNotices) {
+            wipeNotices.toList().sortedByDescending { it.timestampEpochMs }
+        }
         val current = meshState.value
         meshState.value = current.copy(
             localDeviceName = ScanSettings.getChainDeviceName(context),
             peers = peers,
             incomingRequests = requests,
+            wipeNotices = notices,
             lastRefreshEpochMs = lastRefresh ?: current.lastRefreshEpochMs,
             lastSyncEpochMs = lastSync ?: current.lastSyncEpochMs
         )
+    }
+
+    private fun addWipeNotice(notice: MeshWipeNotice) {
+        synchronized(wipeNotices) {
+            wipeNotices.add(0, notice)
+            if (wipeNotices.size > CHAIN_MAX_WIPE_NOTICES) {
+                wipeNotices.removeAt(wipeNotices.lastIndex)
+            }
+        }
     }
 
     private suspend fun discoverPeers(): List<DiscoveredPeer> = withContext(Dispatchers.IO) {
@@ -518,6 +740,65 @@ class LocalMeshChainLinkCoordinator(
                 nodeId = nodeId,
                 method = "POST",
                 path = CHAIN_HEARTBEAT_PATH,
+                body = body
+            )
+        ) ?: return@withContext false
+
+        runCatching { JSONObject(response).optBoolean("ok", false) }.getOrDefault(false)
+    }
+
+    private suspend fun sendWipeToPeer(
+        peer: DiscoveredPeer,
+        sharedSecret: String,
+        sessionId: String,
+        initiatorDeviceName: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("requesterNodeId", nodeId)
+            put("requesterDeviceName", initiatorDeviceName)
+            put("sessionId", sessionId)
+            put("wipeEncounters", true)
+            put("wipeDevices", true)
+            put("wipeLogs", true)
+            put("timestampEpochMs", System.currentTimeMillis())
+        }.toString()
+
+        val response = postJson(
+            url = "http://${peer.host}:$CHAIN_PORT$CHAIN_WIPE_PATH",
+            body = body,
+            auth = ChainAuthHeaders.sign(
+                sharedSecret = sharedSecret,
+                nodeId = nodeId,
+                method = "POST",
+                path = CHAIN_WIPE_PATH,
+                body = body
+            )
+        ) ?: return@withContext false
+
+        runCatching { JSONObject(response).optBoolean("ok", false) }.getOrDefault(false)
+    }
+
+    private suspend fun sendWipeReleaseToPeer(
+        peer: DiscoveredPeer,
+        sharedSecret: String,
+        sessionId: String,
+        initiatorDeviceName: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("requesterNodeId", nodeId)
+            put("requesterDeviceName", initiatorDeviceName)
+            put("sessionId", sessionId)
+            put("timestampEpochMs", System.currentTimeMillis())
+        }.toString()
+
+        val response = postJson(
+            url = "http://${peer.host}:$CHAIN_PORT$CHAIN_WIPE_RELEASE_PATH",
+            body = body,
+            auth = ChainAuthHeaders.sign(
+                sharedSecret = sharedSecret,
+                nodeId = nodeId,
+                method = "POST",
+                path = CHAIN_WIPE_RELEASE_PATH,
                 body = body
             )
         ) ?: return@withContext false
@@ -683,6 +964,7 @@ private class ChainLinkServer(
     private val context: Context,
     private val scope: CoroutineScope,
     private val authSecretProvider: () -> String,
+    private val onWipeNotice: (MeshWipeNotice) -> Unit,
     private val onIncomingLinkRequest: (IncomingLinkRequest) -> Unit
 ) {
     @Volatile
@@ -891,6 +1173,156 @@ private class ChainLinkServer(
                     return@runCatching
                 }
 
+                if (method == "POST" && path == CHAIN_WIPE_PATH) {
+                    if (!ScanSettings.isChainLinkEnabled(context)) {
+                        writeHttpResponse(writer, statusCode = 403, body = "disabled")
+                        return@runCatching
+                    }
+
+                    val sharedSecret = authSecretProvider().trim()
+                    if (sharedSecret.isBlank()) {
+                        writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
+                        return@runCatching
+                    }
+
+                    val authNodeId = headers[HEADER_AUTH_NODE_ID.lowercase()].orEmpty()
+                    val authTimestampMs = headers[HEADER_AUTH_TIMESTAMP_MS.lowercase()]?.toLongOrNull()
+                    val authSignature = headers[HEADER_AUTH_SIGNATURE.lowercase()].orEmpty()
+                    val authValid = ChainAuthHeaders.verify(
+                        sharedSecret = sharedSecret,
+                        nodeId = authNodeId,
+                        method = method,
+                        path = path,
+                        body = body,
+                        timestampMs = authTimestampMs,
+                        signature = authSignature
+                    )
+                    if (!authValid) {
+                        writeHttpResponse(writer, statusCode = 401, body = "unauthorized")
+                        return@runCatching
+                    }
+
+                    val requestObj = runCatching { JSONObject(body) }.getOrNull()
+                    val requesterNodeId = requestObj?.optString("requesterNodeId", "")?.trim().orEmpty()
+                    val requesterDeviceName = requestObj?.optString("requesterDeviceName", null)?.trim()?.ifBlank { null }
+                    val sessionId = requestObj?.optString("sessionId", "")?.trim().orEmpty()
+                    if (requesterNodeId.isBlank() || requesterNodeId != authNodeId) {
+                        writeHttpResponse(writer, statusCode = 401, body = "requester mismatch")
+                        return@runCatching
+                    }
+                    if (sessionId.isBlank()) {
+                        writeHttpResponse(writer, statusCode = 400, body = "missing session")
+                        return@runCatching
+                    }
+
+                    val wipeEncounters = requestObj?.optBoolean("wipeEncounters", true) ?: true
+                    val wipeDevices = requestObj?.optBoolean("wipeDevices", true) ?: true
+                    val wipeLogs = requestObj?.optBoolean("wipeLogs", true) ?: true
+
+                    ScanSettings.beginMeshWipeGate(
+                        context = context,
+                        sessionId = sessionId,
+                        initiatorNodeId = requesterNodeId,
+                        initiatorDeviceName = requesterDeviceName
+                    )
+                    onWipeNotice(
+                        MeshWipeNotice(
+                            sessionId = sessionId,
+                            initiatorNodeId = requesterNodeId,
+                            initiatorDeviceName = requesterDeviceName,
+                            detail = "Wipe command received from ${requesterDeviceName ?: requesterNodeId}; local wipe started.",
+                            timestampEpochMs = System.currentTimeMillis()
+                        )
+                    )
+
+                    if (wipeEncounters) {
+                        repository.clearEncounters()
+                    }
+                    if (wipeDevices) {
+                        repository.clearDevices()
+                    }
+                    if (wipeLogs) {
+                        ScanSettings.clearOperationalLogs(context)
+                    }
+
+                    onWipeNotice(
+                        MeshWipeNotice(
+                            sessionId = sessionId,
+                            initiatorNodeId = requesterNodeId,
+                            initiatorDeviceName = requesterDeviceName,
+                            detail = "Local wipe completed; waiting for mesh release.",
+                            timestampEpochMs = System.currentTimeMillis()
+                        )
+                    )
+
+                    val response = JSONObject().apply {
+                        put("ok", true)
+                        put("nodeId", nodeId)
+                        put("wipedEncounters", wipeEncounters)
+                        put("wipedDevices", wipeDevices)
+                    }.toString()
+                    writeHttpResponse(writer, statusCode = 200, body = response)
+                    return@runCatching
+                }
+
+                if (method == "POST" && path == CHAIN_WIPE_RELEASE_PATH) {
+                    if (!ScanSettings.isChainLinkEnabled(context)) {
+                        writeHttpResponse(writer, statusCode = 403, body = "disabled")
+                        return@runCatching
+                    }
+
+                    val sharedSecret = authSecretProvider().trim()
+                    if (sharedSecret.isBlank()) {
+                        writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
+                        return@runCatching
+                    }
+
+                    val authNodeId = headers[HEADER_AUTH_NODE_ID.lowercase()].orEmpty()
+                    val authTimestampMs = headers[HEADER_AUTH_TIMESTAMP_MS.lowercase()]?.toLongOrNull()
+                    val authSignature = headers[HEADER_AUTH_SIGNATURE.lowercase()].orEmpty()
+                    val authValid = ChainAuthHeaders.verify(
+                        sharedSecret = sharedSecret,
+                        nodeId = authNodeId,
+                        method = method,
+                        path = path,
+                        body = body,
+                        timestampMs = authTimestampMs,
+                        signature = authSignature
+                    )
+                    if (!authValid) {
+                        writeHttpResponse(writer, statusCode = 401, body = "unauthorized")
+                        return@runCatching
+                    }
+
+                    val requestObj = runCatching { JSONObject(body) }.getOrNull()
+                    val requesterNodeId = requestObj?.optString("requesterNodeId", "")?.trim().orEmpty()
+                    val requesterDeviceName = requestObj?.optString("requesterDeviceName", null)?.trim()?.ifBlank { null }
+                    val sessionId = requestObj?.optString("sessionId", "")?.trim().orEmpty()
+                    if (requesterNodeId.isBlank() || requesterNodeId != authNodeId || sessionId.isBlank()) {
+                        writeHttpResponse(writer, statusCode = 401, body = "requester mismatch")
+                        return@runCatching
+                    }
+
+                    ScanSettings.completeMeshWipeGate(context)
+                    onWipeNotice(
+                        MeshWipeNotice(
+                            sessionId = sessionId,
+                            initiatorNodeId = requesterNodeId,
+                            initiatorDeviceName = requesterDeviceName,
+                            detail = "Mesh wipe release received from ${requesterDeviceName ?: requesterNodeId}; scanning resumed.",
+                            timestampEpochMs = System.currentTimeMillis()
+                        )
+                    )
+
+                    val response = JSONObject().apply {
+                        put("ok", true)
+                        put("nodeId", nodeId)
+                        put("sessionId", sessionId)
+                    }.toString()
+                    writeHttpResponse(writer, statusCode = 200, body = response)
+                    return@runCatching
+                }
+
                 if (method == "POST" && path == CHAIN_LINK_REQUEST_PATH) {
                     if (!ScanSettings.isChainLinkEnabled(context)) {
                         writeHttpResponse(writer, statusCode = 403, body = "disabled")
@@ -1036,6 +1468,8 @@ private const val CHAIN_HELLO_PATH = "/argus/v1/hello"
 private const val CHAIN_SYNC_PATH = "/argus/v1/sync"
 private const val CHAIN_HEARTBEAT_PATH = "/argus/v1/heartbeat"
 private const val CHAIN_LINK_REQUEST_PATH = "/argus/v1/link-request"
+private const val CHAIN_WIPE_PATH = "/argus/v1/wipe"
+private const val CHAIN_WIPE_RELEASE_PATH = "/argus/v1/wipe-release"
 private const val HEADER_AUTH_NODE_ID = "X-Argus-Auth-Node"
 private const val HEADER_AUTH_TIMESTAMP_MS = "X-Argus-Auth-Timestamp-Ms"
 private const val HEADER_AUTH_SIGNATURE = "X-Argus-Auth-Signature"
@@ -1046,6 +1480,7 @@ private const val CHAIN_DISCOVERY_CONCURRENCY = 24
 private const val CHAIN_SERVER_ACCEPT_TIMEOUT_MS = 1000
 private const val CHAIN_MAX_AUTH_CLOCK_SKEW_MS = 2 * 60 * 1000L
 private const val CHAIN_MAX_INCOMING_REQUESTS = 50
+private const val CHAIN_MAX_WIPE_NOTICES = 80
 
 private fun Encounter.withExportProvenance(localNodeId: String): Encounter {
     val isLocal = provenance == EncounterProvenance.LOCAL

@@ -35,6 +35,12 @@ object ScanSettings {
     private const val KEY_EVASION_BURST_WATCH_SECONDS = "evasion_burst_watch_seconds"
     private const val KEY_EVASION_BURST_COOLDOWN_SECONDS = "evasion_burst_cooldown_seconds"
     private const val KEY_EVASION_ACTION_LOG = "evasion_action_log"
+    private const val KEY_ALERT_LOG_ENTRIES = "alert_log_entries"
+    private const val KEY_MESH_WIPE_GATE_ENABLED = "mesh_wipe_gate_enabled"
+    private const val KEY_MESH_WIPE_GATE_SESSION_ID = "mesh_wipe_gate_session_id"
+    private const val KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID = "mesh_wipe_gate_initiator_node_id"
+    private const val KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME = "mesh_wipe_gate_initiator_device_name"
+    private const val KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS = "mesh_wipe_gate_updated_epoch_ms"
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -106,6 +112,14 @@ object ScanSettings {
         val timestampEpochMs: Long,
         val action: String,
         val detail: String
+    )
+
+    data class MeshWipeGateState(
+        val enabled: Boolean,
+        val sessionId: String?,
+        val initiatorNodeId: String?,
+        val initiatorDeviceName: String?,
+        val updatedEpochMs: Long?
     )
 
     fun getScanIntervalSeconds(context: Context): Long {
@@ -480,6 +494,90 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_EVASION_ACTION_LOG)
+            .apply()
+    }
+
+    fun clearAlertLogs(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_ALERT_LOG_ENTRIES)
+            .apply()
+    }
+
+    fun clearScanIntervalChangeEvents(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_SCAN_INTERVAL_CHANGE_EVENTS)
+            .apply()
+    }
+
+    fun clearOperationalLogs(context: Context) {
+        clearAlertLogs(context)
+        clearEvasionActionLog(context)
+        clearScanIntervalChangeEvents(context)
+    }
+
+    fun resetMeshNetworkSettings(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CHAIN_LINK_ENABLED, false)
+            .putString(KEY_CHAIN_SHARED_SECRET, "")
+            .putBoolean(KEY_CHAIN_AUTO_SYNC_ENABLED, false)
+            .putLong(KEY_CHAIN_AUTO_SYNC_INTERVAL_SECONDS, DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS)
+            .putBoolean(KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED, false)
+            .putLong(KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS)
+            .putBoolean(KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED, false)
+            .putLong(KEY_CHAIN_SYNC_WINDOW_MINUTES, DEFAULT_CHAIN_SYNC_WINDOW_MINUTES)
+            .putString(KEY_CHAIN_DEVICE_NAME, Build.MODEL.take(40))
+            .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
+            .remove(KEY_MESH_WIPE_GATE_SESSION_ID)
+            .remove(KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID)
+            .remove(KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME)
+            .remove(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS)
+            .apply()
+    }
+
+    fun getMeshWipeGateState(context: Context): MeshWipeGateState {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
+        val sessionId = prefs.getString(KEY_MESH_WIPE_GATE_SESSION_ID, null)?.trim()?.ifBlank { null }
+        val initiatorNodeId = prefs.getString(KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID, null)?.trim()?.ifBlank { null }
+        val initiatorDeviceName = prefs.getString(KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME, null)?.trim()?.ifBlank { null }
+        val updated = prefs.getLong(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS, -1L).takeIf { it >= 0L }
+        return MeshWipeGateState(
+            enabled = enabled,
+            sessionId = sessionId,
+            initiatorNodeId = initiatorNodeId,
+            initiatorDeviceName = initiatorDeviceName,
+            updatedEpochMs = updated
+        )
+    }
+
+    fun isMeshWipeGateEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
+
+    fun beginMeshWipeGate(
+        context: Context,
+        sessionId: String,
+        initiatorNodeId: String,
+        initiatorDeviceName: String?
+    ) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, true)
+            .putString(KEY_MESH_WIPE_GATE_SESSION_ID, sessionId.trim())
+            .putString(KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID, initiatorNodeId.trim())
+            .putString(KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME, initiatorDeviceName?.trim()?.ifBlank { null })
+            .putLong(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun completeMeshWipeGate(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
+            .putLong(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS, System.currentTimeMillis())
             .apply()
     }
 

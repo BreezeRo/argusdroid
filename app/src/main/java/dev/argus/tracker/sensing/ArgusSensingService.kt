@@ -19,6 +19,14 @@ class ArgusSensingService(
     suspend fun collectBatch(): List<Encounter> = collectBatchWithMetrics().encounters
 
     suspend fun collectBatchWithMetrics(): ScanBatchResult {
+        if (ScanSettings.isMeshWipeGateEnabled(context)) {
+            return ScanBatchResult(
+                encounters = emptyList(),
+                sourceDurationsMs = emptyMap(),
+                totalDurationMs = 0L
+            )
+        }
+
         val startedAt = SystemClock.elapsedRealtime()
         val allEncounters = mutableListOf<Encounter>()
         val sourceDurations = linkedMapOf<String, Long>()
