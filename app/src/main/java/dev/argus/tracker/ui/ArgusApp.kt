@@ -259,6 +259,16 @@ private data class DeviceLocationCandidate(
     val isOwned: Boolean = false
 )
 
+private data class MeshCoverageNodeInsight(
+    val nodeId: String,
+    val displayName: String,
+    val seenDevices: Int,
+    val uniqueContributions: Int,
+    val blindSpotsFilledByOthers: Int,
+    val coverageSharePercent: Int,
+    val blindSpotFillPercent: Int
+)
+
 private object OwnedDeviceRegistry {
     private const val PREFS_NAME = "argus_settings"
     private const val KEY_OWNED_DEVICE_KEYS = "owned_device_keys"
@@ -1550,6 +1560,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             action = "BURST_COOLDOWN_DURATION",
                             detail = "Set to ${ScanSettings.formatInterval(seconds)}"
                         )
+                    },
+                    onClearActionLog = {
+                        ScanSettings.clearEvasionActionLog(context)
+                        evasionActionLog = emptyList()
                     }
                 )
             }
@@ -2474,7 +2488,8 @@ private fun EvasionPage(
     onJitterPercentSelected: (Int) -> Unit,
     onBurstEnabledChanged: (Boolean) -> Unit,
     onBurstWatchSecondsSelected: (Long) -> Unit,
-    onBurstCooldownSecondsSelected: (Long) -> Unit
+    onBurstCooldownSecondsSelected: (Long) -> Unit,
+    onClearActionLog: () -> Unit
 ) {
     val context = LocalContext.current
     var durationExpanded by remember { mutableStateOf(false) }
@@ -2704,7 +2719,17 @@ private fun EvasionPage(
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Action Log", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Action Log", fontWeight = FontWeight.Bold)
+                        if (actionLog.isNotEmpty()) {
+                            Button(onClick = onClearActionLog) {
+                                Text("Clear Log")
+                            }
+                        }
+                    }
                     if (actionLog.isEmpty()) {
                         Text("No evasion actions yet.")
                     } else {
@@ -3375,6 +3400,7 @@ private fun DetectionPage(
             )
         } else {
             DetectionMeshNetworkPage(
+                encounters = encounters,
                 chainLinkEnabled = chainLinkEnabled,
                 chainNodeId = chainNodeId,
                 chainDeviceName = chainDeviceName,
@@ -3522,6 +3548,7 @@ private fun DetectionLogsPage(
 
 @Composable
 private fun DetectionMeshNetworkPage(
+    encounters: List<Encounter>,
     chainLinkEnabled: Boolean,
     chainNodeId: String,
     chainDeviceName: String,
@@ -3566,6 +3593,13 @@ private fun DetectionMeshNetworkPage(
 
     val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
     val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
+    val meshCoverageInsights = remember(encounters, chainMeshSnapshot, chainNodeId) {
+        buildMeshCoverageInsights(
+            encounters = encounters,
+            snapshot = chainMeshSnapshot,
+            localNodeId = chainNodeId
+        )
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -3596,6 +3630,45 @@ private fun DetectionMeshNetworkPage(
                 snapshot = chainMeshSnapshot,
                 sharePreciseLocationEnabled = chainSharePreciseLocationEnabled
             )
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Blind-Spot Fill Insights", fontWeight = FontWeight.Bold)
+                    Text("Last 2h across mesh-visible devices. Shows who is spotting most, least, and what each node misses.")
+                    if (meshCoverageInsights.isEmpty()) {
+                        Text("No enough mesh-attributed observations yet. Run sync and collect more detections.")
+                    } else {
+                        val topSpotter = meshCoverageInsights.maxByOrNull { it.seenDevices }
+                        val leastSpotter = meshCoverageInsights.minByOrNull { it.seenDevices }
+                        if (topSpotter != null) {
+                            Text("Most spotting: ${topSpotter.displayName} (${topSpotter.seenDevices} devices)")
+                        }
+                        if (leastSpotter != null) {
+                            Text("Least spotting: ${leastSpotter.displayName} (${leastSpotter.seenDevices} devices)")
+                        }
+
+                        meshCoverageInsights.forEach { insight ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(insight.displayName, fontWeight = FontWeight.SemiBold)
+                                    Text("Seen ${insight.seenDevices} (${insight.coverageSharePercent}% mesh coverage) • Unique ${insight.uniqueContributions}")
+                                    Text(
+                                        "Blind spots filled by others: ${insight.blindSpotsFilledByOthers} (${insight.blindSpotFillPercent}%)",
+                                        color = if (insight.blindSpotsFilledByOthers == 0) Color(0xFF2E7D32) else Color(0xFFB3261E)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -3866,6 +3939,80 @@ private fun DetectionMeshNetworkPage(
             }
         }
     }
+}
+
+private fun buildMeshCoverageInsights(
+    encounters: List<Encounter>,
+    snapshot: ChainMeshSnapshot,
+    localNodeId: String,
+    windowMs: Long = 2L * 60L * 60L * 1000L
+): List<MeshCoverageNodeInsight> {
+    val cutoff = System.currentTimeMillis() - windowMs
+    val peersById = snapshot.peers.associateBy { it.nodeId }
+
+    val observationsByNode = linkedMapOf<String, MutableSet<String>>()
+    fun nodeSet(nodeId: String): MutableSet<String> = observationsByNode.getOrPut(nodeId) { linkedSetOf() }
+
+    encounters.asSequence()
+        .filter { it.timestampEpochMs >= cutoff }
+        .forEach { encounter ->
+            val originNode = when (encounter.provenance) {
+                EncounterProvenance.CHAIN_LINKED -> encounter.provenanceNodeId
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "peer-unknown"
+
+                else -> localNodeId
+            }
+            val deviceKey = "${encounter.source.name}|${encounter.primaryId}"
+            nodeSet(originNode).add(deviceKey)
+        }
+
+    if (observationsByNode.isEmpty()) {
+        return emptyList()
+    }
+
+    if (!observationsByNode.containsKey(localNodeId)) {
+        observationsByNode[localNodeId] = linkedSetOf()
+    }
+    snapshot.peers.forEach { peer ->
+        observationsByNode.putIfAbsent(peer.nodeId, linkedSetOf())
+    }
+
+    val allObserved = observationsByNode.values.flatten().toSet()
+    val allObservedCount = allObserved.size.coerceAtLeast(1)
+
+    return observationsByNode.map { (nodeId, seenSet) ->
+        val othersUnion = observationsByNode
+            .asSequence()
+            .filter { it.key != nodeId }
+            .flatMap { it.value.asSequence() }
+            .toSet()
+
+        val uniqueContributions = seenSet.count { it !in othersUnion }
+        val blindSpotsFilledByOthers = othersUnion.count { it !in seenSet }
+        val coverageSharePercent = ((seenSet.size * 100.0) / allObservedCount.toDouble()).toInt()
+        val blindSpotFillPercent = ((blindSpotsFilledByOthers * 100.0) / allObservedCount.toDouble()).toInt()
+        val displayName = when {
+            nodeId == localNodeId -> "${snapshot.localDeviceName} (This Device)"
+            nodeId == "peer-unknown" -> "Unknown Peer"
+            else -> peersById[nodeId]?.deviceName?.takeIf { it.isNotBlank() } ?: nodeId
+        }
+
+        MeshCoverageNodeInsight(
+            nodeId = nodeId,
+            displayName = displayName,
+            seenDevices = seenSet.size,
+            uniqueContributions = uniqueContributions,
+            blindSpotsFilledByOthers = blindSpotsFilledByOthers,
+            coverageSharePercent = coverageSharePercent,
+            blindSpotFillPercent = blindSpotFillPercent
+        )
+    }.sortedWith(
+        compareByDescending<MeshCoverageNodeInsight> { it.seenDevices }
+            .thenByDescending { it.uniqueContributions }
+            .thenBy { it.displayName.lowercase(Locale.US) }
+    )
 }
 
 @Composable

@@ -476,6 +476,13 @@ object ScanSettings {
         return all.takeLast(limit.coerceAtLeast(1)).asReversed()
     }
 
+    fun clearEvasionActionLog(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_EVASION_ACTION_LOG)
+            .apply()
+    }
+
     fun getLiveMapUpdateIntervalSeconds(context: Context): Long {
         val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS)
