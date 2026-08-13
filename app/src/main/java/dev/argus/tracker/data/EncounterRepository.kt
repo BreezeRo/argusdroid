@@ -7,4 +7,6 @@ interface EncounterRepository {
     suspend fun insertBatch(encounters: List<Encounter>)
     fun observeRecent(limit: Int): Flow<List<Encounter>>
     suspend fun sourceSummarySince(sinceEpochMs: Long): Map<String, Int>
+    suspend fun clearEncounters()
+    suspend fun clearDevices()
 }

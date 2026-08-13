@@ -33,6 +33,9 @@ interface EncounterDao {
         """
     )
     suspend fun aggregateBySourceSince(sinceEpochMs: Long): List<SourceCountRow>
+
+    @Query("DELETE FROM encounters")
+    suspend fun clearAllEncounters()
 }
 
 data class SourceCountRow(

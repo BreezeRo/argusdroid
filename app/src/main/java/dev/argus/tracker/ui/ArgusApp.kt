@@ -1,6 +1,7 @@
 package dev.argus.tracker.ui
 
 import android.net.Uri
+import android.content.ActivityNotFoundException
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -78,6 +79,7 @@ fun ArgusApp() {
     )
     var trackingActive by remember { mutableStateOf(false) }
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
+    var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val summary by viewModel.summary.collectAsState()
@@ -102,6 +104,7 @@ fun ArgusApp() {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
         sensorStatuses = SensorStatusProvider.read(context)
+        readinessItems = DetectionReadinessAdvisor.evaluate(context)
     }
 
     val backStack by navController.currentBackStackEntryAsState()
@@ -151,6 +154,7 @@ fun ArgusApp() {
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
+                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
                         }
                     },
                     onStop = {
@@ -159,6 +163,7 @@ fun ArgusApp() {
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
+                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
                         }
                     },
                     onRefresh = {
@@ -166,6 +171,29 @@ fun ArgusApp() {
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
                             sensorStatuses = SensorStatusProvider.read(context)
+                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                        }
+                    },
+                    onClearEncounters = {
+                        scope.launch {
+                            app.container.repository.clearEncounters()
+                            viewModel.refreshSummary()
+                        }
+                    },
+                    onClearDevices = {
+                        scope.launch {
+                            app.container.repository.clearDevices()
+                            viewModel.refreshSummary()
+                        }
+                    },
+                    readinessItems = readinessItems,
+                    onOpenReadinessSetting = { item ->
+                        runCatching {
+                            context.startActivity(item.settingsIntent)
+                        }.recoverCatching {
+                            context.startActivity(
+                                android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                            )
                         }
                     }
                 )
@@ -222,32 +250,85 @@ private fun SettingsPage(
     summary: List<SourceSummary>,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onClearEncounters: () -> Unit,
+    onClearDevices: () -> Unit,
+    readinessItems: List<DetectionReadinessItem>,
+    onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Argus Settings", style = MaterialTheme.typography.headlineMedium)
-        Text("Tracking controls and source health.")
-        Text(
-            text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
-            fontWeight = FontWeight.Medium
-        )
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (!trackingActive) {
-                Button(onClick = onStart) {
-                    Text("Start Tracking")
+    val missingItems = readinessItems.filter { it.isMissing }
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Text("Argus Settings", style = MaterialTheme.typography.headlineMedium)
+        }
+        item {
+            Text("Tracking controls and source health.")
+        }
+        item {
+            Text(
+                text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
+                fontWeight = FontWeight.Medium
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!trackingActive) {
+                    Button(onClick = onStart) {
+                        Text("Start Tracking")
+                    }
+                }
+                Button(onClick = onStop, enabled = trackingActive) {
+                    Text("Stop")
+                }
+                Button(onClick = onRefresh) {
+                    Text("Refresh")
                 }
             }
-            Button(onClick = onStop, enabled = trackingActive) {
-                Text("Stop")
-            }
-            Button(onClick = onRefresh) {
-                Text("Refresh")
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onClearEncounters) {
+                    Text("Clear Encounters")
+                }
+                Button(onClick = onClearDevices) {
+                    Text("Clear Devices")
+                }
             }
         }
 
-        Text("Sensors", fontWeight = FontWeight.Bold)
-        sensorStatuses.forEach { sensor ->
+        item {
+            Text("Detection Readiness", fontWeight = FontWeight.Bold)
+        }
+        if (missingItems.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("All key permissions and settings are in recommended state.")
+                    }
+                }
+            }
+        } else {
+            items(missingItems) { item ->
+                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(item.title, fontWeight = FontWeight.Bold)
+                        Text("Current: ${item.currentValue}")
+                        Text("Recommended: ${item.recommendedValue}")
+                        Button(onClick = { onOpenReadinessSetting(item) }) {
+                            Text(item.openSettingsLabel)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Text("Sensors", fontWeight = FontWeight.Bold)
+        }
+        items(sensorStatuses) { sensor ->
             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -261,17 +342,17 @@ private fun SettingsPage(
             }
         }
 
-        Text("Last 24h Summary", fontWeight = FontWeight.Bold)
-        LazyColumn(contentPadding = PaddingValues(bottom = 8.dp)) {
-            items(summary) { item ->
-                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(item.source)
-                        Text(item.count.toString())
-                    }
+        item {
+            Text("Last 24h Summary", fontWeight = FontWeight.Bold)
+        }
+        items(summary) { item ->
+            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(item.source)
+                    Text(item.count.toString())
                 }
             }
         }

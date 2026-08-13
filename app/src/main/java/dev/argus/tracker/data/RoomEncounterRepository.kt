@@ -18,4 +18,13 @@ class RoomEncounterRepository(
 
     override suspend fun sourceSummarySince(sinceEpochMs: Long): Map<String, Int> =
         dao.aggregateBySourceSince(sinceEpochMs).associate { it.source to it.count }
+
+    override suspend fun clearEncounters() {
+        dao.clearAllEncounters()
+    }
+
+    override suspend fun clearDevices() {
+        // Devices are currently inferred from encounter history, so this clears device-derived rows.
+        dao.clearAllEncounters()
+    }
 }
