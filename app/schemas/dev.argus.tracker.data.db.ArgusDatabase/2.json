@@ -1,0 +1,152 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "e491142adab98c4f40b1d3757776135c",
+    "entities": [
+      {
+        "tableName": "encounters",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestampEpochMs` INTEGER NOT NULL, `source` TEXT NOT NULL, `primaryId` TEXT NOT NULL, `secondaryId` TEXT, `rssiDbm` INTEGER, `frequencyMhz` INTEGER, `lat` REAL, `lon` REAL, `rawPayloadJson` TEXT NOT NULL, `encounterFingerprint` TEXT, `provenance` TEXT NOT NULL, `provenanceNodeId` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestampEpochMs",
+            "columnName": "timestampEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "primaryId",
+            "columnName": "primaryId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "secondaryId",
+            "columnName": "secondaryId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rssiDbm",
+            "columnName": "rssiDbm",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "frequencyMhz",
+            "columnName": "frequencyMhz",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lat",
+            "columnName": "lat",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "lon",
+            "columnName": "lon",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "rawPayloadJson",
+            "columnName": "rawPayloadJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encounterFingerprint",
+            "columnName": "encounterFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "provenance",
+            "columnName": "provenance",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "provenanceNodeId",
+            "columnName": "provenanceNodeId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_encounters_timestampEpochMs",
+            "unique": false,
+            "columnNames": [
+              "timestampEpochMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encounters_timestampEpochMs` ON `${TABLE_NAME}` (`timestampEpochMs`)"
+          },
+          {
+            "name": "index_encounters_primaryId",
+            "unique": false,
+            "columnNames": [
+              "primaryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encounters_primaryId` ON `${TABLE_NAME}` (`primaryId`)"
+          },
+          {
+            "name": "index_encounters_source",
+            "unique": false,
+            "columnNames": [
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encounters_source` ON `${TABLE_NAME}` (`source`)"
+          },
+          {
+            "name": "index_encounters_encounterFingerprint",
+            "unique": true,
+            "columnNames": [
+              "encounterFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_encounters_encounterFingerprint` ON `${TABLE_NAME}` (`encounterFingerprint`)"
+          },
+          {
+            "name": "index_encounters_provenance",
+            "unique": false,
+            "columnNames": [
+              "provenance"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encounters_provenance` ON `${TABLE_NAME}` (`provenance`)"
+          },
+          {
+            "name": "index_encounters_provenanceNodeId",
+            "unique": false,
+            "columnNames": [
+              "provenanceNodeId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encounters_provenanceNodeId` ON `${TABLE_NAME}` (`provenanceNodeId`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e491142adab98c4f40b1d3757776135c')"
+    ]
+  }
+}
