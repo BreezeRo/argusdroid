@@ -159,6 +159,7 @@ private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val ALERT_LOG_MAX_ENTRIES = 400
+private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
 private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
@@ -4400,19 +4401,28 @@ private fun DetectionMapPage(
     val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
 
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val nearbyVisiblePins = remember(visiblePins, currentLocation) {
+        filterPinsNearCurrentLocation(
+            pins = visiblePins,
+            currentLocation = currentLocation,
+            maxDistanceMeters = MAP_AUTO_FOCUS_MAX_DISTANCE_METERS
+        )
+    }
     var autoPositioned by rememberSaveable { mutableStateOf(false) }
 
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 2f)
     }
 
-    LaunchedEffect(currentLocation, visiblePins, hasMapsApiKey, autoPositioned) {
+    LaunchedEffect(currentLocation, visiblePins, nearbyVisiblePins, hasMapsApiKey, autoPositioned) {
         if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
 
+        val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else visiblePins
+
         when {
-            visiblePins.size > 1 && mapLoaded -> {
+            focusPins.size > 1 && mapLoaded -> {
                 val boundsBuilder = LatLngBounds.Builder()
-                visiblePins.forEach { pin -> boundsBuilder.include(pin.position) }
+                focusPins.forEach { pin -> boundsBuilder.include(pin.position) }
                 val bounds = boundsBuilder.build()
                 runCatching {
                     cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
@@ -4421,10 +4431,10 @@ private fun DetectionMapPage(
                 }
             }
 
-            visiblePins.size == 1 -> {
+            focusPins.size == 1 -> {
                 runCatching {
                     cameraPositionState.move(
-                        CameraUpdateFactory.newLatLngZoom(visiblePins.first().position, 13f)
+                        CameraUpdateFactory.newLatLngZoom(focusPins.first().position, 13f)
                     )
                 }.onFailure {
                     mapError = "Failed to center on pin: ${it.message ?: "unknown error"}"
@@ -5686,6 +5696,26 @@ private fun distanceFromLocationMeters(
     val result = FloatArray(1)
     android.location.Location.distanceBetween(fromLat, fromLon, toLat!!, toLon!!, result)
     return result[0].toDouble()
+}
+
+private fun filterPinsNearCurrentLocation(
+    pins: List<MapPin>,
+    currentLocation: DetectionLocation?,
+    maxDistanceMeters: Double
+): List<MapPin> {
+    if (pins.isEmpty() || currentLocation == null || maxDistanceMeters <= 0.0) {
+        return pins
+    }
+
+    return pins.filter { pin ->
+        val distance = distanceFromLocationMeters(
+            fromLat = currentLocation.lat,
+            fromLon = currentLocation.lon,
+            toLat = pin.position.latitude,
+            toLon = pin.position.longitude
+        )
+        distance != null && distance <= maxDistanceMeters
+    }
 }
 
 private fun distanceForEncounterMeters(
