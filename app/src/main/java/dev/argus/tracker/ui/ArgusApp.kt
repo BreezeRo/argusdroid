@@ -53,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -85,6 +86,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.delay
 import org.json.JSONObject
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 private enum class DataScope {
     RECENT_100,
@@ -126,6 +132,24 @@ private data class SensorGateSettings(
     val bluetoothEnabled: Boolean,
     val cellularEnabled: Boolean,
     val remoteIdEnabled: Boolean
+)
+
+private data class InferredDeviceLocation(
+    val lat: Double,
+    val lon: Double,
+    val estimatedRangeMeters: Double?
+)
+
+private data class DeviceLocationCandidate(
+    val source: String,
+    val primaryId: String,
+    val secondaryId: String?,
+    val latestTimestampEpochMs: Long,
+    val seenCount: Int,
+    val encounters: List<Encounter>,
+    val approximateLocation: DetectionLocation? = null,
+    val approximateMethod: String? = null,
+    val approximateRangeMeters: Double? = null
 )
 
 private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
@@ -325,6 +349,16 @@ fun ArgusApp() {
                 DetectionPage(
                     readinessItems = readinessItems,
                     encounters = recent,
+                    onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
+                        navController.navigate(
+                            "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
+                        )
+                    },
+                    onDeviceMapPinClick = { source, primaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        )
+                    },
                     onRefresh = {
                         readinessItems = DetectionReadinessAdvisor.evaluate(context)
                     },
@@ -611,15 +645,16 @@ private fun AppSettingsPage(
 private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
+    onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
+    onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
-    var encounterPinLimit by rememberSaveable { mutableStateOf(100) }
-    var devicePinLimit by rememberSaveable { mutableStateOf(100) }
-    var cellDevicePinLimit by rememberSaveable { mutableStateOf(100) }
-    val tabs = listOf("Readiness", "Encounters Map", "Devices Map", "Device Location Map")
+    var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
+    var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
+    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map")
 
     val encounterPins = remember(encounters) {
         encounters
@@ -634,7 +669,10 @@ private fun DetectionPage(
                         position = LatLng(lat!!, lon!!),
                         title = "${encounter.source} • ${encounter.primaryId}",
                         snippet = formatEpoch(encounter.timestampEpochMs),
-                        timestampEpochMs = encounter.timestampEpochMs
+                        timestampEpochMs = encounter.timestampEpochMs,
+                        source = encounter.source.name,
+                        primaryId = encounter.primaryId,
+                        encounterTimestampEpochMs = encounter.timestampEpochMs
                     )
                 }
             }
@@ -642,45 +680,136 @@ private fun DetectionPage(
             .toList()
     }
 
-    val devicePins = remember(encounters) {
-        encounters
-            .groupBy { "${it.source.name}|${it.primaryId}" }
-            .mapNotNull { (_, deviceEncounters) ->
-                val latestWithLocation = deviceEncounters
-                    .filter { isValidLatLon(it.lat, it.lon) }
-                    .maxByOrNull { it.timestampEpochMs }
-                    ?: return@mapNotNull null
-
-                MapPin(
-                    position = LatLng(latestWithLocation.lat!!, latestWithLocation.lon!!),
-                    title = "${latestWithLocation.source} • ${latestWithLocation.primaryId}",
-                    snippet = "Seen ${deviceEncounters.size} times • Last ${formatEpoch(latestWithLocation.timestampEpochMs)}",
-                    timestampEpochMs = latestWithLocation.timestampEpochMs
-                )
-            }
-            .sortedByDescending { it.timestampEpochMs }
-    }
-
-    val cellDevicePins = remember(encounters) {
+    val allDeviceCandidates = remember(encounters) {
         encounters
             .asSequence()
-            .filter { it.source == EncounterSource.CELL }
-            .groupBy { it.primaryId }
+            .groupBy { "${it.source.name}|${it.primaryId}" }
             .mapNotNull { (_, deviceEncounters) ->
-                val latestWithLocation = deviceEncounters
-                    .filter { isValidLatLon(it.lat, it.lon) }
-                    .maxByOrNull { it.timestampEpochMs }
-                    ?: return@mapNotNull null
-
-                MapPin(
-                    position = LatLng(latestWithLocation.lat!!, latestWithLocation.lon!!),
-                    title = "${listSourceLabel(latestWithLocation.source.name, latestWithLocation.secondaryId)} • ${latestWithLocation.primaryId}",
-                    snippet = "Seen ${deviceEncounters.size} times • Last ${formatEpoch(latestWithLocation.timestampEpochMs)}",
-                    timestampEpochMs = latestWithLocation.timestampEpochMs
+                val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+                DeviceLocationCandidate(
+                    source = latest.source.name,
+                    primaryId = latest.primaryId,
+                    secondaryId = latest.secondaryId,
+                    latestTimestampEpochMs = latest.timestampEpochMs,
+                    seenCount = deviceEncounters.size,
+                    encounters = deviceEncounters
                 )
             }
-            .sortedByDescending { it.timestampEpochMs }
-            .toList()
+            .sortedByDescending { it.latestTimestampEpochMs }
+    }
+
+    val deviceLocationLookupKey = remember(allDeviceCandidates) {
+        allDeviceCandidates.joinToString(separator = "|") { candidate ->
+            "${candidate.source}:${candidate.primaryId}:${candidate.latestTimestampEpochMs}:${candidate.seenCount}"
+        }
+    }
+    var estimatedDeviceLocationPins by remember { mutableStateOf(emptyList<MapPin>()) }
+
+    LaunchedEffect(deviceLocationLookupKey) {
+        if (allDeviceCandidates.isEmpty()) {
+            estimatedDeviceLocationPins = emptyList()
+            return@LaunchedEffect
+        }
+
+        val resolvedCandidates = buildList {
+            allDeviceCandidates.forEach { candidate ->
+                val latest = candidate.encounters.maxByOrNull { it.timestampEpochMs } ?: return@forEach
+                val sourceEnum = runCatching { EncounterSource.valueOf(candidate.source) }
+                    .getOrDefault(EncounterSource.UNKNOWN_RF)
+
+                val resolvedCandidate = when (sourceEnum) {
+                    EncounterSource.CELL -> {
+                        val lookup = CellTowerLookupService.lookup(latest)
+                        when (lookup) {
+                            is TowerLookupResult.Success -> {
+                                val estimate = lookup.estimate
+                                if (!isValidLatLon(estimate.latitude, estimate.longitude)) {
+                                    null
+                                } else {
+                                    candidate.copy(
+                                        approximateLocation = DetectionLocation(estimate.latitude, estimate.longitude),
+                                        approximateMethod = estimate.provider,
+                                        approximateRangeMeters = null
+                                    )
+                                }
+                            }
+
+                            is TowerLookupResult.Failure -> {
+                                if (isValidLatLon(latest.lat, latest.lon)) {
+                                    candidate.copy(
+                                        approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
+                                        approximateMethod = "Observed encounter location fallback",
+                                        approximateRangeMeters = null
+                                    )
+                                } else {
+                                    null
+                                }
+                            }
+                        }
+                    }
+
+                    EncounterSource.WIFI,
+                    EncounterSource.BLUETOOTH_LE -> {
+                        val inferred = inferLikelyDeviceLocation(candidate.encounters)
+                        if (inferred != null && isValidLatLon(inferred.lat, inferred.lon)) {
+                            candidate.copy(
+                                approximateLocation = DetectionLocation(inferred.lat, inferred.lon),
+                                approximateMethod = "Inferred from range + movement",
+                                approximateRangeMeters = inferred.estimatedRangeMeters
+                            )
+                        } else if (isValidLatLon(latest.lat, latest.lon)) {
+                            candidate.copy(
+                                approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
+                                approximateMethod = "Observed encounter location fallback",
+                                approximateRangeMeters = estimateRangeMeters(latest)
+                            )
+                        } else {
+                            null
+                        }
+                    }
+
+                    else -> {
+                        if (isValidLatLon(latest.lat, latest.lon)) {
+                            candidate.copy(
+                                approximateLocation = DetectionLocation(latest.lat!!, latest.lon!!),
+                                approximateMethod = "Observed encounter location",
+                                approximateRangeMeters = null
+                            )
+                        } else {
+                            null
+                        }
+                    }
+                }
+
+                if (resolvedCandidate != null) {
+                    add(resolvedCandidate)
+                }
+            }
+        }
+
+        val resolvedPins = resolvedCandidates.mapNotNull { candidate ->
+            val location = candidate.approximateLocation ?: return@mapNotNull null
+            if (!isValidLatLon(location.lat, location.lon)) return@mapNotNull null
+
+            val rangeSnippet = candidate.approximateRangeMeters
+                ?.let { " • Approx range ${formatDistanceFeetMiles(it)}" }
+                .orEmpty()
+            val methodSnippet = candidate.approximateMethod
+                ?.let { "$it" }
+                ?: "Approx location"
+
+            MapPin(
+                position = LatLng(location.lat, location.lon),
+                title = "${listSourceLabel(candidate.source, candidate.secondaryId)} • ${candidate.primaryId}",
+                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet",
+                timestampEpochMs = candidate.latestTimestampEpochMs,
+                source = candidate.source,
+                primaryId = candidate.primaryId,
+                encounterTimestampEpochMs = null
+            )
+        }
+
+        estimatedDeviceLocationPins = resolvedPins
     }
 
     Column(
@@ -737,29 +866,27 @@ private fun DetectionPage(
             }
         } else if (selectedTab == 1) {
             DetectionMapPage(
-                mapTitle = "Encounters Map",
+                mapTitle = "Device Encounters Map",
                 mapDescription = "Pins show individual encounter points.",
                 pins = encounterPins,
                 pinLimit = encounterPinLimit,
                 onPinLimitChange = { encounterPinLimit = it },
-                onLiveCollect = onLiveCollect
-            )
-        } else if (selectedTab == 2) {
-            DetectionMapPage(
-                mapTitle = "Devices Map",
-                mapDescription = "Pins show latest known location per unique device.",
-                pins = devicePins,
-                pinLimit = devicePinLimit,
-                onPinLimitChange = { devicePinLimit = it },
+                onPinDetailsClick = { pin ->
+                    val timestamp = pin.encounterTimestampEpochMs ?: return@DetectionMapPage
+                    onEncounterMapPinClick(pin.source, pin.primaryId, timestamp)
+                },
                 onLiveCollect = onLiveCollect
             )
         } else {
             DetectionMapPage(
                 mapTitle = "Device Location Map",
-                mapDescription = "Pins show latest known location per unique cellular device.",
-                pins = cellDevicePins,
+                mapDescription = "Pins show estimated cell tower locations and inferred Wi-Fi/BLE device locations.",
+                pins = estimatedDeviceLocationPins,
                 pinLimit = cellDevicePinLimit,
                 onPinLimitChange = { cellDevicePinLimit = it },
+                onPinDetailsClick = { pin ->
+                    onDeviceMapPinClick(pin.source, pin.primaryId)
+                },
                 onLiveCollect = onLiveCollect
             )
         }
@@ -767,12 +894,14 @@ private fun DetectionPage(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
     pins: List<MapPin>,
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
+    onPinDetailsClick: (MapPin) -> Unit,
     onLiveCollect: suspend () -> String
 ) {
     val pinLimitOptions = listOf(100, 250, 500, 1000)
@@ -781,15 +910,16 @@ private fun DetectionMapPage(
     val mapsApiKeyDiagnostic = remember(context) { getMapsApiKeyDiagnostic(context) }
     val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
     val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
-    var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var controlsVisible by rememberSaveable { mutableStateOf(false) }
     var pinLimitExpanded by remember { mutableStateOf(false) }
     var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
-    var liveModeEnabled by rememberSaveable { mutableStateOf(false) }
+    var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
     var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
     val visiblePins = remember(pins, pinLimit) { pins.take(pinLimit) }
+    val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
 
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var autoPositioned by rememberSaveable { mutableStateOf(false) }
@@ -890,12 +1020,42 @@ private fun DetectionMapPage(
                 Text(mapTitle, fontWeight = FontWeight.Bold)
                 Text(mapDescription)
             }
-            Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
-                Text("Panels")
-                Switch(
-                    checked = controlsVisible,
-                    onCheckedChange = { controlsVisible = it }
-                )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                if (liveModeEnabled) {
+                    Text(
+                        text = "● LIVE",
+                        color = Color(0xFF2E7D32),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                    Text("Panels")
+                    Switch(
+                        checked = controlsVisible,
+                        onCheckedChange = { controlsVisible = it }
+                    )
+                }
+            }
+        }
+        if (legendItems.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        legendItems.forEach { item ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("●", color = item.color)
+                                Text(item.label)
+                            }
+                        }
+                    }
+                }
             }
         }
         if (!hasMapsApiKey) {
@@ -1022,7 +1182,11 @@ private fun DetectionMapPage(
                         Marker(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
-                            snippet = pin.snippet
+                            snippet = pin.snippet,
+                            icon = BitmapDescriptorFactory.defaultMarker(markerHueForSource(pin.source)),
+                            onInfoWindowClick = {
+                                onPinDetailsClick(pin)
+                            }
                         )
                     }
                 }
@@ -1035,8 +1199,57 @@ private data class MapPin(
     val position: LatLng,
     val title: String,
     val snippet: String,
-    val timestampEpochMs: Long
+    val timestampEpochMs: Long,
+    val source: String,
+    val primaryId: String,
+    val encounterTimestampEpochMs: Long?
 )
+
+private data class PinLegendItem(
+    val label: String,
+    val color: Color
+)
+
+private fun markerHueForSource(source: String): Float = when (source) {
+    "CELL" -> BitmapDescriptorFactory.HUE_AZURE
+    "WIFI" -> BitmapDescriptorFactory.HUE_ORANGE
+    "BLUETOOTH_LE" -> BitmapDescriptorFactory.HUE_GREEN
+    "REMOTE_ID" -> BitmapDescriptorFactory.HUE_VIOLET
+    "UNKNOWN_RF" -> BitmapDescriptorFactory.HUE_ROSE
+    else -> BitmapDescriptorFactory.HUE_RED
+}
+
+private fun markerLegendColorForSource(source: String): Color = when (source) {
+    "CELL" -> Color(0xFF1E88E5)
+    "WIFI" -> Color(0xFFFB8C00)
+    "BLUETOOTH_LE" -> Color(0xFF43A047)
+    "REMOTE_ID" -> Color(0xFF8E24AA)
+    "UNKNOWN_RF" -> Color(0xFFE91E63)
+    else -> Color(0xFFD32F2F)
+}
+
+private fun markerLegendLabelForSource(source: String): String = when (source) {
+    "CELL" -> "CELL TOWER"
+    "WIFI" -> "WIFI"
+    "BLUETOOTH_LE" -> "BLUETOOTH LE"
+    "REMOTE_ID" -> "REMOTE ID"
+    "UNKNOWN_RF" -> "UNKNOWN RF"
+    else -> source
+}
+
+private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
+    val preferredOrder = listOf("CELL", "WIFI", "BLUETOOTH_LE", "REMOTE_ID", "UNKNOWN_RF")
+    val sourcesInPins = pins.map { it.source }.toSet()
+    val orderedSources = preferredOrder.filter { it in sourcesInPins } +
+        sourcesInPins.filterNot { it in preferredOrder }.sorted()
+
+    return orderedSources.map { source ->
+        PinLegendItem(
+            label = markerLegendLabelForSource(source),
+            color = markerLegendColorForSource(source)
+        )
+    }
+}
 
 private fun isValidLatLon(lat: Double?, lon: Double?): Boolean {
     if (lat == null || lon == null) return false
@@ -1262,6 +1475,216 @@ private fun formatTowerRangeFeetMiles(
     return String.format(Locale.US, "%.2f mi (%.0f ft)", miles, feet)
 }
 
+private fun formatDistanceFeetMiles(meters: Double): String {
+    val safeMeters = meters.coerceAtLeast(0.0)
+    val miles = safeMeters / 1609.344
+    val feet = safeMeters / 0.3048
+    return String.format(Locale.US, "%.2f mi (%.0f ft)", miles, feet)
+}
+
+private fun distanceFromLocationMeters(
+    fromLat: Double,
+    fromLon: Double,
+    toLat: Double?,
+    toLon: Double?
+): Double? {
+    if (!isValidLatLon(toLat, toLon)) return null
+    val result = FloatArray(1)
+    android.location.Location.distanceBetween(fromLat, fromLon, toLat!!, toLon!!, result)
+    return result[0].toDouble()
+}
+
+private fun distanceForEncounterMeters(
+    encounter: Encounter,
+    currentLocation: DetectionLocation?
+): Double? {
+    // Prefer radio-derived proximity estimates for local radios.
+    val estimatedRange = estimateRangeMeters(encounter)
+    if (estimatedRange != null) return estimatedRange
+
+    return currentLocation?.let {
+        distanceFromLocationMeters(
+            fromLat = it.lat,
+            fromLon = it.lon,
+            toLat = encounter.lat,
+            toLon = encounter.lon
+        )
+    }
+}
+
+private fun distanceForDeviceMeters(
+    device: DeviceItem,
+    currentLocation: DetectionLocation?
+): Double? {
+    val pseudoEncounter = Encounter(
+        timestampEpochMs = device.lastSeenEpochMs,
+        source = runCatching { EncounterSource.valueOf(device.source) }.getOrDefault(EncounterSource.UNKNOWN_RF),
+        primaryId = device.primaryId,
+        secondaryId = device.secondaryId,
+        rssiDbm = device.lastRssiDbm,
+        frequencyMhz = device.lastFrequencyMhz,
+        lat = device.lastLat,
+        lon = device.lastLon,
+        rawPayloadJson = device.lastRawPayloadJson ?: "{}"
+    )
+    return distanceForEncounterMeters(pseudoEncounter, currentLocation)
+}
+
+private fun estimateWifiRangeMeters(encounter: Encounter): Double? {
+    val rssi = encounter.rssiDbm ?: return null
+    if (rssi >= 0) return null
+    val frequencyMhz = encounter.frequencyMhz?.toDouble() ?: 2412.0
+    if (frequencyMhz <= 0.0) return null
+
+    // RSSI-distance approximation with potentially high variance in dense environments.
+    val estimate = 10.0.pow((27.55 - (20.0 * log10(frequencyMhz)) + abs(rssi.toDouble())) / 20.0)
+    if (!estimate.isFinite()) return null
+    return estimate.coerceIn(1.0, 3000.0)
+}
+
+private fun estimateBleRangeMeters(encounter: Encounter): Double? {
+    val rssi = encounter.rssiDbm ?: return null
+    if (rssi >= 0) return null
+
+    val payload = runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
+    val txPower = payload?.opt("txPower")
+        ?.let { value ->
+            when (value) {
+                is Number -> value.toInt()
+                else -> value.toString().toIntOrNull()
+            }
+        }
+        ?.takeIf { it in -127..20 }
+        ?: -59
+
+    val pathLossExponent = 2.2
+    val estimate = 10.0.pow((txPower - rssi).toDouble() / (10.0 * pathLossExponent))
+    if (!estimate.isFinite()) return null
+    return estimate.coerceIn(1.0, 3000.0)
+}
+
+private fun estimateRangeMeters(encounter: Encounter): Double? = when (encounter.source) {
+    EncounterSource.WIFI -> estimateWifiRangeMeters(encounter)
+    EncounterSource.BLUETOOTH_LE -> estimateBleRangeMeters(encounter)
+    else -> null
+}
+
+private fun inferLikelyDeviceLocation(encounters: List<Encounter>): InferredDeviceLocation? {
+    data class RangeObservation(
+        val lat: Double,
+        val lon: Double,
+        val rangeMeters: Double
+    )
+
+    val observations = encounters.mapNotNull { encounter ->
+        if (!isValidLatLon(encounter.lat, encounter.lon)) return@mapNotNull null
+        val rangeMeters = estimateRangeMeters(encounter) ?: return@mapNotNull null
+        RangeObservation(encounter.lat!!, encounter.lon!!, rangeMeters)
+    }
+
+    if (observations.isEmpty()) return null
+    if (observations.size == 1) {
+        val single = observations.first()
+        return InferredDeviceLocation(single.lat, single.lon, single.rangeMeters)
+    }
+
+    val refLat = observations.map { it.lat }.average()
+    val refLon = observations.map { it.lon }.average()
+    val refLatRad = Math.toRadians(refLat)
+    val metersPerDegLat = 111_132.0
+    val metersPerDegLon = 111_320.0 * cos(refLatRad)
+
+    data class LocalObs(
+        val x: Double,
+        val y: Double,
+        val range: Double,
+        val weight: Double
+    )
+
+    val localObs = observations.map { obs ->
+        LocalObs(
+            x = (obs.lon - refLon) * metersPerDegLon,
+            y = (obs.lat - refLat) * metersPerDegLat,
+            range = obs.rangeMeters,
+            weight = 1.0 / obs.rangeMeters.coerceAtLeast(1.0)
+        )
+    }
+
+    fun objective(x: Double, y: Double): Double {
+        var total = 0.0
+        localObs.forEach { obs ->
+            val dx = x - obs.x
+            val dy = y - obs.y
+            val dist = sqrt(dx * dx + dy * dy)
+            val err = dist - obs.range
+            total += obs.weight * err * err
+        }
+        return total
+    }
+
+    val initialWeightTotal = localObs.sumOf { it.weight }
+    var x = if (initialWeightTotal > 0.0) {
+        localObs.sumOf { it.x * it.weight } / initialWeightTotal
+    } else {
+        0.0
+    }
+    var y = if (initialWeightTotal > 0.0) {
+        localObs.sumOf { it.y * it.weight } / initialWeightTotal
+    } else {
+        0.0
+    }
+
+    var step = localObs.map { it.range }.average().coerceAtLeast(20.0)
+    var bestScore = objective(x, y)
+    repeat(80) {
+        val candidates = listOf(
+            x to y,
+            x + step to y,
+            x - step to y,
+            x to y + step,
+            x to y - step,
+            x + step to y + step,
+            x + step to y - step,
+            x - step to y + step,
+            x - step to y - step
+        )
+
+        var moved = false
+        candidates.forEach { (cx, cy) ->
+            val score = objective(cx, cy)
+            if (score < bestScore) {
+                bestScore = score
+                x = cx
+                y = cy
+                moved = true
+            }
+        }
+
+        step = if (moved) {
+            step * 0.92
+        } else {
+            step * 0.70
+        }
+        if (step < 1.0) return@repeat
+    }
+
+    val inferredLat = refLat + (y / metersPerDegLat)
+    val inferredLon = refLon + (x / metersPerDegLon)
+    if (!isValidLatLon(inferredLat, inferredLon)) return null
+
+    val approxRange = localObs.map {
+        val dx = x - it.x
+        val dy = y - it.y
+        sqrt(dx * dx + dy * dy)
+    }.average()
+
+    return InferredDeviceLocation(
+        lat = inferredLat,
+        lon = inferredLon,
+        estimatedRangeMeters = if (approxRange.isFinite()) approxRange else null
+    )
+}
+
 private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
     val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
         ?: return false
@@ -1277,11 +1700,15 @@ private fun DevicesPage(
     allEncounters: List<Encounter>,
     onDeviceClick: (DeviceItem) -> Unit
 ) {
+    val context = LocalContext.current
+    val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
     var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
+    var showDistance by rememberSaveable { mutableStateOf(false) }
+    var sortByDistance by rememberSaveable { mutableStateOf(false) }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val devices = remember(selectedEncounters, sortMode) { buildDeviceItems(selectedEncounters, sortMode) }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
@@ -1292,6 +1719,16 @@ private fun DevicesPage(
                 device.primaryId.contains(queryFilter, ignoreCase = true) ||
                 (device.secondaryId?.contains(queryFilter, ignoreCase = true) == true)
             sourceMatches && queryMatches
+        }
+    }
+    val displayedDevices = remember(filteredDevices, showDistance, sortByDistance, currentLocation) {
+        if (!showDistance || !sortByDistance) {
+            filteredDevices
+        } else {
+            filteredDevices.sortedWith(
+                compareByDescending<DeviceItem> { distanceForDeviceMeters(it, currentLocation) ?: Double.MIN_VALUE }
+                    .thenByDescending { it.lastSeenEpochMs }
+            )
         }
     }
 
@@ -1334,10 +1771,29 @@ private fun DevicesPage(
                     onCheckedChange = { showSecondaryIds = it }
                 )
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Show Distance")
+                Switch(
+                    checked = showDistance,
+                    onCheckedChange = {
+                        showDistance = it
+                        if (!it) sortByDistance = false
+                    }
+                )
+            }
+            if (showDistance) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Sort by Distance")
+                    Switch(
+                        checked = sortByDistance,
+                        onCheckedChange = { sortByDistance = it }
+                    )
+                }
+            }
         }
-        Text("Showing ${filteredDevices.size} of ${devices.size}")
+        Text("Showing ${displayedDevices.size} of ${devices.size}")
         LazyColumn {
-            items(filteredDevices) { device ->
+            items(displayedDevices) { device ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1348,6 +1804,12 @@ private fun DevicesPage(
                         Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
                         if (showSecondaryIds && supportsSecondaryIdInList(device.source) && !device.secondaryId.isNullOrBlank()) {
                             Text("${secondaryIdLabel(device.source)}: ${device.secondaryId}")
+                        }
+                        if (showDistance) {
+                            val distanceMeters = distanceForDeviceMeters(device, currentLocation)
+                            Text(
+                                "Distance: ${distanceMeters?.let(::formatDistanceFeetMiles) ?: "n/a"}"
+                            )
                         }
                         Text("Seen ${device.seenCount} times")
                         Text("Last seen ${formatEpoch(device.lastSeenEpochMs)}")
@@ -1365,10 +1827,14 @@ private fun EncountersPage(
     allEncounters: List<Encounter>,
     onEncounterClick: (Encounter) -> Unit
 ) {
+    val context = LocalContext.current
+    val currentLocation = remember { LocationSnapshotProvider.read(context) }
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
     var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
+    var showDistance by rememberSaveable { mutableStateOf(false) }
+    var sortByDistance by rememberSaveable { mutableStateOf(false) }
     val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val sourceOptions = remember(encounters) { encounters.map { it.source.name }.distinct().sorted() }
     val filteredEncounters = remember(encounters, sourceFilter, queryFilter) {
@@ -1379,6 +1845,16 @@ private fun EncountersPage(
                 (encounter.secondaryId?.contains(queryFilter, ignoreCase = true) == true) ||
                 encounter.rawPayloadJson.contains(queryFilter, ignoreCase = true)
             sourceMatches && queryMatches
+        }
+    }
+    val displayedEncounters = remember(filteredEncounters, showDistance, sortByDistance, currentLocation) {
+        if (!showDistance || !sortByDistance) {
+            filteredEncounters
+        } else {
+            filteredEncounters.sortedWith(
+                compareByDescending<Encounter> { distanceForEncounterMeters(it, currentLocation) ?: Double.MIN_VALUE }
+                    .thenByDescending { it.timestampEpochMs }
+            )
         }
     }
 
@@ -1417,10 +1893,29 @@ private fun EncountersPage(
                     onCheckedChange = { showSecondaryIds = it }
                 )
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Show Distance")
+                Switch(
+                    checked = showDistance,
+                    onCheckedChange = {
+                        showDistance = it
+                        if (!it) sortByDistance = false
+                    }
+                )
+            }
+            if (showDistance) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Sort by Distance")
+                    Switch(
+                        checked = sortByDistance,
+                        onCheckedChange = { sortByDistance = it }
+                    )
+                }
+            }
         }
-        Text("Showing ${filteredEncounters.size} of ${encounters.size}")
+        Text("Showing ${displayedEncounters.size} of ${encounters.size}")
         LazyColumn {
-            items(filteredEncounters) { encounter ->
+            items(displayedEncounters) { encounter ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1435,6 +1930,12 @@ private fun EncountersPage(
                             !encounter.secondaryId.isNullOrBlank()
                         ) {
                             Text("${secondaryIdLabel(encounter.source.name)}: ${encounter.secondaryId}")
+                        }
+                        if (showDistance) {
+                            val distanceMeters = distanceForEncounterMeters(encounter, currentLocation)
+                            Text(
+                                "Distance: ${distanceMeters?.let(::formatDistanceFeetMiles) ?: "n/a"}"
+                            )
                         }
                         Text("RSSI=${encounter.rssiDbm ?: "n/a"} dBm, Freq=${encounter.frequencyMhz ?: "n/a"} MHz")
                         Text(formatEpoch(encounter.timestampEpochMs))
@@ -1644,11 +2145,23 @@ private fun SourceSpecificDetailsSection(
     currentLocation: DetectionLocation?
 ) {
     val scope = rememberCoroutineScope()
-    var lookupInProgress by remember(encounter.primaryId, encounter.timestampEpochMs) { mutableStateOf(false) }
-    var lookupResult by remember(encounter.primaryId, encounter.timestampEpochMs) { mutableStateOf<TowerLookupResult?>(null) }
+    // Keep lookup result stable while viewing a device/encounter identity, even if fresh scans update timestamps.
+    var lookupInProgress by remember(encounter.source, encounter.primaryId) { mutableStateOf(false) }
+    var lookupResult by remember(encounter.source, encounter.primaryId) { mutableStateOf<TowerLookupResult?>(null) }
+    var autoLookupAttempted by remember(encounter.source, encounter.primaryId) { mutableStateOf(false) }
     val details = remember(encounter) { sourceSpecificDetails(encounter) }
     val sectionTitle = details.first
     val sectionFields = details.second
+
+    LaunchedEffect(encounter.source, encounter.primaryId) {
+        if (encounter.source != EncounterSource.CELL) return@LaunchedEffect
+        if (autoLookupAttempted || lookupInProgress || lookupResult != null) return@LaunchedEffect
+
+        autoLookupAttempted = true
+        lookupInProgress = true
+        lookupResult = CellTowerLookupService.lookup(encounter)
+        lookupInProgress = false
+    }
 
     Text(sectionTitle, fontWeight = FontWeight.Bold)
     if (sectionFields.isEmpty()) {
@@ -1657,6 +2170,14 @@ private fun SourceSpecificDetailsSection(
         sectionFields.forEach { (label, value) ->
             DetailRow(label, value)
         }
+    }
+
+    if (encounter.source == EncounterSource.WIFI || encounter.source == EncounterSource.BLUETOOTH_LE) {
+        val estimatedRange = estimateRangeMeters(encounter)
+        DetailRow(
+            "Approx Range",
+            estimatedRange?.let(::formatDistanceFeetMiles) ?: "n/a"
+        )
     }
 
     if (encounter.source == EncounterSource.CELL) {
@@ -1670,7 +2191,12 @@ private fun SourceSpecificDetailsSection(
                 }
             }
         ) {
-            Text(if (lookupInProgress) "Looking up tower..." else "Estimate Tower Location")
+            val label = when {
+                lookupInProgress -> "Looking up tower..."
+                lookupResult != null -> "Refresh Tower Estimate"
+                else -> "Estimate Tower Location"
+            }
+            Text(label)
         }
 
         when (val result = lookupResult) {

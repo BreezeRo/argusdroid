@@ -9,6 +9,7 @@ import android.telephony.CellInfoGsm
 import android.telephony.CellInfoLte
 import android.telephony.CellInfoNr
 import android.telephony.CellInfoWcdma
+import android.telephony.CellIdentityNr
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -100,32 +101,24 @@ class CellularScanner(
             }
 
             is CellInfoNr -> {
-                val id = cellIdentity
-                val nci = runCatching {
-                    id.javaClass.getMethod("getNci").invoke(id) as Long
-                }.getOrElse {
-                    Long.MAX_VALUE
-                }
-                val pci = runCatching {
-                    id.javaClass.getMethod("getPci").invoke(id) as Int
-                }.getOrElse {
-                    Int.MAX_VALUE
-                }
-                val tac = runCatching {
-                    id.javaClass.getMethod("getTac").invoke(id) as Int
-                }.getOrElse {
-                    Int.MAX_VALUE
-                }
-                val nrarfcn = runCatching {
-                    id.javaClass.getMethod("getNrarfcn").invoke(id) as Int
-                }.getOrElse {
-                    Int.MAX_VALUE
-                }
+                val id = cellIdentity as? CellIdentityNr ?: return null
+                val nci = runCatching { id.nci }.getOrNull()
+                    ?: runCatching { id.javaClass.getMethod("getNci").invoke(id) as Long }.getOrNull()
+                    ?: Long.MAX_VALUE
+                val pci = runCatching { id.pci }.getOrNull()
+                    ?: runCatching { id.javaClass.getMethod("getPci").invoke(id) as Int }.getOrNull()
+                    ?: Int.MAX_VALUE
+                val tac = runCatching { id.tac }.getOrNull()
+                    ?: runCatching { id.javaClass.getMethod("getTac").invoke(id) as Int }.getOrNull()
+                    ?: Int.MAX_VALUE
+                val nrarfcn = runCatching { id.nrarfcn }.getOrNull()
+                    ?: runCatching { id.javaClass.getMethod("getNrarfcn").invoke(id) as Int }.getOrNull()
+                    ?: Int.MAX_VALUE
                 val mcc = runCatching {
-                    id.javaClass.getMethod("getMccString").invoke(id) as String?
+                    id.mccString
                 }.getOrNull()
                 val mnc = runCatching {
-                    id.javaClass.getMethod("getMncString").invoke(id) as String?
+                    id.mncString
                 }.getOrNull()
                 val asu = runCatching {
                     cellSignalStrength.javaClass.getMethod("getAsuLevel").invoke(cellSignalStrength) as Int

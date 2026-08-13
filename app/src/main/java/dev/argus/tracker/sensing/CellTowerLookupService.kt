@@ -34,9 +34,19 @@ object CellTowerLookupService {
 
         val requestBody = runCatching { buildRequestBody(encounter) }
             .getOrElse { error ->
-                return@withContext TowerLookupResult.Failure(
-                    error.message ?: "Unable to build tower lookup payload."
-                )
+                val reason = error.message ?: "Unable to build tower lookup payload."
+                val isMissingNrIds = reason.contains("Missing NR tower identifiers", ignoreCase = true)
+                if (isMissingNrIds && encounter.lat != null && encounter.lon != null) {
+                    return@withContext TowerLookupResult.Success(
+                        TowerLocationEstimate(
+                            latitude = encounter.lat,
+                            longitude = encounter.lon,
+                            accuracyMeters = null,
+                            provider = "Encounter location fallback (NR IDs unavailable)"
+                        )
+                    )
+                }
+                return@withContext TowerLookupResult.Failure(reason)
             }
 
         val connection = (URL(MLS_LOOKUP_URL).openConnection() as HttpURLConnection).apply {
@@ -109,53 +119,84 @@ object CellTowerLookupService {
         }
 
         val tower = JSONObject()
+        val primaryIdParts = encounter.primaryId.split(':')
 
         when (radio) {
             "LTE" -> {
-                val ci = payload.optLong("ci", Long.MIN_VALUE)
-                val tac = payload.optInt("tac", Int.MIN_VALUE)
-                if (ci == Long.MIN_VALUE || tac == Int.MIN_VALUE) {
+                val ci = extractLong(payload, "ci")
+                    ?: primaryIdParts.getOrNull(1)?.toLongOrNull()
+                val tac = extractInt(payload, "tac")
+                    ?: primaryIdParts.getOrNull(3)?.toIntOrNull()
+
+                if (ci != null) {
+                    tower.put("cellId", ci)
+                }
+                if (tac != null) {
+                    tower.put("locationAreaCode", tac)
+                }
+                if (ci == null && tac == null) {
                     throw IllegalArgumentException("Missing LTE tower identifiers (ci/tac).")
                 }
-                tower.put("cellId", ci)
-                tower.put("locationAreaCode", tac)
             }
 
             "NR" -> {
-                val nci = payload.optLong("nci", Long.MIN_VALUE)
-                val tac = payload.optInt("tac", Int.MIN_VALUE)
-                if (nci == Long.MIN_VALUE || tac == Int.MIN_VALUE) {
-                    throw IllegalArgumentException("Missing NR tower identifiers (nci/tac).")
+                val nci = extractLong(payload, "nci")
+                    ?: primaryIdParts.getOrNull(1)?.toLongOrNull()
+                val tac = extractInt(payload, "tac")
+                    ?: primaryIdParts.getOrNull(3)?.toIntOrNull()
+
+                if (nci != null) {
+                    tower.put("cellId", nci)
                 }
-                tower.put("cellId", nci)
-                tower.put("locationAreaCode", tac)
+                if (tac != null) {
+                    tower.put("locationAreaCode", tac)
+                }
+                if (nci == null && tac == null) {
+                    throw IllegalArgumentException(
+                        "Missing NR tower identifiers (nci/tac). primaryId=${encounter.primaryId}, payload.nci=${payload.opt("nci")}, payload.tac=${payload.opt("tac")}."
+                    )
+                }
             }
 
             "WCDMA" -> {
-                val cid = payload.optInt("cid", Int.MIN_VALUE)
-                val lac = payload.optInt("lac", Int.MIN_VALUE)
-                if (cid == Int.MIN_VALUE || lac == Int.MIN_VALUE) {
+                val cid = extractInt(payload, "cid")
+                    ?: primaryIdParts.getOrNull(1)?.toIntOrNull()
+                val lac = extractInt(payload, "lac")
+                    ?: primaryIdParts.getOrNull(3)?.toIntOrNull()
+
+                if (cid != null) {
+                    tower.put("cellId", cid)
+                }
+                if (lac != null) {
+                    tower.put("locationAreaCode", lac)
+                }
+                if (cid == null && lac == null) {
                     throw IllegalArgumentException("Missing WCDMA tower identifiers (cid/lac).")
                 }
-                tower.put("cellId", cid)
-                tower.put("locationAreaCode", lac)
             }
 
             "GSM" -> {
-                val cid = payload.optInt("cid", Int.MIN_VALUE)
-                val lac = payload.optInt("lac", Int.MIN_VALUE)
-                if (cid == Int.MIN_VALUE || lac == Int.MIN_VALUE) {
+                val cid = extractInt(payload, "cid")
+                    ?: primaryIdParts.getOrNull(1)?.toIntOrNull()
+                val lac = extractInt(payload, "lac")
+                    ?: primaryIdParts.getOrNull(2)?.toIntOrNull()
+
+                if (cid != null) {
+                    tower.put("cellId", cid)
+                }
+                if (lac != null) {
+                    tower.put("locationAreaCode", lac)
+                }
+                if (cid == null && lac == null) {
                     throw IllegalArgumentException("Missing GSM tower identifiers (cid/lac).")
                 }
-                tower.put("cellId", cid)
-                tower.put("locationAreaCode", lac)
             }
 
             "CDMA" -> {
-                val systemId = payload.optInt("systemId", Int.MIN_VALUE)
-                val networkId = payload.optInt("networkId", Int.MIN_VALUE)
-                val baseStationId = payload.optInt("basestationId", Int.MIN_VALUE)
-                if (systemId == Int.MIN_VALUE || networkId == Int.MIN_VALUE || baseStationId == Int.MIN_VALUE) {
+                val systemId = extractInt(payload, "systemId")
+                val networkId = extractInt(payload, "networkId")
+                val baseStationId = extractInt(payload, "basestationId")
+                if (systemId == null || networkId == null || baseStationId == null) {
                     throw IllegalArgumentException("Missing CDMA identifiers (systemId/networkId/basestationId).")
                 }
                 tower.put("systemId", systemId)
@@ -174,12 +215,26 @@ object CellTowerLookupService {
             .put("cellTowers", JSONArray().put(tower))
     }
 
+    private fun extractLong(payload: JSONObject, key: String): Long? {
+        val value = payload.opt(key)
+        if (value == null || value == JSONObject.NULL) return null
+        val asLong = when (value) {
+            is Number -> value.toLong()
+            else -> value.toString().toLongOrNull()
+        } ?: return null
+        if (asLong == Long.MAX_VALUE || asLong < 0L) return null
+        return asLong
+    }
+
     private fun extractInt(payload: JSONObject, key: String): Int? {
-        val direct = payload.optInt(key, Int.MIN_VALUE)
-        if (direct != Int.MIN_VALUE) return direct
-        val asString = payload.optString(key, "")
-        if (asString.isBlank() || asString == "null") return null
-        return asString.toIntOrNull()
+        val value = payload.opt(key)
+        if (value == null || value == JSONObject.NULL) return null
+        val asInt = when (value) {
+            is Number -> value.toInt()
+            else -> value.toString().toIntOrNull()
+        } ?: return null
+        if (asInt == Int.MAX_VALUE || asInt == Int.MIN_VALUE || asInt < 0) return null
+        return asInt
     }
 
     private fun readFully(stream: InputStream): String {
