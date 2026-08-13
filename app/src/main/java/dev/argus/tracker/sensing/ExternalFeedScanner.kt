@@ -5,6 +5,7 @@ import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
 import dev.argus.tracker.sensing.remoteid.RemoteIdPayloadParser
+import dev.argus.tracker.worker.ScanSettings
 import org.json.JSONObject
 
 class ExternalFeedScanner(
@@ -16,6 +17,7 @@ class ExternalFeedScanner(
     val sourceTypeKey: String = source.name.lowercase()
 
     override suspend fun scanOnce(): List<Encounter> {
+        if (!isSourceEnabled()) return emptyList()
         val location = LocationSnapshotProvider.read(context)
         val feedFile = context.filesDir.resolve("ingest").resolve("$feedName.jsonl")
         if (!feedFile.exists() || !feedFile.isFile) return emptyList()
@@ -60,5 +62,11 @@ class ExternalFeedScanner(
                 rawPayloadJson = normalizedPayloadJson
             )
         }
+    }
+
+    private fun isSourceEnabled(): Boolean = when (source) {
+        EncounterSource.UWB -> ScanSettings.isUwbSensorEnabled(context)
+        EncounterSource.SDR -> ScanSettings.isSdrSensorEnabled(context)
+        else -> true
     }
 }

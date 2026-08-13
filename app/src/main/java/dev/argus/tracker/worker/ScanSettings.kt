@@ -13,6 +13,8 @@ object ScanSettings {
     private const val KEY_SENSOR_BLE_ENABLED = "sensor_ble_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
+    private const val KEY_SENSOR_UWB_ENABLED = "sensor_uwb_enabled"
+    private const val KEY_SENSOR_SDR_ENABLED = "sensor_sdr_enabled"
     private const val KEY_REMOTE_ID_INGEST_TOKEN = "remote_id_ingest_token"
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
@@ -198,6 +200,22 @@ object ScanSettings {
 
     fun setRemoteIdSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_REMOTE_ID_ENABLED, enabled)
+    }
+
+    fun isUwbSensorEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SENSOR_UWB_ENABLED, true)
+
+    fun setUwbSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_UWB_ENABLED, enabled)
+    }
+
+    fun isSdrSensorEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SENSOR_SDR_ENABLED, true)
+
+    fun setSdrSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_SDR_ENABLED, enabled)
     }
 
     fun getRemoteIdIngestToken(context: Context): String =

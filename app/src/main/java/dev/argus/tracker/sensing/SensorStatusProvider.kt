@@ -71,12 +71,12 @@ object SensorStatusProvider {
             SensorStatus(
                 name = "UWB",
                 isOn = uwbHardwareAvailable || uwbFeedConfigured,
-                factoredByArgus = true
+                factoredByArgus = ScanSettings.isUwbSensorEnabled(context)
             ),
             SensorStatus(
                 name = "SDR",
                 isOn = sdrFeedConfigured,
-                factoredByArgus = true
+                factoredByArgus = ScanSettings.isSdrSensorEnabled(context)
             ),
             SensorStatus(
                 name = "Acoustic (Direct)",
