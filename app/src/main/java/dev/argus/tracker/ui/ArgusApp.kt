@@ -128,6 +128,7 @@ private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
+private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primaryId}"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 
@@ -987,6 +988,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
                         )
                     },
+                    onMovingDeviceMapPinClick = { source, primaryId ->
+                        navController.navigate(
+                            "movingDevicePath/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
                     onRefresh = {
                         readinessItems = DetectionReadinessAdvisor.evaluate(context)
                     },
@@ -1163,6 +1171,22 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     primaryId = primaryId,
                     encounters = allEncounters,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
+                    onOpenDeviceDetails = { detailSource, detailPrimaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
+                        )
+                    },
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable(MOVING_DEVICE_PATH_ROUTE) { entry ->
+                val source = Uri.decode(entry.arguments?.getString("source") ?: "")
+                val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
+                MovingDevicePathMapPage(
+                    source = source,
+                    primaryId = primaryId,
+                    encounters = allEncounters,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
@@ -2161,6 +2185,7 @@ private fun DetectionPage(
     chainMeshSnapshot: ChainMeshSnapshot,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
+    onMovingDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
@@ -2181,6 +2206,7 @@ private fun DetectionPage(
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
+    var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
 
     val encounterPins = remember(encounters) {
@@ -2477,15 +2503,27 @@ private fun DetectionPage(
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
         } else if (selectedTab == 2) {
+            val deviceMapPins = if (movingOnlyOnDeviceMap) {
+                estimatedDeviceLocationPins.filter { it.motionBadge == "MOVING" }
+            } else {
+                estimatedDeviceLocationPins
+            }
             DetectionMapPage(
                 mapTitle = "Device Location Map",
                 mapDescription = "Pins show estimated cell tower locations and inferred Wi-Fi/BLE device locations.",
-                pins = estimatedDeviceLocationPins,
+                pins = deviceMapPins,
                 pinLimit = cellDevicePinLimit,
                 onPinLimitChange = { cellDevicePinLimit = it },
                 onPinDetailsClick = { pin ->
-                    onDeviceMapPinClick(pin.source, pin.primaryId)
+                    if (pin.motionBadge == "MOVING") {
+                        onMovingDeviceMapPinClick(pin.source, pin.primaryId)
+                    } else {
+                        onDeviceMapPinClick(pin.source, pin.primaryId)
+                    }
                 },
+                showMovingOnlyControl = true,
+                movingOnlyEnabled = movingOnlyOnDeviceMap,
+                onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
                 onLiveCollect = onLiveCollect,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
@@ -2971,6 +3009,9 @@ private fun DetectionMapPage(
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
     onPinDetailsClick: (MapPin) -> Unit,
+    showMovingOnlyControl: Boolean = false,
+    movingOnlyEnabled: Boolean = false,
+    onMovingOnlyEnabledChange: (Boolean) -> Unit = {},
     onLiveCollect: suspend () -> String,
     liveMapUpdateIntervalSeconds: Long
 ) {
@@ -3185,6 +3226,19 @@ private fun DetectionMapPage(
                                 text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
                                 color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
                             )
+                            if (showMovingOnlyControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Moving Only")
+                                    Switch(
+                                        checked = movingOnlyEnabled,
+                                        onCheckedChange = onMovingOnlyEnabledChange
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -3260,6 +3314,127 @@ private fun DetectionMapPage(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MovingDevicePathMapPage(
+    source: String,
+    primaryId: String,
+    encounters: List<Encounter>,
+    onOpenDeviceDetails: (String, String) -> Unit,
+    onBack: () -> Unit
+) {
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
+    }
+    val deviceEncounters = remember(encounters, source, primaryId) {
+        encounters
+            .filter { it.source.name == source && it.primaryId == primaryId }
+            .sortedBy { it.timestampEpochMs }
+    }
+    val pathPoints = remember(deviceEncounters) {
+        deviceEncounters
+            .mapNotNull { encounter ->
+                if (!isValidLatLon(encounter.lat, encounter.lon)) return@mapNotNull null
+                LatLng(encounter.lat!!, encounter.lon!!)
+            }
+            .fold(mutableListOf<LatLng>()) { acc, point ->
+                val previous = acc.lastOrNull()
+                if (previous == null || previous.latitude != point.latitude || previous.longitude != point.longitude) {
+                    acc += point
+                }
+                acc
+            }
+    }
+    val latestMotion = remember(deviceEncounters) { analyzeMotionSignal(deviceEncounters) }
+
+    LaunchedEffect(pathPoints) {
+        when {
+            pathPoints.size > 1 -> {
+                val boundsBuilder = LatLngBounds.Builder()
+                pathPoints.forEach { point -> boundsBuilder.include(point) }
+                runCatching {
+                    cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 120))
+                }
+            }
+
+            pathPoints.size == 1 -> {
+                runCatching {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(pathPoints.first(), 15f)
+                    )
+                }
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("Moving Device Path", style = MaterialTheme.typography.headlineSmall)
+        Text("$source • $primaryId")
+        val statusText = latestMotion?.let {
+            if (it.isInMotion) {
+                "Status: MOVING ${formatSpeedLabel(it.speedMps)} ${formatHeadingCardinal(it.headingDeg)}"
+            } else {
+                "Status: STATIC ${formatSpeedLabel(it.speedMps)}"
+            }
+        } ?: "Status: n/a"
+        Text(statusText)
+        Text("Path points: ${pathPoints.size}")
+        Text("Blue path direction: starts at GREEN marker and ends at RED marker.")
+
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            GoogleMap(
+                modifier = Modifier.fillMaxSize(),
+                cameraPositionState = cameraPositionState,
+                uiSettings = MapUiSettings(
+                    zoomControlsEnabled = true,
+                    zoomGesturesEnabled = true,
+                    scrollGesturesEnabled = true,
+                    tiltGesturesEnabled = false,
+                    rotationGesturesEnabled = false,
+                    myLocationButtonEnabled = false
+                )
+            ) {
+                if (pathPoints.size >= 2) {
+                    Polyline(
+                        points = pathPoints,
+                        color = Color(0xFF1565C0),
+                        width = 8f
+                    )
+                }
+
+                pathPoints.firstOrNull()?.let { start ->
+                    Marker(
+                        state = MarkerState(position = start),
+                        title = "Path start",
+                        snippet = "${formatEpoch(deviceEncounters.firstOrNull()?.timestampEpochMs ?: 0L)}",
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
+                    )
+                }
+
+                pathPoints.lastOrNull()?.let { end ->
+                    Marker(
+                        state = MarkerState(position = end),
+                        title = "Latest device position",
+                        snippet = formatEpoch(deviceEncounters.lastOrNull()?.timestampEpochMs ?: 0L),
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                    )
+                }
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onOpenDeviceDetails(source, primaryId) }) {
+                Text("Open Device Details")
+            }
+            Button(onClick = onBack) {
+                Text("Back")
             }
         }
     }
