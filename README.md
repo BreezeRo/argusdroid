@@ -31,6 +31,9 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Sensor-level gating (Wi-Fi, Bluetooth LE, Cellular, Remote ID) persisted in app settings and enforced in scanners.
 - Readiness advisor with deep links to system settings for missing prerequisites.
 - Clear encounters and clear devices actions for rapid reset.
+- Settings now include two explicit reset actions:
+	- Soft Reset: clears local encounters/devices and operational logs.
+	- Hard Reset: runs Soft Reset and also clears mesh network settings.
 
 ### Detection and mapping
 
@@ -61,6 +64,8 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Chain linking controls were moved from Settings into Detection > Mesh Network.
 - Peer operations include refresh, manual link requests, sync now, and peer-state inspection.
 - Mesh visualizer now overlays on Google Maps and shows peer state with link lines.
+- Mesh Soft Reset (All Devices) clears encounters/devices/logs across discovered peers and is intended to keep two or more mesh devices better synchronized.
+- Mesh-wide reset uses authenticated coordination with wipe notices (including initiator identity) and a temporary scan gate until all targeted peers complete.
 - Mesh supports optional accurate location sharing between linked peers:
 	- New toggle: Share Precise Location
 	- Shared coordinates are included in peer hello/status payloads when enabled.
