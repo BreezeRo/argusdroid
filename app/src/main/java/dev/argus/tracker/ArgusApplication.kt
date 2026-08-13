@@ -3,6 +3,7 @@ package dev.argus.tracker
 import android.app.Application
 import dev.argus.tracker.data.AppContainer
 import dev.argus.tracker.data.DefaultAppContainer
+import dev.argus.tracker.data.chain.MeshForegroundServiceController
 
 class ArgusApplication : Application() {
     lateinit var container: AppContainer
@@ -11,5 +12,6 @@ class ArgusApplication : Application() {
         super.onCreate()
         container = DefaultAppContainer(this)
         container.chainLinkCoordinator.ensureServerRunning()
+        MeshForegroundServiceController.ensureState(this)
     }
 }
