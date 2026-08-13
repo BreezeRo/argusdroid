@@ -60,10 +60,16 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 ### Approach detection and alerts
 
 - Approach analytics estimate whether a device is moving closer using recent distance trend analysis.
+- Devices can be explicitly marked as owned ("My Device") in device details.
+- Co-movement analysis scores devices that repeatedly appear across distinct locations while you move.
+- Tracker risk levels (Low, Medium, High) are shown for non-owned devices based on spread, repeat presence, and time window.
+- Devices page supports ownership and tracker-risk filtering for rapid triage.
 - Settings controls:
 	- Enable approach detection
 	- Enable approach notifications
+	- Enable tracker suspicion alerts
 - Local notifications fire on transition into approaching state with per-device cooldown to reduce alert spam.
+- Local tracker notifications fire when an unknown device transitions into high tracker-risk state.
 
 ## Known limits and truth-in-advertising
 
@@ -147,6 +153,13 @@ This behavior is intentional to support short intervals while still supporting p
 	- Approach notifications
 - Confirm POST_NOTIFICATIONS permission is granted (Android 13+).
 - Confirm detections provide enough recent samples to classify an approach trend.
+
+### Tracker suspicion alerts are not appearing
+
+- Confirm "Enable approach detection" is ON in Settings.
+- Confirm "Tracker suspicion alerts" is ON in Settings.
+- Confirm target device is not marked as owned in Device Details.
+- Confirm detections include diverse locations over time; static single-location data will not reach high tracker risk.
 
 ## Repository layout
 

@@ -122,6 +122,24 @@ private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy
 private const val LIVE_SCAN_INTERVAL_MS = 5000L
 private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
+private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
+private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+
+private enum class TrackerRiskLevel {
+    NONE,
+    LOW,
+    MEDIUM,
+    HIGH
+}
+
+private data class TrackerRiskSignal(
+    val level: TrackerRiskLevel,
+    val confidence: Double,
+    val uniqueLocationCells: Int,
+    val spreadMeters: Double,
+    val activeWindowMinutes: Double,
+    val summary: String
+)
 
 private data class DeviceItem(
     val source: String,
@@ -136,7 +154,9 @@ private data class DeviceItem(
     val lastRawPayloadJson: String?,
     val isApproaching: Boolean,
     val approachConfidence: Double?,
-    val approachDeltaMeters: Double?
+    val approachDeltaMeters: Double?,
+    val isOwned: Boolean,
+    val trackerRisk: TrackerRiskSignal?
 )
 
 private data class ApproachSignal(
@@ -168,8 +188,36 @@ private data class DeviceLocationCandidate(
     val approximateLocation: DetectionLocation? = null,
     val approximateMethod: String? = null,
     val approximateRangeMeters: Double? = null,
-    val approachSignal: ApproachSignal? = null
+    val approachSignal: ApproachSignal? = null,
+    val trackerRisk: TrackerRiskSignal? = null,
+    val isOwned: Boolean = false
 )
+
+private object OwnedDeviceRegistry {
+    private const val PREFS_NAME = "argus_settings"
+    private const val KEY_OWNED_DEVICE_KEYS = "owned_device_keys"
+
+    fun keyFor(source: String, primaryId: String): String = "$source|$primaryId"
+
+    fun read(context: android.content.Context): Set<String> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        return prefs.getStringSet(KEY_OWNED_DEVICE_KEYS, emptySet())?.toSet() ?: emptySet()
+    }
+
+    fun setOwned(context: android.content.Context, source: String, primaryId: String, owned: Boolean) {
+        val current = read(context).toMutableSet()
+        val key = keyFor(source, primaryId)
+        if (owned) {
+            current += key
+        } else {
+            current -= key
+        }
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_OWNED_DEVICE_KEYS, current)
+            .apply()
+    }
+}
 
 private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
     SensorGateSettings(
@@ -195,10 +243,14 @@ fun ArgusApp() {
     var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
+    var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
     val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
+    val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
+    val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -221,13 +273,17 @@ fun ArgusApp() {
         }
     }
 
-    LaunchedEffect(allEncounters, approachDetectionEnabled, approachNotificationsEnabled) {
+    LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, approachNotificationsEnabled) {
         if (!approachDetectionEnabled || !approachNotificationsEnabled) return@LaunchedEffect
         if (!hasPostNotificationsPermission(context)) return@LaunchedEffect
 
         ensureApproachNotificationChannel(context)
         val now = System.currentTimeMillis()
-        val devices = buildDeviceItems(allEncounters, approachDetectionEnabled = true)
+        val devices = buildDeviceItems(
+            encounters = allEncounters,
+            approachDetectionEnabled = true,
+            ownedDeviceKeys = ownedDeviceKeys
+        )
         val seenKeys = mutableSetOf<String>()
 
         devices.forEach { device ->
@@ -251,6 +307,43 @@ fun ArgusApp() {
         staleKeys.forEach { staleKey ->
             approachStateByDevice.remove(staleKey)
             lastApproachNotificationEpochByDevice.remove(staleKey)
+        }
+    }
+
+    LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, trackerNotificationsEnabled) {
+        if (!approachDetectionEnabled || !trackerNotificationsEnabled) return@LaunchedEffect
+        if (!hasPostNotificationsPermission(context)) return@LaunchedEffect
+
+        ensureTrackerNotificationChannel(context)
+        val now = System.currentTimeMillis()
+        val devices = buildDeviceItems(
+            encounters = allEncounters,
+            approachDetectionEnabled = approachDetectionEnabled,
+            ownedDeviceKeys = ownedDeviceKeys
+        )
+        val seenKeys = mutableSetOf<String>()
+
+        devices.forEach { device ->
+            val key = "${device.source}|${device.primaryId}"
+            seenKeys += key
+            val currentRisk = device.trackerRisk?.level ?: TrackerRiskLevel.NONE
+            val previousRisk = trackerStateByDevice[key] ?: TrackerRiskLevel.NONE
+
+            if (currentRisk == TrackerRiskLevel.HIGH && previousRisk != TrackerRiskLevel.HIGH && !device.isOwned) {
+                val lastNotified = lastTrackerNotificationEpochByDevice[key] ?: 0L
+                if (now - lastNotified >= TRACKER_ALERT_COOLDOWN_MS) {
+                    sendTrackerRiskNotification(context, device)
+                    lastTrackerNotificationEpochByDevice[key] = now
+                }
+            }
+
+            trackerStateByDevice[key] = currentRisk
+        }
+
+        val staleKeys = trackerStateByDevice.keys.filter { it !in seenKeys }
+        staleKeys.forEach { staleKey ->
+            trackerStateByDevice.remove(staleKey)
+            lastTrackerNotificationEpochByDevice.remove(staleKey)
         }
     }
 
@@ -380,6 +473,7 @@ fun ArgusApp() {
                     scanIntervalSeconds = scanIntervalSeconds,
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
+                    trackerNotificationsEnabled = trackerNotificationsEnabled,
                     onScanIntervalSelected = { seconds ->
                         scope.launch {
                             scanIntervalSeconds = seconds
@@ -407,6 +501,10 @@ fun ArgusApp() {
                     onApproachNotificationsChanged = { enabled ->
                         approachNotificationsEnabled = enabled
                         ScanSettings.setApproachNotificationsEnabled(context, enabled)
+                    },
+                    onTrackerNotificationsChanged = { enabled ->
+                        trackerNotificationsEnabled = enabled
+                        ScanSettings.setTrackerNotificationsEnabled(context, enabled)
                     }
                 )
             }
@@ -416,6 +514,7 @@ fun ArgusApp() {
                     readinessItems = readinessItems,
                     encounters = recent,
                     approachDetectionEnabled = approachDetectionEnabled,
+                    ownedDeviceKeys = ownedDeviceKeys,
                     onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
@@ -461,6 +560,7 @@ fun ArgusApp() {
                     recentEncounters = recent100,
                     allEncounters = allEncounters,
                     approachDetectionEnabled = approachDetectionEnabled,
+                    ownedDeviceKeys = ownedDeviceKeys,
                     onDeviceClick = { device ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
@@ -484,9 +584,20 @@ fun ArgusApp() {
             composable(DEVICE_DETAIL_ROUTE) { entry ->
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
-                val item = buildDeviceItems(allEncounters, approachDetectionEnabled = approachDetectionEnabled)
+                val item = buildDeviceItems(
+                    encounters = allEncounters,
+                    approachDetectionEnabled = approachDetectionEnabled,
+                    ownedDeviceKeys = ownedDeviceKeys
+                )
                     .firstOrNull { it.source == source && it.primaryId == primaryId }
-                DeviceDetailPage(item = item, onBack = { navController.popBackStack() })
+                DeviceDetailPage(
+                    item = item,
+                    onBack = { navController.popBackStack() },
+                    onOwnedChanged = { changedSource, changedPrimaryId, owned ->
+                        OwnedDeviceRegistry.setOwned(context, changedSource, changedPrimaryId, owned)
+                        ownedDeviceKeys = OwnedDeviceRegistry.read(context)
+                    }
+                )
             }
 
             composable(ENCOUNTER_DETAIL_ROUTE) { entry ->
@@ -669,9 +780,11 @@ private fun AppSettingsPage(
     scanIntervalSeconds: Long,
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
+    trackerNotificationsEnabled: Boolean,
     onScanIntervalSelected: (Long) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
-    onApproachNotificationsChanged: (Boolean) -> Unit
+    onApproachNotificationsChanged: (Boolean) -> Unit,
+    onTrackerNotificationsChanged: (Boolean) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -740,7 +853,19 @@ private fun AppSettingsPage(
                             enabled = approachDetectionEnabled
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Tracker suspicion alerts")
+                        Switch(
+                            checked = trackerNotificationsEnabled,
+                            onCheckedChange = onTrackerNotificationsChanged,
+                            enabled = approachDetectionEnabled
+                        )
+                    }
                     Text("Notifications trigger when a tracked device changes into approaching state.")
+                    Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
                 }
             }
         }
@@ -752,6 +877,7 @@ private fun DetectionPage(
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
+    ownedDeviceKeys: Set<String>,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
@@ -787,12 +913,18 @@ private fun DetectionPage(
             .toList()
     }
 
-    val allDeviceCandidates = remember(encounters) {
+    val allDeviceCandidates = remember(encounters, approachDetectionEnabled, ownedDeviceKeys) {
         encounters
             .asSequence()
             .groupBy { "${it.source.name}|${it.primaryId}" }
             .mapNotNull { (_, deviceEncounters) ->
                 val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+                val owned = OwnedDeviceRegistry.keyFor(latest.source.name, latest.primaryId) in ownedDeviceKeys
+                val approachSignal = if (approachDetectionEnabled) {
+                    analyzeApproachSignal(deviceEncounters)
+                } else {
+                    null
+                }
                 DeviceLocationCandidate(
                     source = latest.source.name,
                     primaryId = latest.primaryId,
@@ -800,11 +932,13 @@ private fun DetectionPage(
                     latestTimestampEpochMs = latest.timestampEpochMs,
                     seenCount = deviceEncounters.size,
                     encounters = deviceEncounters,
-                    approachSignal = if (approachDetectionEnabled) {
-                        analyzeApproachSignal(deviceEncounters)
-                    } else {
-                        null
-                    }
+                    isOwned = owned,
+                    approachSignal = approachSignal,
+                    trackerRisk = analyzeTrackerRisk(
+                        encounters = deviceEncounters,
+                        isOwned = owned,
+                        approachSignal = approachSignal
+                    )
                 )
             }
             .sortedByDescending { it.latestTimestampEpochMs }
@@ -915,11 +1049,22 @@ private fun DetectionPage(
                     " • Approaching (${(signal.confidence * 100.0).toInt()}%)"
                 }
                 .orEmpty()
+            val ownershipSnippet = if (candidate.isOwned) {
+                " • Marked as Mine"
+            } else {
+                ""
+            }
+            val trackerSnippet = when (candidate.trackerRisk?.level) {
+                TrackerRiskLevel.HIGH -> " • Tracker Risk HIGH"
+                TrackerRiskLevel.MEDIUM -> " • Tracker Risk MEDIUM"
+                TrackerRiskLevel.LOW -> " • Tracker Risk LOW"
+                else -> ""
+            }
 
             MapPin(
                 position = LatLng(location.lat, location.lon),
                 title = "${listSourceLabel(candidate.source, candidate.secondaryId)} • ${candidate.primaryId}",
-                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
+                snippet = "$methodSnippet • Seen ${candidate.seenCount} times • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet$ownershipSnippet$trackerSnippet",
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
@@ -1694,6 +1839,102 @@ private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? 
     )
 }
 
+private fun locationCellKey(lat: Double, lon: Double, cellDegrees: Double = 0.0025): String {
+    val latBucket = (lat / cellDegrees).toInt()
+    val lonBucket = (lon / cellDegrees).toInt()
+    return "$latBucket:$lonBucket"
+}
+
+private fun analyzeTrackerRisk(
+    encounters: List<Encounter>,
+    isOwned: Boolean,
+    approachSignal: ApproachSignal?
+): TrackerRiskSignal? {
+    if (isOwned) {
+        return TrackerRiskSignal(
+            level = TrackerRiskLevel.NONE,
+            confidence = 1.0,
+            uniqueLocationCells = 0,
+            spreadMeters = 0.0,
+            activeWindowMinutes = 0.0,
+            summary = "Marked as owned by user"
+        )
+    }
+
+    val ordered = encounters.sortedBy { it.timestampEpochMs }
+    if (ordered.size < 3) return null
+
+    val validLocations = ordered
+        .mapNotNull { e ->
+            if (!isValidLatLon(e.lat, e.lon)) return@mapNotNull null
+            e.lat!! to e.lon!!
+        }
+    if (validLocations.size < 3) return null
+
+    val uniqueCells = validLocations
+        .map { (lat, lon) -> locationCellKey(lat, lon) }
+        .toSet()
+        .size
+
+    var maxSpreadMeters = 0.0
+    validLocations.forEachIndexed { i, a ->
+        for (j in i + 1 until validLocations.size) {
+            val b = validLocations[j]
+            val spread = distanceFromLocationMeters(a.first, a.second, b.first, b.second) ?: 0.0
+            if (spread > maxSpreadMeters) maxSpreadMeters = spread
+        }
+    }
+
+    val activeWindowMinutes = ((ordered.last().timestampEpochMs - ordered.first().timestampEpochMs)
+        .coerceAtLeast(0L) / 60_000.0)
+
+    val locationScore = ((uniqueCells - 1).toDouble() / 5.0).coerceIn(0.0, 1.0)
+    val spreadScore = (maxSpreadMeters / 1500.0).coerceIn(0.0, 1.0)
+    val durationScore = (activeWindowMinutes / 90.0).coerceIn(0.0, 1.0)
+    val approachScore = when {
+        approachSignal?.isApproaching == true -> approachSignal.confidence.coerceIn(0.0, 1.0)
+        else -> 0.0
+    }
+    val confidence = (
+        0.35 * locationScore +
+            0.30 * spreadScore +
+            0.20 * durationScore +
+            0.15 * approachScore
+        ).coerceIn(0.0, 1.0)
+
+    val level = when {
+        uniqueCells >= 5 && maxSpreadMeters >= 1200.0 && activeWindowMinutes >= 40.0 && confidence >= 0.75 -> {
+            TrackerRiskLevel.HIGH
+        }
+
+        uniqueCells >= 3 && maxSpreadMeters >= 450.0 && activeWindowMinutes >= 20.0 && confidence >= 0.55 -> {
+            TrackerRiskLevel.MEDIUM
+        }
+
+        uniqueCells >= 2 && maxSpreadMeters >= 200.0 && activeWindowMinutes >= 10.0 -> {
+            TrackerRiskLevel.LOW
+        }
+
+        else -> TrackerRiskLevel.NONE
+    }
+
+    val summary = when (level) {
+        TrackerRiskLevel.HIGH -> "Strong repeated co-movement across multiple locations"
+        TrackerRiskLevel.MEDIUM -> "Moderate cross-location repeat pattern"
+        TrackerRiskLevel.LOW -> "Early co-movement signal; monitor"
+        TrackerRiskLevel.NONE -> "No meaningful co-movement pattern"
+    }
+
+    return TrackerRiskSignal(
+        level = level,
+        confidence = confidence,
+        uniqueLocationCells = uniqueCells,
+        spreadMeters = maxSpreadMeters,
+        activeWindowMinutes = activeWindowMinutes,
+        summary = summary
+    )
+}
+
 private fun estimateWifiRangeMeters(encounter: Encounter): Double? {
     val rssi = encounter.rssiDbm ?: return null
     if (rssi >= 0) return null
@@ -1879,6 +2120,22 @@ private fun ensureApproachNotificationChannel(context: android.content.Context) 
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureTrackerNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(TRACKER_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        TRACKER_ALERT_CHANNEL_ID,
+        "Tracker Suspicion Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when unknown devices repeatedly co-move across locations"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun sendApproachNotification(context: android.content.Context, device: DeviceItem) {
     val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt().coerceIn(0, 100)
     val trend = device.approachDeltaMeters
@@ -1901,12 +2158,39 @@ private fun sendApproachNotification(context: android.content.Context, device: D
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
+private fun sendTrackerRiskNotification(context: android.content.Context, device: DeviceItem) {
+    val risk = device.trackerRisk ?: return
+    val title = "Potential tracker pattern detected"
+    val content = buildString {
+        append(listSourceLabel(device.source, device.secondaryId))
+        append(" ")
+        append(device.primaryId)
+        append(" • Risk ")
+        append(risk.level.name)
+        append(" • ")
+        append(String.format(Locale.US, "%.0f%% confidence", risk.confidence * 100.0))
+    }
+
+    val notification = NotificationCompat.Builder(context, TRACKER_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_sys_warning)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
+    ownedDeviceKeys: Set<String>,
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
@@ -1918,22 +2202,28 @@ private fun DevicesPage(
     var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
+    var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
+    var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
-    val devices = remember(selectedEncounters, sortMode, approachDetectionEnabled) {
+    val devices = remember(selectedEncounters, sortMode, approachDetectionEnabled, ownedDeviceKeys) {
         buildDeviceItems(
             encounters = selectedEncounters,
             sortMode = sortMode,
-            approachDetectionEnabled = approachDetectionEnabled
+            approachDetectionEnabled = approachDetectionEnabled,
+            ownedDeviceKeys = ownedDeviceKeys
         )
     }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
-    val filteredDevices = remember(devices, sourceFilter, queryFilter) {
+    val filteredDevices = remember(devices, sourceFilter, queryFilter, showOwnedOnly, showTrackerRiskOnly) {
         devices.filter { device ->
             val sourceMatches = sourceFilter == null || device.source == sourceFilter
             val queryMatches = queryFilter.isBlank() ||
                 device.primaryId.contains(queryFilter, ignoreCase = true) ||
                 (device.secondaryId?.contains(queryFilter, ignoreCase = true) == true)
-            sourceMatches && queryMatches
+            val ownedMatches = !showOwnedOnly || device.isOwned
+            val riskMatches = !showTrackerRiskOnly ||
+                (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
+            sourceMatches && queryMatches && ownedMatches && riskMatches
         }
     }
     val displayedDevices = remember(filteredDevices, showDistance, sortByDistance, currentLocation) {
@@ -2005,6 +2295,20 @@ private fun DevicesPage(
                     )
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Owned Only")
+                Switch(
+                    checked = showOwnedOnly,
+                    onCheckedChange = { showOwnedOnly = it }
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Tracker Risk Only")
+                Switch(
+                    checked = showTrackerRiskOnly,
+                    onCheckedChange = { showTrackerRiskOnly = it }
+                )
+            }
         }
         Text("Showing ${displayedDevices.size} of ${devices.size}")
         LazyColumn {
@@ -2017,6 +2321,13 @@ private fun DevicesPage(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
+                        if (device.isOwned) {
+                            Text(
+                                text = "Marked as My Device",
+                                color = Color(0xFF2E7D32),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         if (device.isApproaching) {
                             val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt()
                             val deltaLabel = device.approachDeltaMeters
@@ -2027,6 +2338,26 @@ private fun DevicesPage(
                                 color = Color(0xFFB3261E),
                                 fontWeight = FontWeight.SemiBold
                             )
+                        }
+                        when (device.trackerRisk?.level) {
+                            TrackerRiskLevel.HIGH -> Text(
+                                text = "Tracker Risk: HIGH",
+                                color = Color(0xFFB3261E),
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            TrackerRiskLevel.MEDIUM -> Text(
+                                text = "Tracker Risk: MEDIUM",
+                                color = Color(0xFFE65100),
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            TrackerRiskLevel.LOW -> Text(
+                                text = "Tracker Risk: LOW",
+                                color = Color(0xFF6A4F00)
+                            )
+
+                            else -> Unit
                         }
                         if (showSecondaryIds && supportsSecondaryIdInList(device.source) && !device.secondaryId.isNullOrBlank()) {
                             Text("${secondaryIdLabel(device.source)}: ${device.secondaryId}")
@@ -2175,17 +2506,24 @@ private fun EncountersPage(
 private fun buildDeviceItems(
     encounters: List<Encounter>,
     sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN,
-    approachDetectionEnabled: Boolean = true
+    approachDetectionEnabled: Boolean = true,
+    ownedDeviceKeys: Set<String> = emptySet()
 ): List<DeviceItem> =
     encounters
         .groupBy { it.source.name to it.primaryId }
         .map { (key, groupedEncounters) ->
             val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
+            val owned = OwnedDeviceRegistry.keyFor(key.first, key.second) in ownedDeviceKeys
             val approachSignal = if (approachDetectionEnabled) {
                 analyzeApproachSignal(groupedEncounters)
             } else {
                 null
             }
+            val trackerRisk = analyzeTrackerRisk(
+                encounters = groupedEncounters,
+                isOwned = owned,
+                approachSignal = approachSignal
+            )
             DeviceItem(
                 source = key.first,
                 primaryId = key.second,
@@ -2199,7 +2537,9 @@ private fun buildDeviceItems(
                 lastRawPayloadJson = latest.rawPayloadJson,
                 isApproaching = approachSignal?.isApproaching == true,
                 approachConfidence = approachSignal?.confidence,
-                approachDeltaMeters = approachSignal?.deltaMeters
+                approachDeltaMeters = approachSignal?.deltaMeters,
+                isOwned = owned,
+                trackerRisk = trackerRisk
             )
         }
         .let { deviceItems ->
@@ -2281,10 +2621,12 @@ private fun ScopeFilterDropdown(
 @Composable
 private fun DeviceDetailPage(
     item: DeviceItem?,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOwnedChanged: (source: String, primaryId: String, owned: Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    var isOwnedState by remember(item?.source, item?.primaryId) { mutableStateOf(item?.isOwned == true) }
 
     Column(
         modifier = Modifier
@@ -2303,6 +2645,19 @@ private fun DeviceDetailPage(
         DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
         DetailRow("Primary ID", item.primaryId)
         DetailRow("Secondary ID", item.secondaryId ?: "n/a")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Mark as My Device", fontWeight = FontWeight.Medium)
+            Switch(
+                checked = isOwnedState,
+                onCheckedChange = { enabled ->
+                    isOwnedState = enabled
+                    onOwnedChanged(item.source, item.primaryId, enabled)
+                }
+            )
+        }
         DetailRow("Seen Count", item.seenCount.toString())
         DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
         DetailRow(
@@ -2319,6 +2674,22 @@ private fun DeviceDetailPage(
         )
         DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
         DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
+        DetailRow(
+            "Tracker Risk",
+            when (item.trackerRisk?.level) {
+                TrackerRiskLevel.HIGH -> "HIGH"
+                TrackerRiskLevel.MEDIUM -> "MEDIUM"
+                TrackerRiskLevel.LOW -> "LOW"
+                else -> "NONE"
+            }
+        )
+        if (item.trackerRisk != null) {
+            DetailRow("Tracker Confidence", String.format(Locale.US, "%.0f%%", item.trackerRisk.confidence * 100.0))
+            DetailRow("Cross-Location Cells", item.trackerRisk.uniqueLocationCells.toString())
+            DetailRow("Observed Spread", formatDistanceFeetMiles(item.trackerRisk.spreadMeters))
+            DetailRow("Observed Window", String.format(Locale.US, "%.1f min", item.trackerRisk.activeWindowMinutes))
+            DetailRow("Assessment", item.trackerRisk.summary)
+        }
         DetailRow(
             "Last Device Location",
             if (isValidLatLon(item.lastLat, item.lastLon)) {

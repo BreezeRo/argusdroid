@@ -13,6 +13,7 @@ object ScanSettings {
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
+    private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
     const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L * 60L
     const val MIN_PERIODIC_INTERVAL_SECONDS = 15L * 60L
     val ALLOWED_INTERVALS_SECONDS = listOf(5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
@@ -104,6 +105,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isTrackerNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, true)
+
+    fun setTrackerNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
