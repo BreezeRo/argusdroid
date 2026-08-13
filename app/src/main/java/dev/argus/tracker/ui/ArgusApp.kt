@@ -9,14 +9,19 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -58,9 +63,13 @@ import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.domain.EncounterSource
+import dev.argus.tracker.sensing.CellTowerLookupService
+import dev.argus.tracker.sensing.DetectionLocation
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
+import dev.argus.tracker.sensing.TowerLookupResult
 import dev.argus.tracker.worker.ScanSettings
 import dev.argus.tracker.worker.WorkScheduler
 import kotlinx.coroutines.launch
@@ -73,7 +82,9 @@ import com.google.android.gms.common.GoogleApiAvailability
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlinx.coroutines.delay
+import org.json.JSONObject
 
 private enum class DataScope {
     RECENT_100,
@@ -104,8 +115,26 @@ private data class DeviceItem(
     val seenCount: Int,
     val lastSeenEpochMs: Long,
     val lastRssiDbm: Int?,
-    val lastFrequencyMhz: Int?
+    val lastFrequencyMhz: Int?,
+    val lastLat: Double?,
+    val lastLon: Double?,
+    val lastRawPayloadJson: String?
 )
+
+private data class SensorGateSettings(
+    val wifiEnabled: Boolean,
+    val bluetoothEnabled: Boolean,
+    val cellularEnabled: Boolean,
+    val remoteIdEnabled: Boolean
+)
+
+private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
+    SensorGateSettings(
+        wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
+        bluetoothEnabled = ScanSettings.isBleSensorEnabled(context),
+        cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
+        remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context)
+    )
 
 @Composable
 fun ArgusApp() {
@@ -120,6 +149,7 @@ fun ArgusApp() {
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
     var scanIntervalSeconds by remember { mutableStateOf(ScanSettings.getScanIntervalSeconds(context)) }
+    var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
 
@@ -132,6 +162,7 @@ fun ArgusApp() {
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
+        sensorGateSettings = readSensorGateSettings(context)
         sensorStatuses = SensorStatusProvider.read(context)
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
     }
@@ -197,6 +228,7 @@ fun ArgusApp() {
                     trackingActive = trackingActive,
                     lastScanEpochMs = lastScanEpochMs,
                     sensorStatuses = sensorStatuses,
+                    sensorGateSettings = sensorGateSettings,
                     summary = summary,
                     onStart = {
                         scope.launch {
@@ -204,6 +236,7 @@ fun ArgusApp() {
                             trackingStartMessage = startResult.message
                             trackingStartMessageIsError = !startResult.success
                             trackingActive = WorkScheduler.isTrackingActive(context)
+                            sensorGateSettings = readSensorGateSettings(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
                         }
@@ -213,6 +246,7 @@ fun ArgusApp() {
                         viewModel.refreshSummary()
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
+                            sensorGateSettings = readSensorGateSettings(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
                             trackingStartMessage = "Tracking stopped."
@@ -223,9 +257,24 @@ fun ArgusApp() {
                         viewModel.refreshSummary()
                         scope.launch {
                             trackingActive = WorkScheduler.isTrackingActive(context)
+                            sensorGateSettings = readSensorGateSettings(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             readinessItems = DetectionReadinessAdvisor.evaluate(context)
                             trackingStartMessage = "Status refreshed."
+                            trackingStartMessageIsError = false
+                        }
+                    },
+                    onSensorGateChanged = { sensor, enabled ->
+                        scope.launch {
+                            when (sensor) {
+                                "wifi" -> ScanSettings.setWifiSensorEnabled(context, enabled)
+                                "bluetooth" -> ScanSettings.setBleSensorEnabled(context, enabled)
+                                "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
+                                "remote_id" -> ScanSettings.setRemoteIdSensorEnabled(context, enabled)
+                            }
+                            sensorGateSettings = readSensorGateSettings(context)
+                            sensorStatuses = SensorStatusProvider.read(context)
+                            trackingStartMessage = "Sensor gating updated."
                             trackingStartMessageIsError = false
                         }
                     },
@@ -358,10 +407,12 @@ private fun HomePage(
     trackingActive: Boolean,
     lastScanEpochMs: Long?,
     sensorStatuses: List<SensorStatus>,
+    sensorGateSettings: SensorGateSettings,
     summary: List<SourceSummary>,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
+    onSensorGateChanged: (String, Boolean) -> Unit,
     onClearEncounters: () -> Unit,
     onClearDevices: () -> Unit,
     startMessage: String?,
@@ -428,6 +479,57 @@ private fun HomePage(
 
         item {
             Text("Sensors", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Sensor Collection Toggles", fontWeight = FontWeight.Medium)
+                    Text("Only enabled sensors are collected during tracking and live scans.")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Wi-Fi")
+                        Switch(
+                            checked = sensorGateSettings.wifiEnabled,
+                            onCheckedChange = { onSensorGateChanged("wifi", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Bluetooth LE")
+                        Switch(
+                            checked = sensorGateSettings.bluetoothEnabled,
+                            onCheckedChange = { onSensorGateChanged("bluetooth", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Cellular")
+                        Switch(
+                            checked = sensorGateSettings.cellularEnabled,
+                            onCheckedChange = { onSensorGateChanged("cellular", it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Remote ID")
+                        Switch(
+                            checked = sensorGateSettings.remoteIdEnabled,
+                            onCheckedChange = { onSensorGateChanged("remote_id", it) }
+                        )
+                    }
+                }
+            }
         }
         items(sensorStatuses) { sensor ->
             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
@@ -516,7 +618,8 @@ private fun DetectionPage(
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(100) }
     var devicePinLimit by rememberSaveable { mutableStateOf(100) }
-    val tabs = listOf("Readiness", "Encounters Map", "Devices Map")
+    var cellDevicePinLimit by rememberSaveable { mutableStateOf(100) }
+    val tabs = listOf("Readiness", "Encounters Map", "Devices Map", "Device Location Map")
 
     val encounterPins = remember(encounters) {
         encounters
@@ -556,6 +659,28 @@ private fun DetectionPage(
                 )
             }
             .sortedByDescending { it.timestampEpochMs }
+    }
+
+    val cellDevicePins = remember(encounters) {
+        encounters
+            .asSequence()
+            .filter { it.source == EncounterSource.CELL }
+            .groupBy { it.primaryId }
+            .mapNotNull { (_, deviceEncounters) ->
+                val latestWithLocation = deviceEncounters
+                    .filter { isValidLatLon(it.lat, it.lon) }
+                    .maxByOrNull { it.timestampEpochMs }
+                    ?: return@mapNotNull null
+
+                MapPin(
+                    position = LatLng(latestWithLocation.lat!!, latestWithLocation.lon!!),
+                    title = "${listSourceLabel(latestWithLocation.source.name, latestWithLocation.secondaryId)} • ${latestWithLocation.primaryId}",
+                    snippet = "Seen ${deviceEncounters.size} times • Last ${formatEpoch(latestWithLocation.timestampEpochMs)}",
+                    timestampEpochMs = latestWithLocation.timestampEpochMs
+                )
+            }
+            .sortedByDescending { it.timestampEpochMs }
+            .toList()
     }
 
     Column(
@@ -619,13 +744,22 @@ private fun DetectionPage(
                 onPinLimitChange = { encounterPinLimit = it },
                 onLiveCollect = onLiveCollect
             )
-        } else {
+        } else if (selectedTab == 2) {
             DetectionMapPage(
                 mapTitle = "Devices Map",
                 mapDescription = "Pins show latest known location per unique device.",
                 pins = devicePins,
                 pinLimit = devicePinLimit,
                 onPinLimitChange = { devicePinLimit = it },
+                onLiveCollect = onLiveCollect
+            )
+        } else {
+            DetectionMapPage(
+                mapTitle = "Device Location Map",
+                mapDescription = "Pins show latest known location per unique cellular device.",
+                pins = cellDevicePins,
+                pinLimit = cellDevicePinLimit,
+                onPinLimitChange = { cellDevicePinLimit = it },
                 onLiveCollect = onLiveCollect
             )
         }
@@ -948,6 +1082,186 @@ private fun getPlayServicesDiagnostic(context: android.content.Context): String 
     }
 }
 
+private fun supportsSecondaryIdInList(source: String): Boolean =
+    source == "WIFI" || source == "BLUETOOTH_LE"
+
+private fun secondaryIdLabel(source: String): String = when (source) {
+    "WIFI" -> "SSID"
+    "BLUETOOTH_LE" -> "Device Name"
+    else -> "Secondary ID"
+}
+
+private fun listSourceLabel(source: String, secondaryId: String?): String {
+    if (source == "CELL") {
+        if (!secondaryId.isNullOrBlank()) {
+            return "CELL TOWER (${secondaryId})"
+        }
+        return "CELL TOWER"
+    }
+    return source
+}
+
+private fun readJsonFields(
+    payload: JSONObject,
+    definitions: List<Pair<String, String>>
+): List<Pair<String, String>> {
+    val fields = mutableListOf<Pair<String, String>>()
+    definitions.forEach { (label, key) ->
+        val value = payload.opt(key)
+        if (value != null && value != JSONObject.NULL) {
+            fields += label to value.toString()
+        }
+    }
+    return fields
+}
+
+private fun readWifiAccessPointFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    return readJsonFields(
+        payload,
+        listOf(
+            "SSID" to "ssid",
+            "BSSID" to "bssid",
+            "Capabilities" to "capabilities",
+            "Wi-Fi Standard" to "wifiStandard",
+            "Channel Width" to "channelWidth",
+            "Center Freq 0" to "centerFreq0",
+            "Center Freq 1" to "centerFreq1",
+            "Passpoint" to "isPasspoint",
+            "802.11mc Responder" to "is80211mcResponder",
+            "Operator Friendly Name" to "operatorFriendlyName",
+            "Venue Name" to "venueName",
+            "Scan Request Accepted" to "scanRequestAccepted",
+            "Scan Timestamp (us)" to "timestampMicros"
+        )
+    )
+}
+
+private fun readBleDeviceFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    return readJsonFields(
+        payload,
+        listOf(
+            "Address" to "address",
+            "Device Name" to "name",
+            "RSSI" to "rssi",
+            "Tx Power" to "txPower",
+            "Primary PHY" to "primaryPhy",
+            "Secondary PHY" to "secondaryPhy",
+            "Legacy" to "isLegacy",
+            "Connectable" to "isConnectable",
+            "Advertising Interval" to "periodicAdvertisingInterval",
+            "Advertise Flags" to "advertiseFlags",
+            "Record Tx Power" to "txPowerLevel",
+            "Service UUIDs" to "serviceUuids",
+            "Manufacturer Data Count" to "manufacturerSpecificDataSize",
+            "Service Data Count" to "serviceDataSize"
+        )
+    )
+}
+
+private fun readGenericPayloadFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    return payload.keys()
+        .asSequence()
+        .toList()
+        .sorted()
+        .take(20)
+        .mapNotNull { key ->
+            val value = payload.opt(key)
+            if (value == null || value == JSONObject.NULL) null else key to value.toString()
+        }
+}
+
+private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
+    when (encounter.source) {
+        EncounterSource.WIFI -> "Wi-Fi Access Point Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
+        EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
+        EncounterSource.CELL -> "Cell Tower Details" to readCellTowerFields(encounter.rawPayloadJson)
+        EncounterSource.REMOTE_ID -> "Remote ID Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.UNKNOWN_RF -> "Unknown RF Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+    }
+
+private fun readCellTowerFields(rawPayloadJson: String): List<Pair<String, String>> {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
+    val fields = mutableListOf<Pair<String, String>>()
+
+    val radio = payload.optString("radio", "")
+    if (radio.isNotBlank()) fields += "Radio" to radio
+    val operatorName = payload.optString("networkOperatorName", "")
+    if (operatorName.isNotBlank()) fields += "Operator" to operatorName
+    val operatorCode = payload.optString("networkOperator", "")
+    if (operatorCode.isNotBlank()) fields += "Operator Code" to operatorCode
+
+    fun addIfPresent(label: String, key: String) {
+        val value = payload.opt(key)
+        if (value != null && value != JSONObject.NULL) {
+            fields += label to value.toString()
+        }
+    }
+
+    addIfPresent("MCC", "mcc")
+    addIfPresent("MNC", "mnc")
+
+    when (radio.uppercase()) {
+        "LTE" -> {
+            addIfPresent("Cell ID (CI)", "ci")
+            addIfPresent("Tracking Area Code (TAC)", "tac")
+            addIfPresent("Physical Cell ID (PCI)", "pci")
+            addIfPresent("EARFCN", "earfcn")
+            addIfPresent("Bandwidth", "bandwidth")
+        }
+
+        "NR" -> {
+            addIfPresent("NR Cell ID (NCI)", "nci")
+            addIfPresent("Tracking Area Code (TAC)", "tac")
+            addIfPresent("Physical Cell ID (PCI)", "pci")
+            addIfPresent("NRARFCN", "nrarfcn")
+            addIfPresent("SS RSRP", "ssRsrp")
+            addIfPresent("CSI RSRP", "csiRsrp")
+        }
+
+        "WCDMA" -> {
+            addIfPresent("Cell ID (CID)", "cid")
+            addIfPresent("Location Area Code (LAC)", "lac")
+            addIfPresent("Primary Scrambling Code (PSC)", "psc")
+            addIfPresent("UARFCN", "uarfcn")
+        }
+
+        "GSM" -> {
+            addIfPresent("Cell ID (CID)", "cid")
+            addIfPresent("Location Area Code (LAC)", "lac")
+            addIfPresent("ARFCN", "arfcn")
+            addIfPresent("BSIC", "bsic")
+        }
+
+        "CDMA" -> {
+            addIfPresent("Base Station ID", "basestationId")
+            addIfPresent("Network ID", "networkId")
+            addIfPresent("System ID", "systemId")
+        }
+    }
+
+    addIfPresent("ASU", "asu")
+    addIfPresent("Signal Level", "level")
+    addIfPresent("Registered", "registered")
+    return fields
+}
+
+private fun formatTowerRangeFeetMiles(
+    fromLat: Double,
+    fromLon: Double,
+    toLat: Double,
+    toLon: Double
+): String {
+    val result = FloatArray(1)
+    android.location.Location.distanceBetween(fromLat, fromLon, toLat, toLon, result)
+    val meters = result[0].toDouble()
+    val miles = meters / 1609.344
+    val feet = meters / 0.3048
+    return String.format(Locale.US, "%.2f mi (%.0f ft)", miles, feet)
+}
+
 private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
     val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
         ?: return false
@@ -957,6 +1271,7 @@ private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
@@ -966,6 +1281,7 @@ private fun DevicesPage(
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
+    var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val devices = remember(selectedEncounters, sortMode) { buildDeviceItems(selectedEncounters, sortMode) }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
@@ -982,30 +1298,43 @@ private fun DevicesPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
-        ScopeFilterDropdown(
-            selectedScope = dataScope,
-            onScopeSelected = {
-                dataScope = it
-                sourceFilter = null
-                queryFilter = ""
-            }
-        )
-        DeviceSortDropdown(
-            selectedSort = sortMode,
-            onSortSelected = { sortMode = it }
-        )
-        SourceFilterDropdown(
-            selectedSource = sourceFilter,
-            sourceOptions = sourceOptions,
-            onSourceSelected = { sourceFilter = it }
-        )
-        OutlinedTextField(
-            value = queryFilter,
-            onValueChange = { queryFilter = it },
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Search device ID or label") },
-            singleLine = true
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ScopeFilterDropdown(
+                selectedScope = dataScope,
+                onScopeSelected = {
+                    dataScope = it
+                    sourceFilter = null
+                    queryFilter = ""
+                }
+            )
+            DeviceSortDropdown(
+                selectedSort = sortMode,
+                onSortSelected = { sortMode = it }
+            )
+            SourceFilterDropdown(
+                selectedSource = sourceFilter,
+                sourceOptions = sourceOptions,
+                onSourceSelected = { sourceFilter = it }
+            )
+            OutlinedTextField(
+                value = queryFilter,
+                onValueChange = { queryFilter = it },
+                modifier = Modifier.widthIn(min = 220.dp),
+                label = { Text("Search device ID or label") },
+                singleLine = true
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Show Secondary IDs")
+                Switch(
+                    checked = showSecondaryIds,
+                    onCheckedChange = { showSecondaryIds = it }
+                )
+            }
+        }
         Text("Showing ${filteredDevices.size} of ${devices.size}")
         LazyColumn {
             items(filteredDevices) { device ->
@@ -1016,7 +1345,10 @@ private fun DevicesPage(
                         .clickable { onDeviceClick(device) }
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text("${device.source} • ${device.primaryId}")
+                        Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
+                        if (showSecondaryIds && supportsSecondaryIdInList(device.source) && !device.secondaryId.isNullOrBlank()) {
+                            Text("${secondaryIdLabel(device.source)}: ${device.secondaryId}")
+                        }
                         Text("Seen ${device.seenCount} times")
                         Text("Last seen ${formatEpoch(device.lastSeenEpochMs)}")
                     }
@@ -1027,6 +1359,7 @@ private fun DevicesPage(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun EncountersPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
@@ -1035,6 +1368,7 @@ private fun EncountersPage(
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
+    var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
     val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val sourceOptions = remember(encounters) { encounters.map { it.source.name }.distinct().sorted() }
     val filteredEncounters = remember(encounters, sourceFilter, queryFilter) {
@@ -1051,26 +1385,39 @@ private fun EncountersPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Encounters", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any encounter for full telemetry.")
-        ScopeFilterDropdown(
-            selectedScope = dataScope,
-            onScopeSelected = {
-                dataScope = it
-                sourceFilter = null
-                queryFilter = ""
-            }
-        )
-        SourceFilterDropdown(
-            selectedSource = sourceFilter,
-            sourceOptions = sourceOptions,
-            onSourceSelected = { sourceFilter = it }
-        )
-        OutlinedTextField(
-            value = queryFilter,
-            onValueChange = { queryFilter = it },
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Search ID, label, or payload") },
-            singleLine = true
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ScopeFilterDropdown(
+                selectedScope = dataScope,
+                onScopeSelected = {
+                    dataScope = it
+                    sourceFilter = null
+                    queryFilter = ""
+                }
+            )
+            SourceFilterDropdown(
+                selectedSource = sourceFilter,
+                sourceOptions = sourceOptions,
+                onSourceSelected = { sourceFilter = it }
+            )
+            OutlinedTextField(
+                value = queryFilter,
+                onValueChange = { queryFilter = it },
+                modifier = Modifier.widthIn(min = 220.dp),
+                label = { Text("Search ID, label, or payload") },
+                singleLine = true
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Show Secondary IDs")
+                Switch(
+                    checked = showSecondaryIds,
+                    onCheckedChange = { showSecondaryIds = it }
+                )
+            }
+        }
         Text("Showing ${filteredEncounters.size} of ${encounters.size}")
         LazyColumn {
             items(filteredEncounters) { encounter ->
@@ -1081,7 +1428,14 @@ private fun EncountersPage(
                         .clickable { onEncounterClick(encounter) }
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text("${encounter.source} • ${encounter.primaryId}")
+                        Text("${listSourceLabel(encounter.source.name, encounter.secondaryId)} • ${encounter.primaryId}")
+                        if (
+                            showSecondaryIds &&
+                            supportsSecondaryIdInList(encounter.source.name) &&
+                            !encounter.secondaryId.isNullOrBlank()
+                        ) {
+                            Text("${secondaryIdLabel(encounter.source.name)}: ${encounter.secondaryId}")
+                        }
                         Text("RSSI=${encounter.rssiDbm ?: "n/a"} dBm, Freq=${encounter.frequencyMhz ?: "n/a"} MHz")
                         Text(formatEpoch(encounter.timestampEpochMs))
                     }
@@ -1106,7 +1460,10 @@ private fun buildDeviceItems(
                 seenCount = groupedEncounters.size,
                 lastSeenEpochMs = latest.timestampEpochMs,
                 lastRssiDbm = latest.rssiDbm,
-                lastFrequencyMhz = latest.frequencyMhz
+                lastFrequencyMhz = latest.frequencyMhz,
+                lastLat = latest.lat,
+                lastLon = latest.lon,
+                lastRawPayloadJson = latest.rawPayloadJson
             )
         }
         .let { deviceItems ->
@@ -1190,7 +1547,15 @@ private fun DeviceDetailPage(
     item: DeviceItem?,
     onBack: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val context = LocalContext.current
+    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         Button(onClick = onBack) {
             Text("Back")
         }
@@ -1199,13 +1564,42 @@ private fun DeviceDetailPage(
             Text("Device not found in current encounter window.")
             return
         }
-        DetailRow("Source", item.source)
+        DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
         DetailRow("Primary ID", item.primaryId)
         DetailRow("Secondary ID", item.secondaryId ?: "n/a")
         DetailRow("Seen Count", item.seenCount.toString())
         DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
         DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
         DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
+        DetailRow(
+            "Last Device Location",
+            if (isValidLatLon(item.lastLat, item.lastLon)) {
+                String.format(Locale.US, "%.6f, %.6f", item.lastLat!!, item.lastLon!!)
+            } else {
+                "n/a"
+            }
+        )
+
+        if (!item.lastRawPayloadJson.isNullOrBlank()) {
+            val source = remember(item.source) {
+                runCatching { EncounterSource.valueOf(item.source) }
+                    .getOrDefault(EncounterSource.UNKNOWN_RF)
+            }
+            val deviceEncounter = remember(item, source) {
+                Encounter(
+                    timestampEpochMs = item.lastSeenEpochMs,
+                    source = source,
+                    primaryId = item.primaryId,
+                    secondaryId = item.secondaryId,
+                    rssiDbm = item.lastRssiDbm,
+                    frequencyMhz = item.lastFrequencyMhz,
+                    lat = item.lastLat,
+                    lon = item.lastLon,
+                    rawPayloadJson = item.lastRawPayloadJson ?: "{}"
+                )
+            }
+            SourceSpecificDetailsSection(encounter = deviceEncounter, currentLocation = currentLocation)
+        }
     }
 }
 
@@ -1214,7 +1608,15 @@ private fun EncounterDetailPage(
     encounter: Encounter?,
     onBack: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val context = LocalContext.current
+    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         Button(onClick = onBack) {
             Text("Back")
         }
@@ -1229,7 +1631,79 @@ private fun EncounterDetailPage(
         DetailRow("Timestamp", formatEpoch(encounter.timestampEpochMs))
         DetailRow("RSSI", encounter.rssiDbm?.toString() ?: "n/a")
         DetailRow("Frequency", encounter.frequencyMhz?.toString() ?: "n/a")
+        if (encounter.rawPayloadJson.isNotBlank()) {
+            SourceSpecificDetailsSection(encounter = encounter, currentLocation = currentLocation)
+        }
         DetailRow("Payload", encounter.rawPayloadJson)
+    }
+}
+
+@Composable
+private fun SourceSpecificDetailsSection(
+    encounter: Encounter,
+    currentLocation: DetectionLocation?
+) {
+    val scope = rememberCoroutineScope()
+    var lookupInProgress by remember(encounter.primaryId, encounter.timestampEpochMs) { mutableStateOf(false) }
+    var lookupResult by remember(encounter.primaryId, encounter.timestampEpochMs) { mutableStateOf<TowerLookupResult?>(null) }
+    val details = remember(encounter) { sourceSpecificDetails(encounter) }
+    val sectionTitle = details.first
+    val sectionFields = details.second
+
+    Text(sectionTitle, fontWeight = FontWeight.Bold)
+    if (sectionFields.isEmpty()) {
+        Text("No parsed source-specific fields available for this encounter.")
+    } else {
+        sectionFields.forEach { (label, value) ->
+            DetailRow(label, value)
+        }
+    }
+
+    if (encounter.source == EncounterSource.CELL) {
+        Button(
+            enabled = !lookupInProgress,
+            onClick = {
+                scope.launch {
+                    lookupInProgress = true
+                    lookupResult = CellTowerLookupService.lookup(encounter)
+                    lookupInProgress = false
+                }
+            }
+        ) {
+            Text(if (lookupInProgress) "Looking up tower..." else "Estimate Tower Location")
+        }
+
+        when (val result = lookupResult) {
+            is TowerLookupResult.Success -> {
+                val estimate = result.estimate
+                DetailRow(
+                    "Estimated Tower Location",
+                    String.format(Locale.US, "%.6f, %.6f", estimate.latitude, estimate.longitude)
+                )
+                DetailRow(
+                    "Lookup Accuracy",
+                    estimate.accuracyMeters?.let { String.format(Locale.US, "~%.0f m", it) } ?: "n/a"
+                )
+                DetailRow("Lookup Provider", estimate.provider)
+                if (currentLocation != null) {
+                    DetailRow(
+                        "Range From Device",
+                        formatTowerRangeFeetMiles(
+                            fromLat = currentLocation.lat,
+                            fromLon = currentLocation.lon,
+                            toLat = estimate.latitude,
+                            toLon = estimate.longitude
+                        )
+                    )
+                }
+            }
+
+            is TowerLookupResult.Failure -> {
+                DetailRow("Tower Lookup", "Failed: ${result.reason}")
+            }
+
+            null -> Unit
+        }
     }
 }
 
