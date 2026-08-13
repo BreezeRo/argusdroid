@@ -73,6 +73,7 @@ import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.MainActivity
 import dev.argus.tracker.ArgusApplication
@@ -322,6 +323,29 @@ private object AlertLogStore {
             .edit()
             .putString(KEY_ALERT_LOG_ENTRIES, array.toString())
             .apply()
+    }
+}
+
+private object ApproachTrackStore {
+    private const val PREFS_NAME = "argus_settings"
+    private const val KEY_APPROACH_TRACK_STARTS = "approach_track_starts"
+
+    fun getTrackStartEpochMs(context: android.content.Context, source: String, primaryId: String): Long? {
+        val key = "${source}|${primaryId}"
+        val raw = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_APPROACH_TRACK_STARTS, "{}")
+            .orEmpty()
+        val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+        return obj.optLong(key, -1L).takeIf { it > 0L }
+    }
+
+    fun setTrackStartEpochMs(context: android.content.Context, source: String, primaryId: String, epochMs: Long) {
+        val key = "${source}|${primaryId}"
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_APPROACH_TRACK_STARTS, "{}").orEmpty()
+        val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+        obj.put(key, epochMs.coerceAtLeast(0L))
+        prefs.edit().putString(KEY_APPROACH_TRACK_STARTS, obj.toString()).apply()
     }
 }
 
@@ -1096,10 +1120,34 @@ private fun ApproachAlertMapPage(
     }
 
     var observerLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
+    var observerLastUpdatedEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var nowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
     val targetEncounters = remember(encounters, source, primaryId) {
         encounters
             .filter { it.source.name == source && it.primaryId == primaryId }
             .sortedByDescending { it.timestampEpochMs }
+    }
+    val trackStartEpochMs = remember(source, primaryId, targetEncounters.size) {
+        ApproachTrackStore.getTrackStartEpochMs(context, source, primaryId)
+    }
+    val trackedPathPoints = remember(targetEncounters, trackStartEpochMs) {
+        targetEncounters
+            .asReversed()
+            .filter { encounter ->
+                val start = trackStartEpochMs
+                start == null || encounter.timestampEpochMs >= start
+            }
+            .mapNotNull { encounter ->
+                if (!isValidLatLon(encounter.lat, encounter.lon)) return@mapNotNull null
+                LatLng(encounter.lat!!, encounter.lon!!)
+            }
+            .fold(mutableListOf<LatLng>()) { acc, point ->
+                val previous = acc.lastOrNull()
+                if (previous == null || previous.latitude != point.latitude || previous.longitude != point.longitude) {
+                    acc += point
+                }
+                acc
+            }
     }
     val targetEstimate = remember(targetEncounters) {
         estimateApproachingDeviceLocation(targetEncounters)
@@ -1109,7 +1157,15 @@ private fun ApproachAlertMapPage(
         val loopMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L)
         while (true) {
             observerLocation = LocationSnapshotProvider.read(context)
+            observerLastUpdatedEpochMs = System.currentTimeMillis()
             delay(loopMs)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowEpochMs = System.currentTimeMillis()
+            delay(1000)
         }
     }
 
@@ -1137,6 +1193,23 @@ private fun ApproachAlertMapPage(
     }
 
     val latestTargetSeen = targetEncounters.firstOrNull()?.timestampEpochMs
+    val observerAgeMs = (nowEpochMs - observerLastUpdatedEpochMs).coerceAtLeast(0L)
+    val targetAgeMs = latestTargetSeen?.let { (nowEpochMs - it).coerceAtLeast(0L) }
+    val observerFreshnessMs = maxOf(15_000L, liveMapUpdateIntervalSeconds * 2_000L)
+    val targetFreshnessMs = maxOf(30_000L, liveMapUpdateIntervalSeconds * 3_000L)
+    val observerIsLive = observerLocation != null && observerAgeMs <= observerFreshnessMs
+    val targetIsLive = targetAgeMs != null && targetAgeMs <= targetFreshnessMs
+    val mapIsLive = observerIsLive && targetIsLive
+
+    fun formatAge(ageMs: Long?): String {
+        if (ageMs == null) return "n/a"
+        return when {
+            ageMs < 1_000L -> "just now"
+            ageMs < 60_000L -> "${ageMs / 1000L}s ago"
+            else -> "${ageMs / 60_000L}m ago"
+        }
+    }
+
     val separationMeters = run {
         val observer = observerLocation
         val target = targetEstimate?.first
@@ -1157,7 +1230,28 @@ private fun ApproachAlertMapPage(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text("Approach Alert Map", style = MaterialTheme.typography.headlineSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AssistChip(
+                onClick = { },
+                label = { Text(if (mapIsLive) "LIVE" else "STALE") },
+                leadingIcon = {
+                    Text(
+                        "●",
+                        color = if (mapIsLive) Color(0xFF2E7D32) else Color(0xFFB3261E)
+                    )
+                }
+            )
+            Text(
+                text = "Observer ${formatAge(observerAgeMs)} | Target ${formatAge(targetAgeMs)}",
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
         Text("Target: ${listSourceLabel(source, null)} $primaryId")
+        Text(
+            "Tracking path since: ${trackStartEpochMs?.let(::formatEpoch) ?: "Not started"}"
+        )
+        Text("Path points: ${trackedPathPoints.size}")
         Text("Target last seen: ${latestTargetSeen?.let(::formatEpoch) ?: "Unknown"}")
         Text("Observer location: ${observerLocation?.let { "${it.lat}, ${it.lon}" } ?: "Unavailable"}")
         Text("Target estimate: ${targetEstimate?.second ?: "Unavailable"}")
@@ -1189,6 +1283,23 @@ private fun ApproachAlertMapPage(
                     title = "Approaching device",
                     snippet = "$source $primaryId",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                )
+            }
+
+            if (trackedPathPoints.size >= 2) {
+                Polyline(
+                    points = trackedPathPoints,
+                    color = Color(0xFFD32F2F),
+                    width = 8f
+                )
+            }
+
+            trackedPathPoints.firstOrNull()?.let { startPoint ->
+                Marker(
+                    state = MarkerState(position = startPoint),
+                    title = "Path start",
+                    snippet = "Start of approach tracking",
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_YELLOW)
                 )
             }
         }
