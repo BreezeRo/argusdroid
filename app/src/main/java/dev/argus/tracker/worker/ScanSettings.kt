@@ -25,14 +25,52 @@ object ScanSettings {
     private const val KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED = "chain_persistent_channel_enabled"
     private const val KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS = "chain_heartbeat_interval_seconds"
     private const val KEY_CHAIN_DEVICE_NAME = "chain_device_name"
+    private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
+    private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
+    private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
+    private const val KEY_SCAN_INTERVAL_CHANGE_EVENTS = "scan_interval_change_events"
+    private const val KEY_SOURCE_TIMING_COUNT_SUFFIX = "_scan_timing_count"
+    private const val KEY_SOURCE_TIMING_TOTAL_MS_SUFFIX = "_scan_timing_total_ms"
+    private const val KEY_SOURCE_TIMING_MAX_MS_SUFFIX = "_scan_timing_max_ms"
+    private const val KEY_SOURCE_TIMING_LAST_MS_SUFFIX = "_scan_timing_last_ms"
+    private const val KEY_SOURCE_TIMING_WINDOW_SUFFIX = "_scan_timing_window"
+    private const val KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX = "_scan_interval_seconds"
+    private const val KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX = "_last_scan_epoch_ms"
+    private const val SOURCE_TIMING_WINDOW_SIZE = 120
+    private const val MAX_INTERVAL_CHANGE_EVENTS = 50
     const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L * 60L
     const val MIN_PERIODIC_INTERVAL_SECONDS = 15L * 60L
     const val DEFAULT_CHAIN_SYNC_WINDOW_MINUTES = 120L
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
-    val ALLOWED_INTERVALS_SECONDS = listOf(5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
+    const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
+    const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 5L
+    const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
+    const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
+    val ALLOWED_INTERVALS_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
+    val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
+    val SOURCE_TYPES = listOf("wifi", "ble", "cellular", "remote_id")
+    val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> =
+        (1L..60L).toList() + listOf(120L, 300L, 600L, 1800L, 3600L)
+
+    data class SourceScanTiming(
+        val sourceType: String,
+        val sampleCount: Long,
+        val averageDurationMs: Long,
+        val maxDurationMs: Long,
+        val lastDurationMs: Long,
+        val p50DurationMs: Long,
+        val p95DurationMs: Long
+    )
+
+    data class IntervalChangeEvent(
+        val timestampEpochMs: Long,
+        val fromSeconds: Long,
+        val toSeconds: Long,
+        val reason: String
+    )
 
     fun getScanIntervalSeconds(context: Context): Long {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -259,6 +297,218 @@ object ScanSettings {
             .putString(KEY_CHAIN_DEVICE_NAME, normalized)
             .apply()
     }
+
+    fun getLiveMapUpdateIntervalSeconds(context: Context): Long {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS)
+        return value.takeIf { it in ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS }
+            ?: DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
+    }
+
+    fun setLiveMapUpdateIntervalSeconds(context: Context, seconds: Long) {
+        val safeValue = if (seconds in ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS) {
+            seconds
+        } else {
+            DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
+        }
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, safeValue)
+            .apply()
+    }
+
+    fun getLastScanDurationMs(context: Context): Long? {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_SCAN_DURATION_MS, -1L)
+        return value.takeIf { it >= 0L }
+    }
+
+    fun setLastScanDurationMs(context: Context, durationMs: Long) {
+        val safeValue = durationMs.coerceAtLeast(0L)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_SCAN_DURATION_MS, safeValue)
+            .apply()
+    }
+
+    fun appendScanIntervalChangeEvent(
+        context: Context,
+        fromSeconds: Long,
+        toSeconds: Long,
+        reason: String,
+        timestampEpochMs: Long = System.currentTimeMillis()
+    ) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = decodeIntervalChangeEvents(prefs.getString(KEY_SCAN_INTERVAL_CHANGE_EVENTS, null))
+        val updated = (existing + IntervalChangeEvent(
+            timestampEpochMs = timestampEpochMs,
+            fromSeconds = fromSeconds.coerceAtLeast(0L),
+            toSeconds = toSeconds.coerceAtLeast(0L),
+            reason = reason.trim().ifBlank { "unknown" }
+        )).takeLast(MAX_INTERVAL_CHANGE_EVENTS)
+
+        prefs.edit()
+            .putString(KEY_SCAN_INTERVAL_CHANGE_EVENTS, encodeIntervalChangeEvents(updated))
+            .apply()
+    }
+
+    fun getScanIntervalChangeEvents(context: Context, limit: Int = 10): List<IntervalChangeEvent> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val all = decodeIntervalChangeEvents(prefs.getString(KEY_SCAN_INTERVAL_CHANGE_EVENTS, null))
+        return all.takeLast(limit.coerceAtLeast(1)).asReversed()
+    }
+
+    fun isAutoAdjustScanIntervalEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED, false)
+
+    fun setAutoAdjustScanIntervalEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getSourceScanIntervalSeconds(context: Context, sourceType: String): Long {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
+        val value = prefs.getLong(key, DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS)
+        return value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+    }
+
+    fun setSourceScanIntervalSeconds(context: Context, sourceType: String, seconds: Long) {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return
+        val safeValue = seconds.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(key, safeValue)
+            .apply()
+    }
+
+    fun getAllSourceScanIntervalSeconds(context: Context): Map<String, Long> =
+        SOURCE_TYPES.associateWith { type -> getSourceScanIntervalSeconds(context, type) }
+
+    fun getSourceLastScanEpochMs(context: Context, sourceType: String): Long {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return 0L
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX)
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(key, 0L)
+            .coerceAtLeast(0L)
+    }
+
+    fun setSourceLastScanEpochMs(context: Context, sourceType: String, epochMs: Long) {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return
+        val safeValue = epochMs.coerceAtLeast(0L)
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(key, safeValue)
+            .apply()
+    }
+
+    fun getAllSourceLastScanEpochMs(context: Context): Map<String, Long> =
+        SOURCE_TYPES.associateWith { type -> getSourceLastScanEpochMs(context, type) }
+
+    fun recordSourceScanDurationMs(context: Context, sourceType: String, durationMs: Long) {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType.isBlank()) return
+        val safeValue = durationMs.coerceAtLeast(0L)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val countKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_COUNT_SUFFIX)
+        val totalKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_TOTAL_MS_SUFFIX)
+        val maxKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_MAX_MS_SUFFIX)
+        val lastKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_LAST_MS_SUFFIX)
+        val windowKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_WINDOW_SUFFIX)
+
+        val currentCount = prefs.getLong(countKey, 0L)
+        val currentTotal = prefs.getLong(totalKey, 0L)
+        val currentMax = prefs.getLong(maxKey, 0L)
+        val updatedWindow = (parseDurationWindow(prefs.getString(windowKey, null)) + safeValue)
+            .takeLast(SOURCE_TIMING_WINDOW_SIZE)
+
+        prefs.edit()
+            .putLong(countKey, currentCount + 1L)
+            .putLong(totalKey, currentTotal + safeValue)
+            .putLong(maxKey, maxOf(currentMax, safeValue))
+            .putLong(lastKey, safeValue)
+            .putString(windowKey, encodeDurationWindow(updatedWindow))
+            .apply()
+    }
+
+    fun getSourceScanTimings(context: Context): List<SourceScanTiming> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return SOURCE_TYPES.mapNotNull { type ->
+            val count = prefs.getLong(sourceTimingKey(type, KEY_SOURCE_TIMING_COUNT_SUFFIX), 0L)
+            if (count <= 0L) return@mapNotNull null
+
+            val total = prefs.getLong(sourceTimingKey(type, KEY_SOURCE_TIMING_TOTAL_MS_SUFFIX), 0L)
+            val max = prefs.getLong(sourceTimingKey(type, KEY_SOURCE_TIMING_MAX_MS_SUFFIX), 0L)
+            val last = prefs.getLong(sourceTimingKey(type, KEY_SOURCE_TIMING_LAST_MS_SUFFIX), 0L)
+            val windowValues = parseDurationWindow(
+                prefs.getString(sourceTimingKey(type, KEY_SOURCE_TIMING_WINDOW_SUFFIX), null)
+            )
+            SourceScanTiming(
+                sourceType = type,
+                sampleCount = count,
+                averageDurationMs = (total / count).coerceAtLeast(0L),
+                maxDurationMs = max.coerceAtLeast(0L),
+                lastDurationMs = last.coerceAtLeast(0L),
+                p50DurationMs = percentile(windowValues, 0.50),
+                p95DurationMs = percentile(windowValues, 0.95)
+            )
+        }
+    }
+
+    private fun parseDurationWindow(raw: String?): List<Long> =
+        raw
+            ?.split(',')
+            ?.mapNotNull { it.trim().toLongOrNull() }
+            ?.map { it.coerceAtLeast(0L) }
+            ?: emptyList()
+
+    private fun encodeDurationWindow(values: List<Long>): String =
+        values.joinToString(separator = ",") { it.toString() }
+
+    private fun percentile(values: List<Long>, p: Double): Long {
+        if (values.isEmpty()) return 0L
+        val sorted = values.sorted()
+        val idx = ((sorted.lastIndex) * p).toInt().coerceIn(0, sorted.lastIndex)
+        return sorted[idx]
+    }
+
+    private fun encodeIntervalChangeEvents(events: List<IntervalChangeEvent>): String =
+        events.joinToString(separator = "\n") { event ->
+            listOf(
+                event.timestampEpochMs.toString(),
+                event.fromSeconds.toString(),
+                event.toSeconds.toString(),
+                event.reason.replace("|", "/")
+            ).joinToString("|")
+        }
+
+    private fun decodeIntervalChangeEvents(raw: String?): List<IntervalChangeEvent> =
+        raw
+            ?.lineSequence()
+            ?.mapNotNull { line ->
+                val parts = line.split("|", limit = 4)
+                if (parts.size < 4) return@mapNotNull null
+                val timestamp = parts[0].toLongOrNull() ?: return@mapNotNull null
+                val from = parts[1].toLongOrNull() ?: return@mapNotNull null
+                val to = parts[2].toLongOrNull() ?: return@mapNotNull null
+                val reason = parts[3].trim().ifBlank { "unknown" }
+                IntervalChangeEvent(timestamp, from, to, reason)
+            }
+            ?.toList()
+            ?: emptyList()
+
+    private fun sourceTimingKey(sourceType: String, suffix: String): String =
+        "${sourceType}${suffix}"
 
     private fun setSensorEnabled(context: Context, key: String, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

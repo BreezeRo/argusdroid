@@ -18,10 +18,15 @@ class ArgusWorker(
         val repository = container.repository
         val chainLinkCoordinator = container.chainLinkCoordinator
 
-        val batch = runCatching { sensingService.collectBatch() }.getOrDefault(emptyList())
-        runCatching { repository.insertBatch(batch) }
+        val scanResult = runCatching { sensingService.collectBatchWithMetrics() }
+            .getOrDefault(dev.argus.tracker.sensing.ScanBatchResult(emptyList(), emptyMap(), 0L))
+        runCatching { repository.insertBatch(scanResult.encounters) }
         runCatching { chainLinkCoordinator.syncNow() }
         runCatching { WorkScheduler.scheduleNextIfNeeded(applicationContext) }
+        ScanSettings.setLastScanDurationMs(applicationContext, scanResult.totalDurationMs)
+        scanResult.sourceDurationsMs.forEach { (sourceType, durationMs) ->
+            ScanSettings.recordSourceScanDurationMs(applicationContext, sourceType, durationMs)
+        }
         return Result.success()
     }
 }

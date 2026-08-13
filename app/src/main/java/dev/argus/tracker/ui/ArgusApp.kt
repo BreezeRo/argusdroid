@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
@@ -54,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
@@ -73,6 +75,7 @@ import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.chain.ChainMeshSnapshot
 import dev.argus.tracker.data.chain.ChainPeerState
+import dev.argus.tracker.data.chain.MeshForegroundServiceController
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterProvenance
 import dev.argus.tracker.domain.EncounterSource
@@ -119,14 +122,12 @@ private enum class DeviceSortMode {
 private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
-private const val DEVICES_ROUTE = "devices"
-private const val ENCOUNTERS_ROUTE = "encounters"
+private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 
-private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, DEVICES_ROUTE, ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
+private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, DEVICES_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-private const val LIVE_SCAN_INTERVAL_MS = 5000L
 private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
@@ -176,6 +177,10 @@ private data class DeviceItem(
     val lastRawPayloadJson: String?,
     val lastProvenance: EncounterProvenance,
     val lastProvenanceNodeId: String?,
+    val lastProvenanceOriginNodeId: String?,
+    val lastProvenancePathNodeIds: String?,
+    val lastProvenanceReceivedAtEpochMs: Long?,
+    val lastProvenanceHopCount: Int,
     val hasChainLinkedData: Boolean,
     val chainLinkedPeerCount: Int,
     val isApproaching: Boolean,
@@ -334,6 +339,9 @@ fun ArgusApp() {
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
     var scanIntervalSeconds by remember { mutableStateOf(ScanSettings.getScanIntervalSeconds(context)) }
+    var liveMapUpdateIntervalSeconds by remember { mutableStateOf(ScanSettings.getLiveMapUpdateIntervalSeconds(context)) }
+    var sourceScanIntervals by remember { mutableStateOf(ScanSettings.getAllSourceScanIntervalSeconds(context)) }
+    var sourceLastScanEpochs by remember { mutableStateOf(ScanSettings.getAllSourceLastScanEpochMs(context)) }
     var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
@@ -348,6 +356,12 @@ fun ArgusApp() {
     var chainHeartbeatIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainHeartbeatIntervalSeconds(context)) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
     var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
+    var lastScanDurationMs by remember { mutableStateOf(ScanSettings.getLastScanDurationMs(context)) }
+    var sourceScanTimings by remember { mutableStateOf(ScanSettings.getSourceScanTimings(context)) }
+    var autoAdjustScanIntervalEnabled by remember { mutableStateOf(ScanSettings.isAutoAdjustScanIntervalEnabled(context)) }
+    var scanIntervalChangeEvents by remember { mutableStateOf(ScanSettings.getScanIntervalChangeEvents(context, 10)) }
+    var autoAdjustConsecutiveOverruns by remember { mutableStateOf(mapOf<String, Int>()) }
+    var autoAdjustStableCycles by remember { mutableStateOf(mapOf<String, Int>()) }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
     val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
@@ -361,6 +375,52 @@ fun ArgusApp() {
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
+    val autoAdjustSuggestedIntervalSeconds = remember(sourceScanTimings, sensorGateSettings) {
+        computeRecommendedIntervalSeconds(sourceScanTimings, sensorGateSettings)
+    }
+    val autoAdjustSuggestedBySource = remember(sourceScanTimings) {
+        sourceScanTimings.associate { timing ->
+            timing.sourceType to suggestSafeIntervalSeconds(timing.p95DurationMs)
+        }
+    }
+
+    suspend fun applyScanInterval(seconds: Long, sourceLabel: String, reasonCode: String) {
+        val previous = scanIntervalSeconds
+        if (seconds == previous) return
+        scanIntervalSeconds = seconds
+        ScanSettings.setScanIntervalSeconds(context, seconds)
+        ScanSettings.appendScanIntervalChangeEvent(
+            context = context,
+            fromSeconds = previous,
+            toSeconds = seconds,
+            reason = reasonCode
+        )
+        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+        if (trackingActive) {
+            WorkScheduler.stop(context)
+            val restartResult = WorkScheduler.startAndVerify(context)
+            trackingStartMessage = if (restartResult.success) {
+                "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)} and restarted tracking."
+            } else {
+                "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)}, but restart failed: ${restartResult.message}"
+            }
+            trackingStartMessageIsError = !restartResult.success
+            trackingActive = WorkScheduler.isTrackingActive(context)
+        } else {
+            trackingStartMessage = "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)}."
+            trackingStartMessageIsError = false
+        }
+    }
+
+    fun minimumEnabledSourceIntervalSeconds(): Long {
+        val enabled = enabledSourceTypes(sensorGateSettings)
+        if (enabled.isEmpty()) return scanIntervalSeconds
+        return enabled
+            .map { source -> sourceScanIntervals[source] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS }
+            .minOrNull()
+            ?.coerceAtLeast(1L)
+            ?: scanIntervalSeconds
+    }
 
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
@@ -374,8 +434,82 @@ fun ArgusApp() {
         chainAutoSyncIntervalSeconds = ScanSettings.getChainAutoSyncIntervalSeconds(context)
         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
+        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
+        sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+        sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+        lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
+        sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
+        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
         sensorStatuses = SensorStatusProvider.read(context)
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
+        MeshForegroundServiceController.ensureState(context)
+    }
+
+    LaunchedEffect(autoAdjustScanIntervalEnabled, trackingActive, sourceScanTimings, sensorGateSettings, sourceScanIntervals, scanIntervalSeconds) {
+        if (!autoAdjustScanIntervalEnabled || !trackingActive) return@LaunchedEffect
+
+        while (true) {
+            val timingBySource = sourceScanTimings.associateBy { it.sourceType }
+            enabledSourceTypes(sensorGateSettings).forEach { sourceType ->
+                val timing = timingBySource[sourceType] ?: return@forEach
+                val currentSourceInterval = sourceScanIntervals[sourceType]
+                    ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+                val currentSourceIntervalMs = currentSourceInterval * 1000L
+                val overrun = timing.lastDurationMs > currentSourceIntervalMs
+                val suggestedSource = autoAdjustSuggestedBySource[sourceType] ?: currentSourceInterval
+
+                val overrunCount = autoAdjustConsecutiveOverruns[sourceType] ?: 0
+                val stableCount = autoAdjustStableCycles[sourceType] ?: 0
+
+                if (overrun) {
+                    autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to (overrunCount + 1))
+                    autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to 0)
+                    if (overrunCount + 1 >= 2) {
+                        val updated = (currentSourceInterval + 1L)
+                            .coerceAtMost(ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+                        if (updated != currentSourceInterval) {
+                            ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
+                            sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
+                            ScanSettings.appendScanIntervalChangeEvent(
+                                context = context,
+                                fromSeconds = currentSourceInterval,
+                                toSeconds = updated,
+                                reason = "auto-overrun-$sourceType"
+                            )
+                            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        }
+                        autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to 0)
+                    }
+                } else {
+                    autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to 0)
+                    autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to (stableCount + 1))
+                    if (stableCount + 1 >= 10 && currentSourceInterval > suggestedSource) {
+                        val updated = (currentSourceInterval - 1L)
+                            .coerceAtLeast(suggestedSource)
+                            .coerceAtLeast(ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS)
+                        if (updated != currentSourceInterval) {
+                            ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
+                            sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
+                            ScanSettings.appendScanIntervalChangeEvent(
+                                context = context,
+                                fromSeconds = currentSourceInterval,
+                                toSeconds = updated,
+                                reason = "auto-stable-$sourceType"
+                            )
+                            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        }
+                        autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to 0)
+                    }
+                }
+            }
+
+            val schedulerTick = minimumEnabledSourceIntervalSeconds()
+            if (schedulerTick != scanIntervalSeconds) {
+                applyScanInterval(schedulerTick, "Auto-adjust", "scheduler-align")
+            }
+            delay(2000)
+        }
     }
 
     LaunchedEffect(chainLinkEnabled, chainAutoSyncEnabled, chainAutoSyncIntervalSeconds, chainSharedSecret) {
@@ -399,6 +533,11 @@ fun ArgusApp() {
     LaunchedEffect(context) {
         while (true) {
             trackingActive = WorkScheduler.isTrackingActive(context)
+            lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
+            sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+            sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+            sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
             delay(1000)
         }
     }
@@ -537,16 +676,10 @@ fun ArgusApp() {
                         label = { Text("Detection") }
                     )
                     NavigationBarItem(
-                        selected = currentRoute == DEVICES_ROUTE,
-                        onClick = { navController.navigate(DEVICES_ROUTE) },
+                        selected = currentRoute == DEVICES_ENCOUNTERS_ROUTE,
+                        onClick = { navController.navigate(DEVICES_ENCOUNTERS_ROUTE) },
                         icon = { Text("D") },
-                        label = { Text("Devices") }
-                    )
-                    NavigationBarItem(
-                        selected = currentRoute == ENCOUNTERS_ROUTE,
-                        onClick = { navController.navigate(ENCOUNTERS_ROUTE) },
-                        icon = { Text("E") },
-                        label = { Text("Encounters") }
+                        label = { Text("Devices & Encounters") }
                     )
                     NavigationBarItem(
                         selected = currentRoute == SETTINGS_ROUTE,
@@ -569,6 +702,11 @@ fun ArgusApp() {
                 HomePage(
                     trackingActive = trackingActive,
                     lastScanEpochMs = lastScanEpochMs,
+                    lastScanDurationMs = lastScanDurationMs,
+                    scanIntervalSeconds = scanIntervalSeconds,
+                    sourceScanTimings = sourceScanTimings,
+                    sourceScanIntervals = sourceScanIntervals,
+                    sourceLastScanEpochs = sourceLastScanEpochs,
                     sensorStatuses = sensorStatuses,
                     sensorGateSettings = sensorGateSettings,
                     summary = summary,
@@ -640,35 +778,62 @@ fun ArgusApp() {
             composable(SETTINGS_ROUTE) {
                 AppSettingsPage(
                     scanIntervalSeconds = scanIntervalSeconds,
+                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
+                    sourceScanIntervals = sourceScanIntervals,
+                    lastScanDurationMs = lastScanDurationMs,
+                    sourceScanTimings = sourceScanTimings,
+                    scanIntervalChangeEvents = scanIntervalChangeEvents,
+                    autoAdjustScanIntervalEnabled = autoAdjustScanIntervalEnabled,
+                    autoAdjustSuggestedIntervalSeconds = autoAdjustSuggestedIntervalSeconds,
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
-                    chainLinkEnabled = chainLinkEnabled,
-                    chainNodeId = chainNodeId,
-                    chainDeviceName = chainDeviceName,
-                    chainSharedSecret = chainSharedSecret,
-                    chainAutoSyncEnabled = chainAutoSyncEnabled,
-                    chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
-                    chainPersistentChannelEnabled = chainPersistentChannelEnabled,
-                    chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
-                    chainMeshSnapshot = chainMesh,
                     onScanIntervalSelected = { seconds ->
                         scope.launch {
-                            scanIntervalSeconds = seconds
-                            ScanSettings.setScanIntervalSeconds(context, seconds)
-                            if (trackingActive) {
-                                WorkScheduler.stop(context)
-                                val restartResult = WorkScheduler.startAndVerify(context)
-                                trackingStartMessage = if (restartResult.success) {
-                                    "Scan interval updated to ${ScanSettings.formatInterval(seconds)} and tracking restarted."
-                                } else {
-                                    "Scan interval saved, but restart failed: ${restartResult.message}"
+                            applyScanInterval(seconds, "Manual update", "manual")
+                        }
+                    },
+                    onAutoAdjustScanIntervalChanged = { enabled ->
+                        autoAdjustScanIntervalEnabled = enabled
+                        ScanSettings.setAutoAdjustScanIntervalEnabled(context, enabled)
+                        autoAdjustConsecutiveOverruns = emptyMap()
+                        autoAdjustStableCycles = emptyMap()
+                        if (enabled) {
+                            scope.launch {
+                                val alignedSourceIntervals = ScanSettings.SOURCE_TYPES.associateWith { source ->
+                                    val suggested = autoAdjustSuggestedBySource[source]
+                                        ?: (sourceScanIntervals[source] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS)
+                                    ScanSettings.setSourceScanIntervalSeconds(context, source, suggested)
+                                    suggested
                                 }
-                                trackingStartMessageIsError = !restartResult.success
-                                trackingActive = WorkScheduler.isTrackingActive(context)
-                            } else {
-                                trackingStartMessage = "Scan interval updated to ${ScanSettings.formatInterval(seconds)}."
-                                trackingStartMessageIsError = false
+                                sourceScanIntervals = alignedSourceIntervals
+                                val schedulerTick = minimumEnabledSourceIntervalSeconds()
+                                if (schedulerTick != scanIntervalSeconds) {
+                                    applyScanInterval(schedulerTick, "Auto-adjust", "auto-bootstrap")
+                                }
+                            }
+                        }
+                    },
+                    onSourceScanIntervalSelected = { sourceType, seconds ->
+                        val previous = sourceScanIntervals[sourceType]
+                            ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+                        val updated = seconds.coerceIn(
+                            ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
+                            ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
+                        )
+                        ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
+                        sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
+                        ScanSettings.appendScanIntervalChangeEvent(
+                            context = context,
+                            fromSeconds = previous,
+                            toSeconds = updated,
+                            reason = "manual-$sourceType"
+                        )
+                        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        scope.launch {
+                            val schedulerTick = minimumEnabledSourceIntervalSeconds()
+                            if (schedulerTick != scanIntervalSeconds) {
+                                applyScanInterval(schedulerTick, "Scheduler alignment", "scheduler-align")
                             }
                         }
                     },
@@ -684,6 +849,94 @@ fun ArgusApp() {
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
                     },
+                    onLiveMapUpdateIntervalSelected = { seconds ->
+                        liveMapUpdateIntervalSeconds = seconds
+                        ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
+                    }
+                )
+            }
+
+            composable(DETECTION_ROUTE) {
+                DetectionPage(
+                    readinessItems = readinessItems,
+                    encounters = recent,
+                    approachDetectionEnabled = approachDetectionEnabled,
+                    ownedDeviceKeys = ownedDeviceKeys,
+                    alertLogs = alertLogs,
+                    chainLinkEnabled = chainLinkEnabled,
+                    chainNodeId = chainNodeId,
+                    chainDeviceName = chainDeviceName,
+                    chainSharedSecret = chainSharedSecret,
+                    chainAutoSyncEnabled = chainAutoSyncEnabled,
+                    chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
+                    chainPersistentChannelEnabled = chainPersistentChannelEnabled,
+                    chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
+                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
+                    chainMeshSnapshot = chainMesh,
+                    onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
+                        navController.navigate(
+                            "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
+                        )
+                    },
+                    onDeviceMapPinClick = { source, primaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        )
+                    },
+                    onRefresh = {
+                        readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                    },
+                    onLiveCollect = {
+                        runCatching {
+                            val scanResult = app.container.sensingService.collectBatchWithMetrics()
+                            app.container.repository.insertBatch(scanResult.encounters)
+                            ScanSettings.setLastScanDurationMs(context, scanResult.totalDurationMs)
+                            scanResult.sourceDurationsMs.forEach { (sourceType, durationMs) ->
+                                ScanSettings.recordSourceScanDurationMs(context, sourceType, durationMs)
+                            }
+                            lastScanDurationMs = scanResult.totalDurationMs
+                            sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+                            val chainStats = app.container.chainLinkCoordinator.syncNow()
+                            viewModel.refreshSummary()
+                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
+                            if (scanResult.encounters.isEmpty()) {
+                                if (chainStats.enabled) {
+                                    if (!chainStats.authConfigured) {
+                                        "Live scan completed: set a shared chain passphrase to enable secure peer sync."
+                                    } else {
+                                        "Live scan completed: no local detections. Chain imported ${chainStats.importedRecords} from ${chainStats.peersSynced} peers."
+                                    }
+                                } else {
+                                    "Live scan completed: no detections this cycle."
+                                }
+                            } else {
+                                if (chainStats.enabled) {
+                                    if (!chainStats.authConfigured) {
+                                        "Live scan added ${scanResult.encounters.size} local detections. Configure a shared chain passphrase to sync peers."
+                                    } else {
+                                        "Live scan added ${scanResult.encounters.size} local detections and ${chainStats.importedRecords} chain detections."
+                                    }
+                                } else {
+                                    "Live scan added ${scanResult.encounters.size} detections."
+                                }
+                            }
+                        }.getOrElse { error ->
+                            "Live scan failed: ${error.message ?: "unknown error"}"
+                        }
+                    },
+                    onOpenReadinessSetting = { item ->
+                        runCatching {
+                            context.startActivity(item.settingsIntent)
+                        }.recoverCatching {
+                            context.startActivity(
+                                android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                            )
+                        }
+                    },
+                    onClearAlertLogs = {
+                        AlertLogStore.clear(context)
+                        alertLogs = emptyList()
+                    },
                     onChainLinkChanged = { enabled ->
                         chainLinkEnabled = enabled
                         ScanSettings.setChainLinkEnabled(context, enabled)
@@ -692,14 +945,15 @@ fun ArgusApp() {
                         } else {
                             app.container.chainLinkCoordinator.stopServer()
                         }
-                    },
-                    onChainSharedSecretChanged = { newSecret ->
-                        chainSharedSecret = newSecret.trim()
-                        ScanSettings.setChainSharedSecret(context, newSecret)
+                        MeshForegroundServiceController.ensureState(context)
                     },
                     onChainDeviceNameChanged = { newName ->
                         chainDeviceName = newName
                         ScanSettings.setChainDeviceName(context, newName)
+                    },
+                    onChainSharedSecretChanged = { newSecret ->
+                        chainSharedSecret = newSecret.trim()
+                        ScanSettings.setChainSharedSecret(context, newSecret)
                     },
                     onChainAutoSyncChanged = { enabled ->
                         chainAutoSyncEnabled = enabled
@@ -715,6 +969,7 @@ fun ArgusApp() {
                         if (enabled) {
                             app.container.chainLinkCoordinator.ensureServerRunning()
                         }
+                        MeshForegroundServiceController.ensureState(context)
                     },
                     onChainHeartbeatIntervalChanged = { seconds ->
                         chainHeartbeatIntervalSeconds = seconds
@@ -739,76 +994,8 @@ fun ArgusApp() {
                 )
             }
 
-            composable(DETECTION_ROUTE) {
-                DetectionPage(
-                    readinessItems = readinessItems,
-                    encounters = recent,
-                    approachDetectionEnabled = approachDetectionEnabled,
-                    ownedDeviceKeys = ownedDeviceKeys,
-                    alertLogs = alertLogs,
-                    onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
-                        navController.navigate(
-                            "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
-                        )
-                    },
-                    onDeviceMapPinClick = { source, primaryId ->
-                        navController.navigate(
-                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
-                        )
-                    },
-                    onRefresh = {
-                        readinessItems = DetectionReadinessAdvisor.evaluate(context)
-                    },
-                    onLiveCollect = {
-                        runCatching {
-                            val batch = app.container.sensingService.collectBatch()
-                            app.container.repository.insertBatch(batch)
-                            val chainStats = app.container.chainLinkCoordinator.syncNow()
-                            viewModel.refreshSummary()
-                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
-                            if (batch.isEmpty()) {
-                                if (chainStats.enabled) {
-                                    if (!chainStats.authConfigured) {
-                                        "Live scan completed: set a shared chain passphrase to enable secure peer sync."
-                                    } else {
-                                        "Live scan completed: no local detections. Chain imported ${chainStats.importedRecords} from ${chainStats.peersSynced} peers."
-                                    }
-                                } else {
-                                    "Live scan completed: no detections this cycle."
-                                }
-                            } else {
-                                if (chainStats.enabled) {
-                                    if (!chainStats.authConfigured) {
-                                        "Live scan added ${batch.size} local detections. Configure a shared chain passphrase to sync peers."
-                                    } else {
-                                        "Live scan added ${batch.size} local detections and ${chainStats.importedRecords} chain detections."
-                                    }
-                                } else {
-                                    "Live scan added ${batch.size} detections."
-                                }
-                            }
-                        }.getOrElse { error ->
-                            "Live scan failed: ${error.message ?: "unknown error"}"
-                        }
-                    },
-                    onOpenReadinessSetting = { item ->
-                        runCatching {
-                            context.startActivity(item.settingsIntent)
-                        }.recoverCatching {
-                            context.startActivity(
-                                android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
-                            )
-                        }
-                    },
-                    onClearAlertLogs = {
-                        AlertLogStore.clear(context)
-                        alertLogs = emptyList()
-                    }
-                )
-            }
-
-            composable(DEVICES_ROUTE) {
-                DevicesPage(
+            composable(DEVICES_ENCOUNTERS_ROUTE) {
+                DevicesEncountersPage(
                     recentEncounters = recent100,
                     allEncounters = allEncounters,
                     approachDetectionEnabled = approachDetectionEnabled,
@@ -817,14 +1004,7 @@ fun ArgusApp() {
                         navController.navigate(
                             "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
                         )
-                    }
-                )
-            }
-
-            composable(ENCOUNTERS_ROUTE) {
-                EncountersPage(
-                    recentEncounters = recent100,
-                    allEncounters = allEncounters,
+                    },
                     onEncounterClick = { encounter ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
@@ -871,6 +1051,11 @@ fun ArgusApp() {
 private fun HomePage(
     trackingActive: Boolean,
     lastScanEpochMs: Long?,
+    lastScanDurationMs: Long?,
+    scanIntervalSeconds: Long,
+    sourceScanTimings: List<ScanSettings.SourceScanTiming>,
+    sourceScanIntervals: Map<String, Long>,
+    sourceLastScanEpochs: Map<String, Long>,
     sensorStatuses: List<SensorStatus>,
     sensorGateSettings: SensorGateSettings,
     summary: List<SourceSummary>,
@@ -883,6 +1068,35 @@ private fun HomePage(
     startMessage: String?,
     startMessageIsError: Boolean
 ) {
+    val nowEpochMs = System.currentTimeMillis()
+    val currentSourceOverruns = remember(sourceScanTimings, sourceScanIntervals, sourceLastScanEpochs, nowEpochMs) {
+        sourceScanTimings.mapNotNull { timing ->
+            val intervalSeconds = sourceScanIntervals[timing.sourceType] ?: return@mapNotNull null
+            val lastSourceScanEpoch = sourceLastScanEpochs[timing.sourceType] ?: 0L
+            val isOverrun = timing.lastDurationMs > intervalSeconds * 1000L
+            val freshnessWindowMs = maxOf(intervalSeconds * 3000L, 15_000L)
+            val isCurrent = lastSourceScanEpoch > 0L && (nowEpochMs - lastSourceScanEpoch) <= freshnessWindowMs
+            if (isOverrun && isCurrent) {
+                Triple(timing.sourceType, timing.lastDurationMs, intervalSeconds)
+            } else {
+                null
+            }
+        }
+    }
+    val staleSourceOverruns = remember(sourceScanTimings, sourceScanIntervals, sourceLastScanEpochs, nowEpochMs) {
+        sourceScanTimings.mapNotNull { timing ->
+            val intervalSeconds = sourceScanIntervals[timing.sourceType] ?: return@mapNotNull null
+            val lastSourceScanEpoch = sourceLastScanEpochs[timing.sourceType] ?: 0L
+            val isOverrun = timing.lastDurationMs > intervalSeconds * 1000L
+            val freshnessWindowMs = maxOf(intervalSeconds * 3000L, 15_000L)
+            val isCurrent = lastSourceScanEpoch > 0L && (nowEpochMs - lastSourceScanEpoch) <= freshnessWindowMs
+            if (isOverrun && !isCurrent) {
+                Triple(timing.sourceType, timing.lastDurationMs, intervalSeconds)
+            } else {
+                null
+            }
+        }
+    }
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(bottom = 16.dp)
@@ -899,9 +1113,76 @@ private fun HomePage(
                     append(if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped")
                     append(" | Last scan: ")
                     append(lastScanEpochMs?.let(::formatEpoch) ?: "Never")
+                    append(" | Last scan cycle total: ")
+                    append(lastScanDurationMs?.let(::formatScanDuration) ?: "n/a")
                 },
                 fontWeight = FontWeight.Medium
             )
+        }
+        item {
+            val perSourceSummary = sourceScanTimings
+                .joinToString(separator = " | ") { timing ->
+                    "${formatSourceTypeLabel(timing.sourceType)} ${formatScanDuration(timing.lastDurationMs)}"
+                }
+                .ifBlank { "n/a" }
+            Text(
+                text = "Per-source last durations: $perSourceSummary",
+                fontWeight = FontWeight.Medium
+            )
+        }
+        if (currentSourceOverruns.isNotEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Current warning: some source scans are exceeding their intervals.",
+                            color = Color(0xFFB3261E),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        currentSourceOverruns.forEach { (sourceType, durationMs, intervalSeconds) ->
+                            Text(
+                                text = "${formatSourceTypeLabel(sourceType)}: ${formatScanDuration(durationMs)} > ${ScanSettings.formatInterval(intervalSeconds)}",
+                                color = Color(0xFFB3261E)
+                            )
+                        }
+                    }
+                }
+            }
+        } else if (staleSourceOverruns.isNotEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Info: no current overrun, but previous scans exceeded intervals.",
+                            color = Color(0xFFE65100),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        staleSourceOverruns.forEach { (sourceType, durationMs, intervalSeconds) ->
+                            Text(
+                                text = "${formatSourceTypeLabel(sourceType)} (previous): ${formatScanDuration(durationMs)} > ${ScanSettings.formatInterval(intervalSeconds)}",
+                                color = Color(0xFFE65100)
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "No current scan overrun warnings.",
+                        color = Color(0xFF2E7D32),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
         }
         if (startMessage != null) {
             item {
@@ -1030,46 +1311,33 @@ private fun HomePage(
 @Composable
 private fun AppSettingsPage(
     scanIntervalSeconds: Long,
+    liveMapUpdateIntervalSeconds: Long,
+    sourceScanIntervals: Map<String, Long>,
+    lastScanDurationMs: Long?,
+    sourceScanTimings: List<ScanSettings.SourceScanTiming>,
+    scanIntervalChangeEvents: List<ScanSettings.IntervalChangeEvent>,
+    autoAdjustScanIntervalEnabled: Boolean,
+    autoAdjustSuggestedIntervalSeconds: Long,
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
-    chainLinkEnabled: Boolean,
-    chainNodeId: String,
-    chainDeviceName: String,
-    chainSharedSecret: String,
-    chainAutoSyncEnabled: Boolean,
-    chainAutoSyncIntervalSeconds: Long,
-    chainPersistentChannelEnabled: Boolean,
-    chainHeartbeatIntervalSeconds: Long,
-    chainMeshSnapshot: ChainMeshSnapshot,
     onScanIntervalSelected: (Long) -> Unit,
+    onAutoAdjustScanIntervalChanged: (Boolean) -> Unit,
+    onSourceScanIntervalSelected: (String, Long) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
-    onChainLinkChanged: (Boolean) -> Unit,
-    onChainDeviceNameChanged: (String) -> Unit,
-    onChainSharedSecretChanged: (String) -> Unit,
-    onChainAutoSyncChanged: (Boolean) -> Unit,
-    onChainAutoSyncIntervalChanged: (Long) -> Unit,
-    onChainPersistentChannelChanged: (Boolean) -> Unit,
-    onChainHeartbeatIntervalChanged: (Long) -> Unit,
-    onRefreshPeers: suspend () -> Unit,
-    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
-    onSyncNow: suspend () -> String
+    onLiveMapUpdateIntervalSelected: (Long) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-    var chainIntervalExpanded by remember { mutableStateOf(false) }
-    var heartbeatExpanded by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    var syncInProgress by remember { mutableStateOf(false) }
-    var syncMessage by remember { mutableStateOf<String?>(null) }
-    var refreshInProgress by remember { mutableStateOf(false) }
-    var linkRequestInProgress by remember { mutableStateOf(false) }
-    var linkHostInput by remember { mutableStateOf("") }
-    var linkMessageInput by remember { mutableStateOf("") }
-
-    val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
-    val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
+    var liveMapIntervalExpanded by remember { mutableStateOf(false) }
+    var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
+    val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
+    val recommendedBySource = remember(sourceScanTimings) {
+        sourceScanTimings.associate { timing ->
+            timing.sourceType to suggestSafeIntervalSeconds(timing.p95DurationMs)
+        }
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1105,6 +1373,160 @@ private fun AppSettingsPage(
         }
         item {
             Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
+        }
+        item {
+            Text("Per-Source Scan Intervals", fontWeight = FontWeight.Bold)
+        }
+        items(ScanSettings.SOURCE_TYPES) { sourceType ->
+            val currentInterval = sourceScanIntervals[sourceType]
+                ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.Medium)
+                    Button(onClick = { sourceIntervalExpandedFor = sourceType }) {
+                        Text(ScanSettings.formatInterval(currentInterval))
+                    }
+                    DropdownMenu(
+                        expanded = sourceIntervalExpandedFor == sourceType,
+                        onDismissRequest = { sourceIntervalExpandedFor = null }
+                    ) {
+                        ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
+                            DropdownMenuItem(
+                                text = { Text(ScanSettings.formatInterval(seconds)) },
+                                onClick = {
+                                    onSourceScanIntervalSelected(sourceType, seconds)
+                                    sourceIntervalExpandedFor = null
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auto-adjust scan interval")
+                        Switch(
+                            checked = autoAdjustScanIntervalEnabled,
+                            onCheckedChange = onAutoAdjustScanIntervalChanged
+                        )
+                    }
+                    Text("Recommended now (overall): every ${ScanSettings.formatInterval(autoAdjustSuggestedIntervalSeconds)}")
+                    if (recommendedBySource.isEmpty()) {
+                        Text("Recommended per source: waiting for timing samples")
+                    } else {
+                        ScanSettings.SOURCE_TYPES.forEach { sourceType ->
+                            val perSource = recommendedBySource[sourceType] ?: return@forEach
+                            Text(
+                                "${formatSourceTypeLabel(sourceType)}: every ${ScanSettings.formatInterval(perSource)}"
+                            )
+                        }
+                    }
+                    Text("Auto mode raises interval quickly when overloaded and lowers gradually when stable.")
+                }
+            }
+        }
+        item {
+            Text(
+                "Last scan duration: ${lastScanDurationMs?.let(::formatScanDuration) ?: "n/a"}",
+                fontWeight = FontWeight.Medium
+            )
+        }
+        if (intervalOverrun) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Warning: scan duration exceeded interval. Consider raising scan interval.",
+                        color = Color(0xFFB3261E),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+        item {
+            Text("Per-Source Scan Timing", fontWeight = FontWeight.Bold)
+        }
+        if (sourceScanTimings.isEmpty()) {
+            item {
+                Text("No timing samples yet. Start tracking or run live scans.")
+            }
+        } else {
+            items(sourceScanTimings) { timing ->
+                val suggestedInterval = suggestSafeIntervalSeconds(timing.p95DurationMs)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(formatSourceTypeLabel(timing.sourceType), fontWeight = FontWeight.SemiBold)
+                        Text("Samples: ${timing.sampleCount}")
+                        Text("Last: ${formatScanDuration(timing.lastDurationMs)} | Avg: ${formatScanDuration(timing.averageDurationMs)}")
+                        Text("p50: ${formatScanDuration(timing.p50DurationMs)} | p95: ${formatScanDuration(timing.p95DurationMs)} | Max: ${formatScanDuration(timing.maxDurationMs)}")
+                        Text("Suggested safe interval: ${ScanSettings.formatInterval(suggestedInterval)}")
+                    }
+                }
+            }
+        }
+        item {
+            Text("Auto-Adjust Activity Log", fontWeight = FontWeight.Bold)
+        }
+        if (scanIntervalChangeEvents.isEmpty()) {
+            item {
+                Text("No interval changes logged yet.")
+            }
+        } else {
+            items(scanIntervalChangeEvents) { event ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            "${ScanSettings.formatInterval(event.fromSeconds)} -> ${ScanSettings.formatInterval(event.toSeconds)}",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text("Reason: ${formatIntervalChangeReason(event.reason)}")
+                        Text(formatEpoch(event.timestampEpochMs))
+                    }
+                }
+            }
+        }
+        item {
+            Text("Live Map Updates", fontWeight = FontWeight.Bold)
+        }
+        item {
+            Text(
+                "Current: every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)}",
+                fontWeight = FontWeight.Medium
+            )
+        }
+        item {
+            Button(onClick = { liveMapIntervalExpanded = true }) {
+                Text("Change live map interval")
+            }
+            DropdownMenu(expanded = liveMapIntervalExpanded, onDismissRequest = { liveMapIntervalExpanded = false }) {
+                ScanSettings.ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS.forEach { seconds ->
+                    DropdownMenuItem(
+                        text = { Text(formatLiveMapIntervalLabel(seconds)) },
+                        onClick = {
+                            onLiveMapUpdateIntervalSelected(seconds)
+                            liveMapIntervalExpanded = false
+                        }
+                    )
+                }
+            }
         }
         item {
             Text("Approach Detection", fontWeight = FontWeight.Bold)
@@ -1152,257 +1574,6 @@ private fun AppSettingsPage(
                 }
             }
         }
-        item {
-            Text("Chain Linking", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Enable chain linking")
-                        Switch(
-                            checked = chainLinkEnabled,
-                            onCheckedChange = onChainLinkChanged
-                        )
-                    }
-                    Text("Node ID: $chainNodeId")
-                    OutlinedTextField(
-                        value = chainDeviceName,
-                        onValueChange = onChainDeviceNameChanged,
-                        label = { Text("This Device Name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
-                    )
-                    Text("Shares and syncs detections with other Argus devices on the same LAN.")
-                    OutlinedTextField(
-                        value = chainSharedSecret,
-                        onValueChange = onChainSharedSecretChanged,
-                        label = { Text("Chain Shared Passphrase") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
-                    )
-                    Text("Use the exact same passphrase on every linked device.")
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            enabled = chainLinkEnabled && !refreshInProgress,
-                            onClick = {
-                                scope.launch {
-                                    refreshInProgress = true
-                                    runCatching { onRefreshPeers() }
-                                    refreshInProgress = false
-                                }
-                            }
-                        ) {
-                            Text(if (refreshInProgress) "Refreshing..." else "Refresh Peers")
-                        }
-                        Text(
-                            "Connected $connectedCount | Unconnected $unconnectedCount",
-                            modifier = Modifier.padding(top = 10.dp)
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Auto sync")
-                        Switch(
-                            checked = chainAutoSyncEnabled,
-                            onCheckedChange = onChainAutoSyncChanged,
-                            enabled = chainLinkEnabled
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Persistent channel")
-                        Switch(
-                            checked = chainPersistentChannelEnabled,
-                            onCheckedChange = onChainPersistentChannelChanged,
-                            enabled = chainLinkEnabled && chainSharedSecret.isNotBlank()
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Heartbeat interval")
-                        Button(
-                            enabled = chainLinkEnabled && chainPersistentChannelEnabled,
-                            onClick = { heartbeatExpanded = true }
-                        ) {
-                            Text(ScanSettings.formatInterval(chainHeartbeatIntervalSeconds))
-                        }
-                        DropdownMenu(
-                            expanded = heartbeatExpanded,
-                            onDismissRequest = { heartbeatExpanded = false }
-                        ) {
-                            ScanSettings.ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS.forEach { seconds ->
-                                DropdownMenuItem(
-                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                                    onClick = {
-                                        onChainHeartbeatIntervalChanged(seconds)
-                                        heartbeatExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Auto sync interval")
-                        Button(
-                            enabled = chainLinkEnabled && chainAutoSyncEnabled,
-                            onClick = { chainIntervalExpanded = true }
-                        ) {
-                            Text(ScanSettings.formatInterval(chainAutoSyncIntervalSeconds))
-                        }
-                        DropdownMenu(
-                            expanded = chainIntervalExpanded,
-                            onDismissRequest = { chainIntervalExpanded = false }
-                        ) {
-                            ScanSettings.ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS.forEach { seconds ->
-                                DropdownMenuItem(
-                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                                    onClick = {
-                                        onChainAutoSyncIntervalChanged(seconds)
-                                        chainIntervalExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    Button(
-                        enabled = chainLinkEnabled && chainSharedSecret.isNotBlank() && !syncInProgress,
-                        onClick = {
-                            scope.launch {
-                                syncInProgress = true
-                                syncMessage = onSyncNow()
-                                syncInProgress = false
-                            }
-                        }
-                    ) {
-                        Text(if (syncInProgress) "Syncing..." else "Sync Now")
-                    }
-
-                    Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
-                    OutlinedTextField(
-                        value = linkHostInput,
-                        onValueChange = { linkHostInput = it },
-                        label = { Text("Peer Host (e.g. 192.168.1.24)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
-                    )
-                    OutlinedTextField(
-                        value = linkMessageInput,
-                        onValueChange = { linkMessageInput = it },
-                        label = { Text("Optional message") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
-                    )
-                    Button(
-                        enabled = chainLinkEnabled && linkHostInput.isNotBlank() && !linkRequestInProgress,
-                        onClick = {
-                            scope.launch {
-                                linkRequestInProgress = true
-                                val sent = onSendLinkRequest(linkHostInput.trim(), linkMessageInput.trim().ifBlank { null })
-                                syncMessage = if (sent) {
-                                    "Link request sent to ${linkHostInput.trim()}"
-                                } else {
-                                    "Link request failed for ${linkHostInput.trim()}"
-                                }
-                                linkRequestInProgress = false
-                            }
-                        }
-                    ) {
-                        Text(if (linkRequestInProgress) "Sending..." else "Send Link Request")
-                    }
-
-                    if (chainMeshSnapshot.peers.isNotEmpty()) {
-                        Text("Peers", fontWeight = FontWeight.SemiBold)
-                        chainMeshSnapshot.peers.take(24).forEach { peer ->
-                            val canRequestPeerLink = peer.state != ChainPeerState.CONNECTED &&
-                                peer.state != ChainPeerState.REQUESTED
-                            Card(modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
-                                    Text("$peerDisplay @ ${peer.host}")
-                                    if (!peer.deviceName.isNullOrBlank()) {
-                                        Text("Node: ${peer.nodeId}")
-                                    }
-                                    Text("State: ${peer.state.name}")
-                                    Text("Last seen: ${formatEpoch(peer.lastSeenEpochMs)}")
-                                    if (peer.lastSuccessfulSyncEpochMs != null) {
-                                        Text("Last sync: ${formatEpoch(peer.lastSuccessfulSyncEpochMs)}")
-                                    }
-                                    if (!peer.lastFailure.isNullOrBlank()) {
-                                        Text("Failure: ${peer.lastFailure}", color = Color(0xFFB3261E))
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(
-                                            enabled = chainLinkEnabled && canRequestPeerLink && !linkRequestInProgress,
-                                            onClick = {
-                                                scope.launch {
-                                                    linkRequestInProgress = true
-                                                    val sent = onSendLinkRequest(peer.host, "Link with $chainNodeId")
-                                                    syncMessage = if (sent) {
-                                                        "Link request sent to ${peer.host}"
-                                                    } else {
-                                                        "Link request failed for ${peer.host}"
-                                                    }
-                                                    linkRequestInProgress = false
-                                                }
-                                            }
-                                        ) {
-                                            Text("Link Request")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (chainMeshSnapshot.incomingRequests.isNotEmpty()) {
-                        Text("Incoming Link Requests", fontWeight = FontWeight.SemiBold)
-                        chainMeshSnapshot.incomingRequests.take(12).forEach { request ->
-                            Card(modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    val requesterDisplay = request.requesterDeviceName?.takeIf { it.isNotBlank() } ?: request.requesterNodeId
-                                    Text("$requesterDisplay @ ${request.requesterHost}")
-                                    if (!request.requesterDeviceName.isNullOrBlank()) {
-                                        Text("Node: ${request.requesterNodeId}")
-                                    }
-                                    if (!request.message.isNullOrBlank()) {
-                                        Text("Msg: ${request.message}")
-                                    }
-                                    Text(formatEpoch(request.timestampEpochMs))
-                                }
-                            }
-                        }
-                    }
-
-                    ChainMeshVisualizer(snapshot = chainMeshSnapshot)
-                    if (syncMessage != null) {
-                        Text(syncMessage!!)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1411,14 +1582,6 @@ private fun ChainMeshVisualizer(snapshot: ChainMeshSnapshot) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Mesh Visualizer", fontWeight = FontWeight.SemiBold)
-            if (snapshot.peers.isNotEmpty()) {
-                Text("Peer Labels", fontWeight = FontWeight.Medium)
-                snapshot.peers.take(12).forEach { peer ->
-                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
-                    Text("Name: $peerDisplay")
-                    Text("IP: ${peer.host}")
-                }
-            }
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1428,46 +1591,142 @@ private fun ChainMeshVisualizer(snapshot: ChainMeshSnapshot) {
                 val centerY = size.height / 2f
                 val radius = (size.minDimension * 0.35f)
                 val peers = snapshot.peers.take(24)
+                val textPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.WHITE
+                    textSize = 11.dp.toPx()
+                    isAntiAlias = true
+                    typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.NORMAL)
+                }
+                val lineHeight = 14.dp.toPx()
+                val labelPadding = 6.dp.toPx()
+                val labelCorner = 8.dp.toPx()
+                val labelGapFromBubble = 14.dp.toPx()
+                val maxLabelWidth = 150.dp.toPx()
+                val localBubbleRadius = 14f
 
                 drawCircle(
                     color = Color(0xFF1565C0),
-                    radius = 14f,
+                    radius = localBubbleRadius,
                     center = androidx.compose.ui.geometry.Offset(centerX, centerY)
                 )
 
-                if (peers.isEmpty()) return@Canvas
-                val step = (2.0 * Math.PI) / peers.size.toDouble()
-                peers.forEachIndexed { index, peer ->
-                    val angle = step * index
-                    val px = centerX + (radius * cos(angle).toFloat())
-                    val py = centerY + (radius * sin(angle).toFloat())
-                    val peerColor = when (peer.state) {
-                        ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
-                        ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
-                        ChainPeerState.REQUESTED -> Color(0xFF1565C0)
-                        ChainPeerState.FAILED -> Color(0xFFB3261E)
-                    }
+                val localDisplay = snapshot.localDeviceName.take(26)
+                val localNodeLabel = "Node: ${snapshot.localNodeId.take(20)}"
+                val localNameWidth = textPaint.measureText(localDisplay)
+                val localNodeWidth = textPaint.measureText(localNodeLabel)
+                val localLabelWidth = (maxOf(localNameWidth, localNodeWidth) + (labelPadding * 2f)).coerceAtMost(maxLabelWidth)
+                val localLabelHeight = lineHeight * 2f + (labelPadding * 2f)
+                val localLeft = (centerX - localLabelWidth / 2f).coerceIn(0f, size.width - localLabelWidth)
+                val localTop = (centerY - localBubbleRadius - labelGapFromBubble - localLabelHeight).coerceIn(0f, size.height - localLabelHeight)
+                val localAnchorX = localLeft + localLabelWidth / 2f
+                val localAnchorY = localTop + localLabelHeight
 
-                    drawLine(
-                        color = peerColor.copy(alpha = 0.7f),
-                        start = androidx.compose.ui.geometry.Offset(centerX, centerY),
-                        end = androidx.compose.ui.geometry.Offset(px, py),
-                        strokeWidth = 2f
+                drawLine(
+                    color = Color(0xFF1565C0).copy(alpha = 0.85f),
+                    start = androidx.compose.ui.geometry.Offset(centerX, centerY - localBubbleRadius),
+                    end = androidx.compose.ui.geometry.Offset(localAnchorX, localAnchorY),
+                    strokeWidth = 1.5f
+                )
+
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = 0.72f),
+                    topLeft = androidx.compose.ui.geometry.Offset(localLeft, localTop),
+                    size = androidx.compose.ui.geometry.Size(localLabelWidth, localLabelHeight),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(labelCorner, labelCorner)
+                )
+
+                drawContext.canvas.nativeCanvas.apply {
+                    drawText(
+                        localDisplay,
+                        localLeft + labelPadding,
+                        localTop + labelPadding + textPaint.textSize,
+                        textPaint
                     )
-                    drawCircle(
-                        color = peerColor,
-                        radius = 10f,
-                        center = androidx.compose.ui.geometry.Offset(px, py)
+                    drawText(
+                        localNodeLabel,
+                        localLeft + labelPadding,
+                        localTop + labelPadding + textPaint.textSize + lineHeight,
+                        textPaint
                     )
+                }
+
+                if (peers.isNotEmpty()) {
+                    val step = (2.0 * Math.PI) / peers.size.toDouble()
+                    peers.forEachIndexed { index, peer ->
+                        val angle = step * index
+                        val px = centerX + (radius * cos(angle).toFloat())
+                        val py = centerY + (radius * sin(angle).toFloat())
+                        val peerColor = when (peer.state) {
+                            ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
+                            ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
+                            ChainPeerState.REQUESTED -> Color(0xFF1565C0)
+                            ChainPeerState.FAILED -> Color(0xFFB3261E)
+                        }
+
+                        drawLine(
+                            color = peerColor.copy(alpha = 0.7f),
+                            start = androidx.compose.ui.geometry.Offset(centerX, centerY),
+                            end = androidx.compose.ui.geometry.Offset(px, py),
+                            strokeWidth = 2f
+                        )
+                        drawCircle(
+                            color = peerColor,
+                            radius = 10f,
+                            center = androidx.compose.ui.geometry.Offset(px, py)
+                        )
+
+                        val peerDisplay = (peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId)
+                            .take(26)
+                        val peerIp = peer.host.take(26)
+                        val nameWidth = textPaint.measureText(peerDisplay)
+                        val ipWidth = textPaint.measureText(peerIp)
+                        val labelWidth = (maxOf(nameWidth, ipWidth) + (labelPadding * 2f)).coerceAtMost(maxLabelWidth)
+                        val labelHeight = lineHeight * 2f + (labelPadding * 2f)
+
+                        val unitX = cos(angle).toFloat()
+                        val unitY = sin(angle).toFloat()
+                        val labelCenterX = px + unitX * (labelGapFromBubble + labelWidth / 2f)
+                        val labelCenterY = py + unitY * (labelGapFromBubble + labelHeight / 2f)
+
+                        val left = (labelCenterX - labelWidth / 2f).coerceIn(0f, size.width - labelWidth)
+                        val top = (labelCenterY - labelHeight / 2f).coerceIn(0f, size.height - labelHeight)
+                        val right = left + labelWidth
+                        val bottom = top + labelHeight
+
+                        val anchorX = if (unitX >= 0f) left else right
+                        val anchorY = (top + bottom) / 2f
+                        drawLine(
+                            color = peerColor.copy(alpha = 0.8f),
+                            start = androidx.compose.ui.geometry.Offset(px, py),
+                            end = androidx.compose.ui.geometry.Offset(anchorX, anchorY),
+                            strokeWidth = 1.5f
+                        )
+
+                        drawRoundRect(
+                            color = Color.Black.copy(alpha = 0.72f),
+                            topLeft = androidx.compose.ui.geometry.Offset(left, top),
+                            size = androidx.compose.ui.geometry.Size(labelWidth, labelHeight),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(labelCorner, labelCorner)
+                        )
+
+                        drawContext.canvas.nativeCanvas.apply {
+                            drawText(
+                                peerDisplay,
+                                left + labelPadding,
+                                top + labelPadding + textPaint.textSize,
+                                textPaint
+                            )
+                            drawText(
+                                peerIp,
+                                left + labelPadding,
+                                top + labelPadding + textPaint.textSize + lineHeight,
+                                textPaint
+                            )
+                        }
+                    }
                 }
             }
             Text("Blue center is this device (${snapshot.localDeviceName}). Green nodes are connected peers.")
-            if (snapshot.peers.isNotEmpty()) {
-                snapshot.peers.take(8).forEach { peer ->
-                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
-                    Text("$peerDisplay (${peer.state.name})")
-                }
-            }
         }
     }
 }
@@ -1479,17 +1738,37 @@ private fun DetectionPage(
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     alertLogs: List<AlertLogEntry>,
+    chainLinkEnabled: Boolean,
+    chainNodeId: String,
+    chainDeviceName: String,
+    chainSharedSecret: String,
+    chainAutoSyncEnabled: Boolean,
+    chainAutoSyncIntervalSeconds: Long,
+    chainPersistentChannelEnabled: Boolean,
+    chainHeartbeatIntervalSeconds: Long,
+    liveMapUpdateIntervalSeconds: Long,
+    chainMeshSnapshot: ChainMeshSnapshot,
     onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
-    onClearAlertLogs: () -> Unit
+    onClearAlertLogs: () -> Unit,
+    onChainLinkChanged: (Boolean) -> Unit,
+    onChainDeviceNameChanged: (String) -> Unit,
+    onChainSharedSecretChanged: (String) -> Unit,
+    onChainAutoSyncChanged: (Boolean) -> Unit,
+    onChainAutoSyncIntervalChanged: (Long) -> Unit,
+    onChainPersistentChannelChanged: (Boolean) -> Unit,
+    onChainHeartbeatIntervalChanged: (Long) -> Unit,
+    onRefreshPeers: suspend () -> Unit,
+    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
+    onSyncNow: suspend () -> String
 ) {
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
-    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs")
+    val tabs = listOf("Readiness", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
 
     val encounterPins = remember(encounters) {
         encounters
@@ -1748,7 +2027,8 @@ private fun DetectionPage(
                     val timestamp = pin.encounterTimestampEpochMs ?: return@DetectionMapPage
                     onEncounterMapPinClick(pin.source, pin.primaryId, timestamp)
                 },
-                onLiveCollect = onLiveCollect
+                onLiveCollect = onLiveCollect,
+                liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
         } else if (selectedTab == 2) {
             DetectionMapPage(
@@ -1760,12 +2040,35 @@ private fun DetectionPage(
                 onPinDetailsClick = { pin ->
                     onDeviceMapPinClick(pin.source, pin.primaryId)
                 },
-                onLiveCollect = onLiveCollect
+                onLiveCollect = onLiveCollect,
+                liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
-        } else {
+        } else if (selectedTab == 3) {
             DetectionLogsPage(
                 logs = alertLogs,
                 onClearLogs = onClearAlertLogs
+            )
+        } else {
+            DetectionMeshNetworkPage(
+                chainLinkEnabled = chainLinkEnabled,
+                chainNodeId = chainNodeId,
+                chainDeviceName = chainDeviceName,
+                chainSharedSecret = chainSharedSecret,
+                chainAutoSyncEnabled = chainAutoSyncEnabled,
+                chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
+                chainPersistentChannelEnabled = chainPersistentChannelEnabled,
+                chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
+                chainMeshSnapshot = chainMeshSnapshot,
+                onChainLinkChanged = onChainLinkChanged,
+                onChainDeviceNameChanged = onChainDeviceNameChanged,
+                onChainSharedSecretChanged = onChainSharedSecretChanged,
+                onChainAutoSyncChanged = onChainAutoSyncChanged,
+                onChainAutoSyncIntervalChanged = onChainAutoSyncIntervalChanged,
+                onChainPersistentChannelChanged = onChainPersistentChannelChanged,
+                onChainHeartbeatIntervalChanged = onChainHeartbeatIntervalChanged,
+                onRefreshPeers = onRefreshPeers,
+                onSendLinkRequest = onSendLinkRequest,
+                onSyncNow = onSyncNow
             )
         }
     }
@@ -1870,6 +2173,328 @@ private fun DetectionLogsPage(
 }
 
 @Composable
+private fun DetectionMeshNetworkPage(
+    chainLinkEnabled: Boolean,
+    chainNodeId: String,
+    chainDeviceName: String,
+    chainSharedSecret: String,
+    chainAutoSyncEnabled: Boolean,
+    chainAutoSyncIntervalSeconds: Long,
+    chainPersistentChannelEnabled: Boolean,
+    chainHeartbeatIntervalSeconds: Long,
+    chainMeshSnapshot: ChainMeshSnapshot,
+    onChainLinkChanged: (Boolean) -> Unit,
+    onChainDeviceNameChanged: (String) -> Unit,
+    onChainSharedSecretChanged: (String) -> Unit,
+    onChainAutoSyncChanged: (Boolean) -> Unit,
+    onChainAutoSyncIntervalChanged: (Long) -> Unit,
+    onChainPersistentChannelChanged: (Boolean) -> Unit,
+    onChainHeartbeatIntervalChanged: (Long) -> Unit,
+    onRefreshPeers: suspend () -> Unit,
+    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
+    onSyncNow: suspend () -> String
+) {
+    val context = LocalContext.current
+    var chainIntervalExpanded by remember { mutableStateOf(false) }
+    var heartbeatExpanded by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var syncInProgress by remember { mutableStateOf(false) }
+    var syncMessage by remember { mutableStateOf<String?>(null) }
+    var refreshInProgress by remember { mutableStateOf(false) }
+    var manualLinkRequestInProgress by remember { mutableStateOf(false) }
+    var peerLinkRequestInProgress by remember { mutableStateOf(false) }
+    var linkHostInput by remember { mutableStateOf("") }
+    var linkMessageInput by remember { mutableStateOf("") }
+    var meshServiceActive by remember { mutableStateOf(MeshForegroundServiceController.isActive(context)) }
+
+    LaunchedEffect(chainLinkEnabled, chainPersistentChannelEnabled) {
+        while (true) {
+            meshServiceActive = MeshForegroundServiceController.isActive(context)
+            delay(1500)
+        }
+    }
+
+    val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
+    val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Mesh Network", style = MaterialTheme.typography.headlineSmall)
+                AssistChip(
+                    onClick = {
+                        MeshForegroundServiceController.ensureState(context)
+                        meshServiceActive = MeshForegroundServiceController.isActive(context)
+                    },
+                    label = {
+                        Text(if (meshServiceActive) "FG Mesh Active" else "FG Mesh Inactive")
+                    },
+                    leadingIcon = {
+                        Text("●", color = if (meshServiceActive) Color(0xFF2E7D32) else Color(0xFFB3261E))
+                    }
+                )
+            }
+        }
+        item {
+            ChainMeshVisualizer(snapshot = chainMeshSnapshot)
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Enable chain linking")
+                        Switch(
+                            checked = chainLinkEnabled,
+                            onCheckedChange = onChainLinkChanged
+                        )
+                    }
+                    Text("Node ID: $chainNodeId")
+                    OutlinedTextField(
+                        value = chainDeviceName,
+                        onValueChange = onChainDeviceNameChanged,
+                        label = { Text("This Device Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Text("Shares and syncs detections with other Argus devices on the same LAN.")
+                    OutlinedTextField(
+                        value = chainSharedSecret,
+                        onValueChange = onChainSharedSecretChanged,
+                        label = { Text("Chain Shared Passphrase") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Text("Use the exact same passphrase on every linked device.")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            enabled = chainLinkEnabled && !refreshInProgress,
+                            onClick = {
+                                scope.launch {
+                                    refreshInProgress = true
+                                    runCatching { onRefreshPeers() }
+                                    refreshInProgress = false
+                                }
+                            }
+                        ) {
+                            Text(if (refreshInProgress) "Refreshing..." else "Refresh Peers")
+                        }
+                        Text(
+                            "Connected $connectedCount | Unconnected $unconnectedCount",
+                            modifier = Modifier.padding(top = 10.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auto sync")
+                        Switch(
+                            checked = chainAutoSyncEnabled,
+                            onCheckedChange = onChainAutoSyncChanged,
+                            enabled = chainLinkEnabled
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Persistent channel")
+                        Switch(
+                            checked = chainPersistentChannelEnabled,
+                            onCheckedChange = onChainPersistentChannelChanged,
+                            enabled = chainLinkEnabled && chainSharedSecret.isNotBlank()
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Heartbeat interval")
+                        Button(
+                            enabled = chainLinkEnabled && chainPersistentChannelEnabled,
+                            onClick = { heartbeatExpanded = true }
+                        ) {
+                            Text(ScanSettings.formatInterval(chainHeartbeatIntervalSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = heartbeatExpanded,
+                            onDismissRequest = { heartbeatExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
+                                    onClick = {
+                                        onChainHeartbeatIntervalChanged(seconds)
+                                        heartbeatExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auto sync interval")
+                        Button(
+                            enabled = chainLinkEnabled && chainAutoSyncEnabled,
+                            onClick = { chainIntervalExpanded = true }
+                        ) {
+                            Text(ScanSettings.formatInterval(chainAutoSyncIntervalSeconds))
+                        }
+                        DropdownMenu(
+                            expanded = chainIntervalExpanded,
+                            onDismissRequest = { chainIntervalExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
+                                    onClick = {
+                                        onChainAutoSyncIntervalChanged(seconds)
+                                        chainIntervalExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Button(
+                        enabled = chainLinkEnabled && chainSharedSecret.isNotBlank() && !syncInProgress,
+                        onClick = {
+                            scope.launch {
+                                syncInProgress = true
+                                syncMessage = onSyncNow()
+                                syncInProgress = false
+                            }
+                        }
+                    ) {
+                        Text(if (syncInProgress) "Syncing..." else "Sync Now")
+                    }
+
+                    Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = linkHostInput,
+                        onValueChange = { linkHostInput = it },
+                        label = { Text("Peer Host (e.g. 192.168.1.24)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    OutlinedTextField(
+                        value = linkMessageInput,
+                        onValueChange = { linkMessageInput = it },
+                        label = { Text("Optional message") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = chainLinkEnabled
+                    )
+                    Button(
+                        enabled = chainLinkEnabled && linkHostInput.isNotBlank() && !manualLinkRequestInProgress,
+                        onClick = {
+                            scope.launch {
+                                manualLinkRequestInProgress = true
+                                val sent = onSendLinkRequest(linkHostInput.trim(), linkMessageInput.trim().ifBlank { null })
+                                syncMessage = if (sent) {
+                                    "Link request sent to ${linkHostInput.trim()}"
+                                } else {
+                                    "Link request failed for ${linkHostInput.trim()}"
+                                }
+                                manualLinkRequestInProgress = false
+                            }
+                        }
+                    ) {
+                        Text(if (manualLinkRequestInProgress) "Sending..." else "Send Link Request")
+                    }
+
+                    if (chainMeshSnapshot.peers.isNotEmpty()) {
+                        Text("Peers", fontWeight = FontWeight.SemiBold)
+                        chainMeshSnapshot.peers.take(24).forEach { peer ->
+                            val canRequestPeerLink = peer.state != ChainPeerState.CONNECTED &&
+                                peer.state != ChainPeerState.REQUESTED
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                                    Text("$peerDisplay @ ${peer.host}")
+                                    if (!peer.deviceName.isNullOrBlank()) {
+                                        Text("Node: ${peer.nodeId}")
+                                    }
+                                    Text("State: ${peer.state.name}")
+                                    Text("Last seen: ${formatEpoch(peer.lastSeenEpochMs)}")
+                                    if (peer.lastSuccessfulSyncEpochMs != null) {
+                                        Text("Last sync: ${formatEpoch(peer.lastSuccessfulSyncEpochMs)}")
+                                    }
+                                    if (!peer.lastFailure.isNullOrBlank()) {
+                                        Text("Failure: ${peer.lastFailure}", color = Color(0xFFB3261E))
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            enabled = chainLinkEnabled && canRequestPeerLink && !peerLinkRequestInProgress,
+                                            onClick = {
+                                                scope.launch {
+                                                    peerLinkRequestInProgress = true
+                                                    val sent = onSendLinkRequest(peer.host, "Link with $chainNodeId")
+                                                    syncMessage = if (sent) {
+                                                        "Link request sent to ${peer.host}"
+                                                    } else {
+                                                        "Link request failed for ${peer.host}"
+                                                    }
+                                                    peerLinkRequestInProgress = false
+                                                }
+                                            }
+                                        ) {
+                                            Text("Link Request")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (chainMeshSnapshot.incomingRequests.isNotEmpty()) {
+                        Text("Incoming Link Requests", fontWeight = FontWeight.SemiBold)
+                        chainMeshSnapshot.incomingRequests.take(12).forEach { request ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    val requesterDisplay = request.requesterDeviceName?.takeIf { it.isNotBlank() } ?: request.requesterNodeId
+                                    Text("$requesterDisplay @ ${request.requesterHost}")
+                                    if (!request.requesterDeviceName.isNullOrBlank()) {
+                                        Text("Node: ${request.requesterNodeId}")
+                                    }
+                                    if (!request.message.isNullOrBlank()) {
+                                        Text("Msg: ${request.message}")
+                                    }
+                                    Text(formatEpoch(request.timestampEpochMs))
+                                }
+                            }
+                        }
+                    }
+
+                    if (syncMessage != null) {
+                        Text(syncMessage!!)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DetectionMapPage(
     mapTitle: String,
@@ -1878,7 +2503,8 @@ private fun DetectionMapPage(
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
     onPinDetailsClick: (MapPin) -> Unit,
-    onLiveCollect: suspend () -> String
+    onLiveCollect: suspend () -> String,
+    liveMapUpdateIntervalSeconds: Long
 ) {
     val pinLimitOptions = listOf(100, 250, 500, 1000)
     val context = LocalContext.current
@@ -1983,7 +2609,7 @@ private fun DetectionMapPage(
             liveCollectInProgress = true
             liveStatusMessage = onLiveCollect()
             liveCollectInProgress = false
-            delay(LIVE_SCAN_INTERVAL_MS)
+            delay(liveMapUpdateIntervalSeconds * 1000L)
         }
     }
 
@@ -2086,7 +2712,7 @@ private fun DetectionMapPage(
                                     onCheckedChange = { liveModeEnabled = it }
                                 )
                             }
-                            Text("Foreground scan every 5s while open.")
+                            Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
                             Text(
                                 text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
                                 color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
@@ -2225,6 +2851,97 @@ private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
             color = markerLegendColorForSource(source)
         )
     }
+}
+
+private fun formatLiveMapIntervalLabel(seconds: Long): String = when (seconds) {
+    1L -> "1s"
+    3L -> "3s"
+    5L -> "5s"
+    15L -> "15s"
+    30L -> "30s"
+    60L -> "1 minute"
+    300L -> "5 minutes"
+    1800L -> "30 minutes"
+    3600L -> "hourly"
+    else -> ScanSettings.formatInterval(seconds)
+}
+
+private fun formatScanDuration(durationMs: Long): String {
+    val safe = durationMs.coerceAtLeast(0L)
+    return if (safe < 1000L) {
+        "${safe}ms"
+    } else {
+        String.format(Locale.US, "%.3fs", safe / 1000.0)
+    }
+}
+
+private fun formatSourceTypeLabel(sourceType: String): String = when (sourceType) {
+    "wifi" -> "Wi-Fi"
+    "ble" -> "Bluetooth LE"
+    "cellular" -> "Cellular"
+    "remote_id" -> "Remote ID"
+    else -> sourceType.replace('_', ' ').uppercase()
+}
+
+private fun suggestSafeIntervalSeconds(referenceDurationMs: Long): Long {
+    val targetMs = (referenceDurationMs.coerceAtLeast(0L) * 1.25).toLong().coerceAtLeast(1000L)
+    val targetSeconds = (targetMs + 999L) / 1000L
+    return targetSeconds.coerceIn(
+        ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
+        ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
+    )
+}
+
+private fun computeRecommendedIntervalSeconds(
+    timings: List<ScanSettings.SourceScanTiming>,
+    sensorGateSettings: SensorGateSettings
+): Long {
+    val enabledTypes = buildSet {
+        if (sensorGateSettings.wifiEnabled) add("wifi")
+        if (sensorGateSettings.bluetoothEnabled) add("ble")
+        if (sensorGateSettings.cellularEnabled) add("cellular")
+        if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+    }
+    val suggested = timings
+        .filter { it.sourceType in enabledTypes }
+        .map { suggestSafeIntervalSeconds(it.p95DurationMs) }
+        .maxOrNull()
+    return suggested ?: ScanSettings.DEFAULT_SCAN_INTERVAL_SECONDS
+}
+
+private fun nextLowerInterval(currentIntervalSeconds: Long): Long {
+    val options = ScanSettings.ALLOWED_INTERVALS_SECONDS
+    val idx = options.indexOf(currentIntervalSeconds)
+    if (idx <= 0) return options.first()
+    return options[idx - 1]
+}
+
+private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
+    if (sensorGateSettings.wifiEnabled) add("wifi")
+    if (sensorGateSettings.bluetoothEnabled) add("ble")
+    if (sensorGateSettings.cellularEnabled) add("cellular")
+    if (sensorGateSettings.remoteIdEnabled) add("remote_id")
+}
+
+private fun formatIntervalChangeReason(reason: String): String = when (reason) {
+    "manual" -> "Manual change"
+    "auto-bootstrap" -> "Auto-adjust startup alignment"
+    "auto-overrun" -> "Auto-adjust overrun protection"
+    "auto-stable" -> "Auto-adjust stable downshift"
+    "scheduler-align" -> "Scheduler alignment to source intervals"
+    "manual-wifi" -> "Manual Wi-Fi interval change"
+    "manual-ble" -> "Manual Bluetooth LE interval change"
+    "manual-cellular" -> "Manual Cellular interval change"
+    "manual-remote_id" -> "Manual Remote ID interval change"
+    "auto-overrun-wifi" -> "Auto-adjust Wi-Fi overrun protection"
+    "auto-overrun-ble" -> "Auto-adjust Bluetooth LE overrun protection"
+    "auto-overrun-cellular" -> "Auto-adjust Cellular overrun protection"
+    "auto-overrun-remote_id" -> "Auto-adjust Remote ID overrun protection"
+    "auto-stable-wifi" -> "Auto-adjust Wi-Fi stable downshift"
+    "auto-stable-ble" -> "Auto-adjust Bluetooth LE stable downshift"
+    "auto-stable-cellular" -> "Auto-adjust Cellular stable downshift"
+    "auto-stable-remote_id" -> "Auto-adjust Remote ID stable downshift"
+    else -> reason.replace('-', ' ').replace('_', ' ')
 }
 
 private fun isValidLatLon(lat: Double?, lon: Double?): Boolean {
@@ -2384,6 +3101,105 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.UNKNOWN_RF -> "Unknown RF Details" to readGenericPayloadFields(encounter.rawPayloadJson)
     }
+
+@Composable
+private fun ProvenanceGraphSection(
+    provenance: EncounterProvenance,
+    provenanceNodeId: String?,
+    provenanceOriginNodeId: String?,
+    provenancePathNodeIds: String?,
+    provenanceReceivedAtEpochMs: Long?,
+    provenanceHopCount: Int,
+    localNodeId: String
+) {
+    val chainNodes = remember(
+        provenance,
+        provenanceNodeId,
+        provenanceOriginNodeId,
+        provenancePathNodeIds,
+        localNodeId
+    ) {
+        buildProvenanceNodeSequence(
+            provenance = provenance,
+            provenanceNodeId = provenanceNodeId,
+            provenanceOriginNodeId = provenanceOriginNodeId,
+            provenancePathNodeIds = provenancePathNodeIds,
+            localNodeId = localNodeId
+        )
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Provenance Graph", fontWeight = FontWeight.SemiBold)
+            if (provenance == EncounterProvenance.LOCAL) {
+                Text("Local capture on this device.")
+                Text("Node: $localNodeId")
+                return@Column
+            }
+
+            Text("Hop Count: ${provenanceHopCount.coerceAtLeast(chainNodes.size - 1)}")
+            if (provenanceReceivedAtEpochMs != null) {
+                Text("Received via mesh: ${formatEpoch(provenanceReceivedAtEpochMs)}")
+            }
+            chainNodes.forEachIndexed { index, nodeId ->
+                val label = when (index) {
+                    0 -> "Origin"
+                    chainNodes.lastIndex -> "This Device"
+                    else -> "Relay ${index}"
+                }
+                Text("$label: $nodeId")
+                if (index < chainNodes.lastIndex) {
+                    Text("  |"); Text("  v")
+                }
+            }
+        }
+    }
+}
+
+private fun buildProvenanceNodeSequence(
+    provenance: EncounterProvenance,
+    provenanceNodeId: String?,
+    provenanceOriginNodeId: String?,
+    provenancePathNodeIds: String?,
+    localNodeId: String
+): List<String> {
+    if (provenance == EncounterProvenance.LOCAL) {
+        return listOf(localNodeId)
+    }
+
+    val nodes = parseProvenancePathNodeIds(provenancePathNodeIds).toMutableList()
+    val origin = provenanceOriginNodeId?.trim().takeUnless { it.isNullOrBlank() }
+        ?: provenanceNodeId?.trim().takeUnless { it.isNullOrBlank() }
+        ?: "unknown-origin"
+
+    if (nodes.isEmpty()) {
+        nodes += origin
+    }
+    if (nodes.lastOrNull() != provenanceNodeId && !provenanceNodeId.isNullOrBlank()) {
+        nodes += provenanceNodeId
+    }
+    if (nodes.lastOrNull() != localNodeId) {
+        nodes += localNodeId
+    }
+
+    return nodes
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .fold(mutableListOf<String>()) { acc, node ->
+            if (acc.lastOrNull() != node) acc += node
+            acc
+        }
+}
+
+private fun parseProvenancePathNodeIds(raw: String?): List<String> =
+    raw
+        ?.split("|")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?: emptyList()
 
 private fun readCellTowerFields(rawPayloadJson: String): List<Pair<String, String>> {
     val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
@@ -2915,6 +3731,55 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
+private fun DevicesEncountersPage(
+    recentEncounters: List<Encounter>,
+    allEncounters: List<Encounter>,
+    approachDetectionEnabled: Boolean,
+    ownedDeviceKeys: Set<String>,
+    onDeviceClick: (DeviceItem) -> Unit,
+    onEncounterClick: (Encounter) -> Unit
+) {
+    val tabs = listOf("Devices", "Encounters")
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Devices & Encounters", style = MaterialTheme.typography.headlineMedium)
+        Text("Switch between grouped device history and individual encounter telemetry.")
+        TabRow(selectedTabIndex = selectedTab) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(title) }
+                )
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (selectedTab == 0) {
+                DevicesPage(
+                    recentEncounters = recentEncounters,
+                    allEncounters = allEncounters,
+                    approachDetectionEnabled = approachDetectionEnabled,
+                    ownedDeviceKeys = ownedDeviceKeys,
+                    onDeviceClick = onDeviceClick
+                )
+            } else {
+                EncountersPage(
+                    recentEncounters = recentEncounters,
+                    allEncounters = allEncounters,
+                    onEncounterClick = onEncounterClick
+                )
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
     recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
@@ -3286,6 +4151,10 @@ private fun buildDeviceItems(
                 lastRawPayloadJson = latest.rawPayloadJson,
                 lastProvenance = latest.provenance,
                 lastProvenanceNodeId = latest.provenanceNodeId,
+                lastProvenanceOriginNodeId = latest.provenanceOriginNodeId,
+                lastProvenancePathNodeIds = latest.provenancePathNodeIds,
+                lastProvenanceReceivedAtEpochMs = latest.provenanceReceivedAtEpochMs,
+                lastProvenanceHopCount = latest.provenanceHopCount,
                 hasChainLinkedData = groupedEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
                 chainLinkedPeerCount = groupedEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
                 isApproaching = approachSignal?.isApproaching == true,
@@ -3397,6 +4266,15 @@ private fun DeviceDetailPage(
         }
         DetailRow("Source", listSourceLabel(item.source, item.secondaryId))
         DetailRow("Data Origin", provenanceLabel(item.lastProvenance, item.lastProvenanceNodeId))
+        ProvenanceGraphSection(
+            provenance = item.lastProvenance,
+            provenanceNodeId = item.lastProvenanceNodeId,
+            provenanceOriginNodeId = item.lastProvenanceOriginNodeId,
+            provenancePathNodeIds = item.lastProvenancePathNodeIds,
+            provenanceReceivedAtEpochMs = item.lastProvenanceReceivedAtEpochMs,
+            provenanceHopCount = item.lastProvenanceHopCount,
+            localNodeId = ScanSettings.getChainNodeId(context)
+        )
         DetailRow("Primary ID", item.primaryId)
         DetailRow("Secondary ID", item.secondaryId ?: "n/a")
         Row(
@@ -3500,6 +4378,15 @@ private fun EncounterDetailPage(
         }
         DetailRow("Source", encounter.source.name)
         DetailRow("Data Origin", provenanceLabel(encounter.provenance, encounter.provenanceNodeId))
+        ProvenanceGraphSection(
+            provenance = encounter.provenance,
+            provenanceNodeId = encounter.provenanceNodeId,
+            provenanceOriginNodeId = encounter.provenanceOriginNodeId,
+            provenancePathNodeIds = encounter.provenancePathNodeIds,
+            provenanceReceivedAtEpochMs = encounter.provenanceReceivedAtEpochMs,
+            provenanceHopCount = encounter.provenanceHopCount,
+            localNodeId = ScanSettings.getChainNodeId(context)
+        )
         DetailRow("Primary ID", encounter.primaryId)
         DetailRow("Secondary ID", encounter.secondaryId ?: "n/a")
         DetailRow("Timestamp", formatEpoch(encounter.timestampEpochMs))
