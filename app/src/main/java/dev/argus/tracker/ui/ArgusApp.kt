@@ -256,6 +256,12 @@ private data class ResolvedDeviceLocation(
     val resolvedFromTimestampEpochMs: Long
 )
 
+private data class RemoteIdBroadcastPoint(
+    val lat: Double,
+    val lon: Double,
+    val timestampEpochMs: Long
+)
+
 private data class DeviceLocationCandidate(
     val source: String,
     val primaryId: String,
@@ -5783,6 +5789,21 @@ private suspend fun resolveDeviceLocation(
             }
         }
 
+        EncounterSource.REMOTE_ID -> {
+            val broadcastPoint = latestRemoteIdBroadcastPoint(encounters)
+            if (broadcastPoint != null) {
+                ResolvedDeviceLocation(
+                    lat = broadcastPoint.lat,
+                    lon = broadcastPoint.lon,
+                    method = "Remote ID broadcast location",
+                    approximateRangeMeters = null,
+                    resolvedFromTimestampEpochMs = broadcastPoint.timestampEpochMs
+                )
+            } else {
+                null
+            }
+        }
+
         else -> {
             if (!isValidLatLon(latest.lat, latest.lon)) {
                 null
@@ -6072,6 +6093,14 @@ private fun estimateRangeMeters(encounter: Encounter): Double? = when (encounter
 private fun estimateApproachingDeviceLocation(encounters: List<Encounter>): Pair<LatLng, String>? {
     if (encounters.isEmpty()) return null
     val latest = encounters.maxByOrNull { it.timestampEpochMs } ?: return null
+
+    if (latest.source == EncounterSource.REMOTE_ID) {
+        val broadcastPoint = latestRemoteIdBroadcastPoint(encounters)
+        if (broadcastPoint != null) {
+            return LatLng(broadcastPoint.lat, broadcastPoint.lon) to "Remote ID broadcast location"
+        }
+        return null
+    }
 
     val inferred = when (latest.source) {
         EncounterSource.WIFI,
@@ -6793,6 +6822,11 @@ private fun buildDeviceItemForGroup(
     if (groupedEncounters.isEmpty()) return null
 
     val latest = groupedEncounters.maxByOrNull { it.timestampEpochMs } ?: groupedEncounters.first()
+    val remoteIdBroadcastPoint = if (source == EncounterSource.REMOTE_ID.name) {
+        latestRemoteIdBroadcastPoint(groupedEncounters)
+    } else {
+        null
+    }
     val owned = OwnedDeviceRegistry.keyFor(source, primaryId) in ownedDeviceKeys
     val approachSignal = if (approachDetectionEnabled) {
         analyzeApproachSignal(groupedEncounters)
@@ -6814,8 +6848,16 @@ private fun buildDeviceItemForGroup(
         lastSeenEpochMs = latest.timestampEpochMs,
         lastRssiDbm = latest.rssiDbm,
         lastFrequencyMhz = latest.frequencyMhz,
-        lastLat = latest.lat,
-        lastLon = latest.lon,
+        lastLat = if (source == EncounterSource.REMOTE_ID.name) {
+            remoteIdBroadcastPoint?.lat
+        } else {
+            latest.lat
+        },
+        lastLon = if (source == EncounterSource.REMOTE_ID.name) {
+            remoteIdBroadcastPoint?.lon
+        } else {
+            latest.lon
+        },
         lastRawPayloadJson = latest.rawPayloadJson,
         lastProvenance = latest.provenance,
         lastProvenanceNodeId = latest.provenanceNodeId,
@@ -6834,6 +6876,49 @@ private fun buildDeviceItemForGroup(
         isOwned = owned,
         trackerRisk = trackerRisk
     )
+}
+
+private fun latestRemoteIdBroadcastPoint(encounters: List<Encounter>): RemoteIdBroadcastPoint? {
+    return encounters
+        .asSequence()
+        .filter { it.source == EncounterSource.REMOTE_ID }
+        .sortedByDescending { it.timestampEpochMs }
+        .mapNotNull { encounter ->
+            remoteIdBroadcastLatLon(encounter)?.let { (lat, lon) ->
+                RemoteIdBroadcastPoint(
+                    lat = lat,
+                    lon = lon,
+                    timestampEpochMs = encounter.timestampEpochMs
+                )
+            }
+        }
+        .firstOrNull()
+}
+
+private fun remoteIdBroadcastLatLon(encounter: Encounter): Pair<Double, Double>? {
+    if (encounter.source != EncounterSource.REMOTE_ID) return null
+    val payload = runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull() ?: return null
+
+    val decoded = payload.optJSONObject("remoteIdDecoded")
+    val lat = decoded.optDoubleOrNull("droneLat")
+        ?: payload.optDoubleOrNull("droneLat")
+        ?: decoded.optDoubleOrNull("lat")
+        ?: payload.optDoubleOrNull("lat")
+    val lon = decoded.optDoubleOrNull("droneLon")
+        ?: payload.optDoubleOrNull("droneLon")
+        ?: decoded.optDoubleOrNull("lon")
+        ?: payload.optDoubleOrNull("lon")
+
+    if (!isValidLatLon(lat, lon)) return null
+    return lat!! to lon!!
+}
+
+private fun JSONObject?.optDoubleOrNull(key: String): Double? {
+    val obj = this ?: return null
+    if (!obj.has(key) || obj.isNull(key)) return null
+    val value = obj.optDouble(key, Double.NaN)
+    if (!value.isFinite()) return null
+    return value
 }
 
 @Composable
