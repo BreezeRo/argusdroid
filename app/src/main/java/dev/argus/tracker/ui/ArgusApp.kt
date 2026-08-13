@@ -62,6 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
@@ -71,6 +72,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.LatLng
@@ -4670,9 +4672,7 @@ private fun DetectionMapPage(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
                             snippet = pin.snippet,
-                            icon = BitmapDescriptorFactory.defaultMarker(
-                                markerHueForPin(pin, useSourceOnlyPinColors)
-                            ),
+                            icon = markerIconForPin(pin, useSourceOnlyPinColors),
                             onInfoWindowClick = {
                                 onPinDetailsClick(pin)
                             }
@@ -5023,6 +5023,69 @@ private fun markerHueForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false
         "MOVING" -> BitmapDescriptorFactory.HUE_GREEN
         else -> markerHueForSource(pin.source)
     }
+}
+
+private val deviceMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
+
+private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): BitmapDescriptor {
+    val glyph = deviceGlyphForSource(pin.source)
+    val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
+    val key = "${pin.source}|${glyph}|${bgColor.toArgb()}"
+    deviceMarkerIconCache[key]?.let { return it }
+
+    val width = 92
+    val height = 42
+    val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+
+    val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = bgColor.toArgb()
+    }
+    val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 3f
+        color = android.graphics.Color.argb(255, 16, 33, 34)
+    }
+    val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.argb(255, 15, 21, 22)
+        textAlign = android.graphics.Paint.Align.CENTER
+        textSize = 18f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
+    }
+
+    val rect = android.graphics.RectF(2f, 2f, width - 2f, height - 10f)
+    canvas.drawRoundRect(rect, 18f, 18f, fillPaint)
+    canvas.drawRoundRect(rect, 18f, 18f, strokePaint)
+
+    val textY = rect.centerY() - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(glyph, rect.centerX(), textY, textPaint)
+
+    val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
+    deviceMarkerIconCache[key] = descriptor
+    return descriptor
+}
+
+private fun markerBackgroundColorForPin(pin: MapPin, useSourceOnlyPinColors: Boolean): Color {
+    if (!useSourceOnlyPinColors && pin.motionBadge == "MOVING") {
+        return Color(0xFF43A047)
+    }
+
+    return markerLegendColorForSource(pin.source)
+}
+
+private fun deviceGlyphForSource(source: String): String = when (source) {
+    "CELL" -> "CELL"
+    "WIFI" -> "WIFI"
+    "WIFI_DIRECT" -> "WFD"
+    "BLUETOOTH_LE" -> "BLE"
+    "BLUETOOTH_CLASSIC" -> "BT"
+    "REMOTE_ID" -> "RID"
+    "UWB" -> "UWB"
+    "SDR" -> "SDR"
+    "UNKNOWN_RF" -> "RF"
+    else -> "RF"
 }
 
 private fun formatLiveMapIntervalLabel(seconds: Long): String = when (seconds) {
