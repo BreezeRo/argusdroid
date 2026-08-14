@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Argus"
 include(":app")
+include(":wear")
