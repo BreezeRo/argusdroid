@@ -161,8 +161,18 @@ private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
 private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
+private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
+private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
+private const val MAGNETIC_INCREASE_MIN_CURRENT_UT = 55.0
+private const val MAGNETIC_DISTURBANCE_UPPER_BOUND_UT = 65.0
 private const val ALERT_LOG_MAX_ENTRIES = 400
 private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
+private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
+private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
+private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
+private const val FOREIGN_RISK_WINDOW_MS = 30L * 60L * 1000L
+private const val FOREIGN_RISK_MAX_ENCOUNTERS = 4000
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
 private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
@@ -553,6 +563,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
+    var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
+    var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
 
     val recent by viewModel.recentEncounters.collectAsState()
@@ -903,6 +915,14 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
+    LaunchedEffect(trackingActive, autoAdjustScanIntervalEnabled, sensorGateSettings, sourceScanIntervals, scanIntervalSeconds) {
+        if (!trackingActive || autoAdjustScanIntervalEnabled) return@LaunchedEffect
+        val schedulerTick = minimumEnabledSourceIntervalSeconds()
+        if (schedulerTick != scanIntervalSeconds) {
+            applyScanInterval(schedulerTick, "Scheduler alignment", "scheduler-align")
+        }
+    }
+
     LaunchedEffect(chainLinkEnabled, chainAutoSyncEnabled, chainAutoSyncIntervalSeconds, chainSharedSecret) {
         if (!chainLinkEnabled || !chainAutoSyncEnabled) return@LaunchedEffect
         if (chainSharedSecret.isBlank()) return@LaunchedEffect
@@ -1116,6 +1136,56 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
 
         previousForeignSignalRiskLevel = currentLevel
+    }
+
+    LaunchedEffect(allEncounters, foreignDirectMagneticEnabled) {
+        if (!foreignDirectMagneticEnabled) return@LaunchedEffect
+
+        val recentMagneticSamples = allEncounters
+            .asSequence()
+            .filter { isDirectSignalChannel(it, "magnetic") }
+            .mapNotNull { encounter ->
+                val payload = parseEncounterPayload(encounter) ?: return@mapNotNull null
+                val magnitude = payload
+                    .optDouble("magnitudeMicroTesla", Double.NaN)
+                    .takeIf { it.isFinite() }
+                    ?: return@mapNotNull null
+                encounter.timestampEpochMs to magnitude
+            }
+            .sortedBy { it.first }
+            .toList()
+            .takeLast(2)
+
+        if (recentMagneticSamples.size < 2) return@LaunchedEffect
+
+        val previous = recentMagneticSamples[0]
+        val current = recentMagneticSamples[1]
+        if (current.first <= lastMagneticObservedSampleEpochMs) return@LaunchedEffect
+
+        val deltaMicroTesla = current.second - previous.second
+        val crossedDisturbanceBand =
+            previous.second < MAGNETIC_DISTURBANCE_UPPER_BOUND_UT &&
+                current.second >= MAGNETIC_DISTURBANCE_UPPER_BOUND_UT
+        val sharpIncrease =
+            deltaMicroTesla >= MAGNETIC_INCREASE_DELTA_THRESHOLD_UT &&
+                current.second >= MAGNETIC_INCREASE_MIN_CURRENT_UT
+
+        val now = System.currentTimeMillis()
+        if ((crossedDisturbanceBand || sharpIncrease) &&
+            hasPostNotificationsPermission(context) &&
+            now - lastMagneticIncreaseAlertEpochMs >= MAGNETIC_INCREASE_ALERT_COOLDOWN_MS
+        ) {
+            ensureMagneticIncreaseNotificationChannel(context)
+            sendMagneticIncreaseNotification(
+                context = context,
+                previousMagnitudeMicroTesla = previous.second,
+                currentMagnitudeMicroTesla = current.second,
+                deltaMicroTesla = deltaMicroTesla
+            )
+            lastMagneticIncreaseAlertEpochMs = now
+        }
+
+        lastMagneticObservedSampleEpochMs = current.first
     }
 
     LaunchedEffect(evasionEscalationActiveUntilEpochMs) {
@@ -3709,11 +3779,11 @@ private fun DetectionPage(
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
-    val foreignSignalRisk = remember(encounters, foreignSignalRiskEnabled) {
-        if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(encounters) else null
+    val foreignSignalRisk = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
+        if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
-    val signalIntel = remember(encounters, foreignSignalRiskEnabled) {
-        buildSignalIntelSnapshot(encounters, foreignSignalRiskEnabled)
+    val signalIntel = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
+        buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled)
     }
 
     val encounterPins = remember(encounters) {
@@ -3743,8 +3813,8 @@ private fun DetectionPage(
             .toList()
     }
 
-    val allDeviceCandidates = remember(encounters, approachDetectionEnabled, ownedDeviceKeys) {
-        encounters
+    val allDeviceCandidates = remember(meshInsightEncounters, approachDetectionEnabled, ownedDeviceKeys) {
+        meshInsightEncounters
             .asSequence()
             .groupBy { "${it.source.name}|${it.primaryId}" }
             .mapNotNull { (_, deviceEncounters) ->
@@ -4100,8 +4170,10 @@ private data class SignalIntelSnapshot(
     val rfTextureScore: Double,
     val rfRssiSampleCount: Int,
     val acousticDirectSampleCount: Int,
+    val acousticDirectTotalCount: Int,
     val lastAcousticRmsDbFs: Double?,
     val magneticDirectSampleCount: Int,
+    val magneticDirectTotalCount: Int,
     val lastMagneticMagnitudeMicroTesla: Double?,
     val foreignRiskScore: Int?,
     val foreignRiskLevel: ForeignSignalRiskLevel?,
@@ -4112,7 +4184,11 @@ private fun buildSignalIntelSnapshot(
     encounters: List<Encounter>,
     foreignSignalRiskEnabled: Boolean
 ): SignalIntelSnapshot {
-    val window = encounters.sortedByDescending { it.timestampEpochMs }.take(600)
+    val window = selectRecentEncounterWindow(
+        encounters = encounters,
+        windowMs = SIGNAL_INTEL_WINDOW_MS,
+        maxEncounters = SIGNAL_INTEL_MAX_ENCOUNTERS
+    )
 
     val uwbEncounters = window.filter { it.source == EncounterSource.UWB }
     val lastUwbEpochMs = uwbEncounters.maxOfOrNull { it.timestampEpochMs }
@@ -4127,6 +4203,7 @@ private fun buildSignalIntelSnapshot(
         .asSequence()
         .filter { isDirectSignalChannel(it, "acoustic") }
         .toList()
+    val acousticDirectTotalCount = encounters.count { isDirectSignalChannel(it, "acoustic") }
     val lastAcousticPayload = acousticDirect.maxByOrNull { it.timestampEpochMs }
         ?.let(::parseEncounterPayload)
     val lastAcousticRmsDbFs = lastAcousticPayload
@@ -4137,6 +4214,7 @@ private fun buildSignalIntelSnapshot(
         .asSequence()
         .filter { isDirectSignalChannel(it, "magnetic") }
         .toList()
+    val magneticDirectTotalCount = encounters.count { isDirectSignalChannel(it, "magnetic") }
     val lastMagneticPayload = magneticDirect.maxByOrNull { it.timestampEpochMs }
         ?.let(::parseEncounterPayload)
     val lastMagneticMagnitudeMicroTesla = lastMagneticPayload
@@ -4177,8 +4255,10 @@ private fun buildSignalIntelSnapshot(
         rfTextureScore = rfTextureScore,
         rfRssiSampleCount = rfSamples,
         acousticDirectSampleCount = acousticDirect.size,
+        acousticDirectTotalCount = acousticDirectTotalCount,
         lastAcousticRmsDbFs = lastAcousticRmsDbFs,
         magneticDirectSampleCount = magneticDirect.size,
+        magneticDirectTotalCount = magneticDirectTotalCount,
         lastMagneticMagnitudeMicroTesla = lastMagneticMagnitudeMicroTesla,
         foreignRiskScore = foreignRisk?.score,
         foreignRiskLevel = foreignRisk?.level,
@@ -4214,7 +4294,7 @@ private fun DetectionSignalIntelPage(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text("Window", fontWeight = FontWeight.Bold)
-                    Text("Recent encounters sampled: ${intel.encounterWindowCount}")
+                    Text("Recent encounters sampled (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.encounterWindowCount}")
                     if (riskEnabled && intel.foreignRiskScore != null && intel.foreignRiskLevel != null) {
                         Text("Foreign signal score: ${intel.foreignRiskScore}/100 (${intel.foreignRiskLevel.name})")
                     } else {
@@ -4257,7 +4337,8 @@ private fun DetectionSignalIntelPage(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text("Direct Acoustic", fontWeight = FontWeight.Bold)
-                    Text("Samples: ${intel.acousticDirectSampleCount}")
+                    Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticDirectSampleCount}")
+                    Text("Total stored: ${intel.acousticDirectTotalCount}")
                     Text(
                         "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
                     )
@@ -4271,7 +4352,8 @@ private fun DetectionSignalIntelPage(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
-                    Text("Samples: ${intel.magneticDirectSampleCount}")
+                    Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.magneticDirectSampleCount}")
+                    Text("Total stored: ${intel.magneticDirectTotalCount}")
                     Text(
                         "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
                     )
@@ -6741,9 +6823,11 @@ private fun analyzeTrackerRisk(
 }
 
 private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignalRiskSignal? {
-    val ordered = encounters
-        .sortedBy { it.timestampEpochMs }
-        .takeLast(600)
+    val ordered = selectRecentEncounterWindow(
+        encounters = encounters,
+        windowMs = FOREIGN_RISK_WINDOW_MS,
+        maxEncounters = FOREIGN_RISK_MAX_ENCOUNTERS
+    ).sortedBy { it.timestampEpochMs }
 
     if (ordered.size < 8) return null
 
@@ -6852,10 +6936,40 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
 
 private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolean {
     if (encounter.source != EncounterSource.UNKNOWN_RF) return false
+    val normalizedChannel = channel.trim().lowercase(Locale.US)
+
+    val secondary = encounter.secondaryId?.trim()?.lowercase(Locale.US)
+    val primary = encounter.primaryId.trim().lowercase(Locale.US)
+    if (normalizedChannel == "acoustic" &&
+        (secondary == "direct-acoustic" || primary.startsWith("acoustic:"))
+    ) {
+        return true
+    }
+    if (normalizedChannel == "magnetic" &&
+        (secondary == "direct-magnetic" || primary.startsWith("magnetic:"))
+    ) {
+        return true
+    }
+
     val payload = parseEncounterPayload(encounter) ?: return false
     val signalChannel = payload.optString("signalChannel", "").trim().lowercase(Locale.US)
     val direct = payload.optBoolean("directChannel", false)
-    return direct && signalChannel == channel.lowercase(Locale.US)
+    return direct && signalChannel == normalizedChannel
+}
+
+private fun selectRecentEncounterWindow(
+    encounters: List<Encounter>,
+    windowMs: Long,
+    maxEncounters: Int
+): List<Encounter> {
+    val latestTs = encounters.maxOfOrNull { it.timestampEpochMs }
+    val cutoffTs = latestTs?.minus(windowMs) ?: Long.MIN_VALUE
+    return encounters
+        .asSequence()
+        .filter { it.timestampEpochMs >= cutoffTs }
+        .sortedByDescending { it.timestampEpochMs }
+        .take(maxEncounters)
+        .toList()
 }
 
 private fun computeDirectAcousticScore(encounters: List<Encounter>): Double {
@@ -7339,6 +7453,22 @@ private fun ensureForeignSignalNotificationChannel(context: android.content.Cont
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureMagneticIncreaseNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(MAGNETIC_INCREASE_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        MAGNETIC_INCREASE_ALERT_CHANNEL_ID,
+        "Magnetometer Disturbance Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when direct magnetometer magnitude rises sharply"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun sendApproachNotification(context: android.content.Context, device: DeviceItem) {
     val confidencePct = ((device.approachConfidence ?: 0.0) * 100.0).toInt().coerceIn(0, 100)
     val trend = device.approachDeltaMeters
@@ -7427,6 +7557,37 @@ private fun sendForeignSignalRiskNotification(
         .build()
 
     val notificationId = ("foreign-signal:${risk.level.name}:${risk.score}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun sendMagneticIncreaseNotification(
+    context: android.content.Context,
+    previousMagnitudeMicroTesla: Double,
+    currentMagnitudeMicroTesla: Double,
+    deltaMicroTesla: Double
+) {
+    val title = "Magnetometer disturbance increase"
+    val content = buildString {
+        append("Magnitude ")
+        append(String.format(Locale.US, "%.1f", previousMagnitudeMicroTesla))
+        append(" -> ")
+        append(String.format(Locale.US, "%.1f", currentMagnitudeMicroTesla))
+        append(" uT")
+        append(" (delta ")
+        append(String.format(Locale.US, "%+.1f", deltaMicroTesla))
+        append(" uT)")
+    }
+
+    val notification = NotificationCompat.Builder(context, MAGNETIC_INCREASE_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_more)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("magnetic-increase:${System.currentTimeMillis() / 60_000L}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
