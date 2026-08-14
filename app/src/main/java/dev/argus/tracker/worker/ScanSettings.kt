@@ -3,6 +3,10 @@ package dev.argus.tracker.worker
 import android.content.Context
 import android.os.Build
 import java.util.UUID
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 
 object ScanSettings {
     private const val PREFS_NAME = "argus_settings"
@@ -73,7 +77,7 @@ object ScanSettings {
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
-    const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 5L
+    const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 15L
     const val DEFAULT_EVASION_PROFILE = "BALANCED"
     const val DEFAULT_EVASION_AUTO_ESCALATE_DURATION_SECONDS = 300L
     const val DEFAULT_EVASION_JITTER_PERCENT = 15
@@ -140,6 +144,37 @@ object ScanSettings {
         val initiatorDeviceName: String?,
         val updatedEpochMs: Long?
     )
+
+    data class OperationalState(
+        val lastScanDurationMs: Long?,
+        val sourceScanTimings: List<SourceScanTiming>,
+        val sourceScanIntervals: Map<String, Long>,
+        val sourceLastScanEpochs: Map<String, Long>,
+        val scanIntervalChangeEvents: List<IntervalChangeEvent>
+    )
+
+    fun getOperationalState(context: Context): OperationalState = OperationalState(
+        lastScanDurationMs = getLastScanDurationMs(context),
+        sourceScanTimings = getSourceScanTimings(context),
+        sourceScanIntervals = getAllSourceScanIntervalSeconds(context),
+        sourceLastScanEpochs = getAllSourceLastScanEpochMs(context),
+        scanIntervalChangeEvents = getScanIntervalChangeEvents(context, 10)
+    )
+
+    fun observeOperationalState(context: Context): Flow<OperationalState> = callbackFlow {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            trySend(getOperationalState(context))
+        }
+
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(getOperationalState(context))
+
+        awaitClose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }.conflate()
 
     fun getScanIntervalSeconds(context: Context): Long {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -698,6 +733,29 @@ object ScanSettings {
             updatedEpochMs = updated
         )
     }
+
+    fun observeMeshWipeGateState(context: Context): Flow<MeshWipeGateState> = callbackFlow {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (
+                key == KEY_MESH_WIPE_GATE_ENABLED ||
+                key == KEY_MESH_WIPE_GATE_SESSION_ID ||
+                key == KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID ||
+                key == KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME ||
+                key == KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS
+            ) {
+                trySend(getMeshWipeGateState(context))
+            }
+        }
+
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(getMeshWipeGateState(context))
+
+        awaitClose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }.conflate()
 
     fun isMeshWipeGateEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

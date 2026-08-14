@@ -121,6 +121,9 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.random.Random
@@ -586,6 +589,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
+    var appNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
     val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
@@ -604,6 +608,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
+
+    LaunchedEffect(Unit) {
+        tickerFlow(periodMs = 1000L).collect { now ->
+            appNowEpochMs = now
+        }
+    }
 
     LaunchedEffect(chainMesh, alertLogs, recent100) {
         delay(750)
@@ -936,23 +946,30 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         alignWorkerCadenceWithSources(reasonCode = "scheduler-align")
     }
 
-    LaunchedEffect(chainLinkEnabled) {
+    LaunchedEffect(
+        chainLinkEnabled,
+        chainPersistentChannelEnabled,
+        chainSharedSecret,
+        chainAutoSyncEnabled,
+        chainAutoSyncIntervalSeconds
+    ) {
         if (!chainLinkEnabled) return@LaunchedEffect
-        while (true) {
-            runCatching { app.container.chainLinkCoordinator.refreshPeers() }
-            delay(5000)
+        runCatching { app.container.chainLinkCoordinator.refreshPeers() }
+    }
+
+    LaunchedEffect(context) {
+        WorkScheduler.observeTrackingActive(context).collect { isActive ->
+            trackingActive = isActive
         }
     }
 
     LaunchedEffect(context) {
-        while (true) {
-            trackingActive = WorkScheduler.isTrackingActive(context)
-            lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
-            sourceScanTimings = ScanSettings.getSourceScanTimings(context)
-            sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
-            sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
-            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
-            delay(1000)
+        ScanSettings.observeOperationalState(context).collect { state ->
+            lastScanDurationMs = state.lastScanDurationMs
+            sourceScanTimings = state.sourceScanTimings
+            sourceScanIntervals = state.sourceScanIntervals
+            sourceLastScanEpochs = state.sourceLastScanEpochs
+            scanIntervalChangeEvents = state.scanIntervalChangeEvents
         }
     }
 
@@ -1353,6 +1370,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             composable(HOME_ROUTE) {
                 HomePage(
                     trackingActive = trackingActive,
+                    nowEpochMs = appNowEpochMs,
                     lastScanEpochMs = lastScanEpochMs,
                     lastScanDurationMs = lastScanDurationMs,
                     scanIntervalSeconds = scanIntervalSeconds,
@@ -2090,6 +2108,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     primaryId = primaryId,
                     isOwnedTarget = isOwnedTarget,
                     encounters = allEncounters,
+                    nowEpochMs = appNowEpochMs,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
                         navController.navigate(
@@ -2126,6 +2145,7 @@ private fun ApproachAlertMapPage(
     primaryId: String,
     isOwnedTarget: Boolean,
     encounters: List<Encounter>,
+    nowEpochMs: Long,
     liveMapUpdateIntervalSeconds: Long,
     onOpenDeviceDetails: (String, String) -> Unit,
     onBack: () -> Unit
@@ -2137,7 +2157,6 @@ private fun ApproachAlertMapPage(
 
     var observerLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
     var observerLastUpdatedEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    var nowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
     val targetEncounters = remember(encounters, source, primaryId) {
         encounters
             .filter { it.source.name == source && it.primaryId == primaryId }
@@ -2194,18 +2213,10 @@ private fun ApproachAlertMapPage(
     }
 
     LaunchedEffect(liveMapUpdateIntervalSeconds, source, primaryId) {
-        val loopMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L)
-        while (true) {
-            observerLocation = LocationSnapshotProvider.read(context)
+        val updateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+        LocationSnapshotProvider.observe(context, minUpdateIntervalMs = updateIntervalMs).collect { latestLocation ->
+            observerLocation = latestLocation
             observerLastUpdatedEpochMs = System.currentTimeMillis()
-            delay(loopMs)
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowEpochMs = System.currentTimeMillis()
-            delay(1000)
         }
     }
 
@@ -2380,6 +2391,7 @@ private fun ApproachAlertMapPage(
 @Composable
 private fun HomePage(
     trackingActive: Boolean,
+    nowEpochMs: Long,
     lastScanEpochMs: Long?,
     lastScanDurationMs: Long?,
     scanIntervalSeconds: Long,
@@ -2398,14 +2410,6 @@ private fun HomePage(
     startMessage: String?,
     startMessageIsError: Boolean
 ) {
-    var nowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowEpochMs = System.currentTimeMillis()
-            delay(1000)
-        }
-    }
-
     val enabledSources = remember(sensorGateSettings) {
         enabledSourceTypes(sensorGateSettings)
     }
@@ -2575,32 +2579,6 @@ private fun HomePage(
                         }
                         Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
                             Text("Refresh")
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(onClick = onClearEncounters, modifier = Modifier.weight(1f)) {
-                            Text("Clear Encounters")
-                        }
-                        Button(onClick = onClearDevices, modifier = Modifier.weight(1f)) {
-                            Text("Clear Devices")
-                        }
-                    }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onClearEncounters, modifier = Modifier.fillMaxWidth()) {
-                            Text("Clear Encounters")
-                        }
-                        Button(onClick = onClearDevices, modifier = Modifier.fillMaxWidth()) {
-                            Text("Clear Devices")
                         }
                     }
                 }
@@ -3861,9 +3839,8 @@ private fun ChainMeshVisualizer(
     val hasAnySharedPeerLocations = peersWithSharedLocation.isNotEmpty()
 
     LaunchedEffect(context) {
-        while (true) {
-            localLocation = LocationSnapshotProvider.read(context)
-            delay(5_000)
+        LocationSnapshotProvider.observe(context, minUpdateIntervalMs = 5_000L).collect { latestLocation ->
+            localLocation = latestLocation
         }
     }
 
@@ -3995,9 +3972,12 @@ private fun DetectionPage(
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
+    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    val deviceMapLiveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
+    val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
     val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
     val isDeviceLocationTabActive = selectedTab == 3
     val foreignSignalRisk = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
@@ -4034,11 +4014,21 @@ private fun DetectionPage(
             .toList()
     }
 
-    val allDeviceCandidates = remember(isDeviceLocationTabActive, meshInsightEncounters, approachDetectionEnabled, ownedDeviceKeys) {
+    val allDeviceCandidates = remember(
+        isDeviceLocationTabActive,
+        meshInsightEncounters,
+        approachDetectionEnabled,
+        ownedDeviceKeys,
+        deviceMapRecentWindowMs
+    ) {
         if (!isDeviceLocationTabActive) {
             emptyList()
         } else {
-            meshInsightEncounters
+            val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { it.timestampEpochMs }
+            val snapshotCutoffEpochMs = latestSnapshotEpochMs?.minus(deviceMapRecentWindowMs) ?: Long.MIN_VALUE
+            val recentSnapshotEncounters = meshInsightEncounters.filter { it.timestampEpochMs >= snapshotCutoffEpochMs }
+
+            recentSnapshotEncounters
                 .asSequence()
                 .groupBy { "${it.source.name}|${it.primaryId}" }
                 .mapNotNull { (_, deviceEncounters) ->
@@ -4108,9 +4098,13 @@ private fun DetectionPage(
             }
         }
 
+        val latestResolvedEpochMs = resolvedCandidates.maxOfOrNull { it.latestTimestampEpochMs }
+        val liveCutoffEpochMs = (latestResolvedEpochMs ?: Long.MIN_VALUE) - deviceMapLiveWindowMs
+
         val resolvedPins = resolvedCandidates.mapNotNull { candidate ->
             val location = candidate.approximateLocation ?: return@mapNotNull null
             if (!isValidLatLon(location.lat, location.lon)) return@mapNotNull null
+            val isLive = candidate.latestTimestampEpochMs >= liveCutoffEpochMs
 
             val rangeSnippet = candidate.approximateRangeMeters
                 ?.let { " • Approx range ${formatDistanceFeetMiles(it)}" }
@@ -4156,6 +4150,11 @@ private fun DetectionPage(
                 .getRecordSpeedMps(context, candidate.source, candidate.primaryId)
                 ?.let { " • Top ${formatSpeedLabel(it)}" }
                 .orEmpty()
+            val freshnessSnippet = if (isLive) {
+                "Live • Seen ${formatMapPinAge(candidate.latestTimestampEpochMs)} ago"
+            } else {
+                "Recent • Seen ${formatMapPinAge(candidate.latestTimestampEpochMs)} ago"
+            }
 
             MapPin(
                 position = LatLng(location.lat, location.lon),
@@ -4166,7 +4165,7 @@ private fun DetectionPage(
                 ),
                 snippet = buildThreeLineSnippet(
                     line1 = "Seen ${candidate.seenCount}x",
-                    line2 = "Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
+                    line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
                     line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
                 ),
                 timestampEpochMs = candidate.latestTimestampEpochMs,
@@ -4174,7 +4173,8 @@ private fun DetectionPage(
                 primaryId = candidate.primaryId,
                 encounterTimestampEpochMs = null,
                 motionBadge = motionBadge,
-                motionSpeedMps = candidate.motionSignal?.speedMps
+                motionSpeedMps = candidate.motionSignal?.speedMps,
+                isLive = isLive
             )
         }
 
@@ -4320,6 +4320,9 @@ private fun DetectionPage(
             val deviceMapPins = estimatedDeviceLocationPins
                 .asSequence()
                 .filter { pin ->
+                    if (!liveOnlyOnDeviceMap) true else pin.isLive
+                }
+                .filter { pin ->
                     if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
                 }
                 .filter { pin ->
@@ -4333,7 +4336,7 @@ private fun DetectionPage(
                 .toList()
             DetectionMapPage(
                 mapTitle = "Device Location Map",
-                mapDescription = "Pins show estimated cell tower locations and inferred Wi-Fi/BLE device locations.",
+                mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context.",
                 pins = deviceMapPins,
                 pinLimit = cellDevicePinLimit,
                 onPinLimitChange = { cellDevicePinLimit = it },
@@ -4352,6 +4355,9 @@ private fun DetectionPage(
                 },
                 liveUpdatesAllowed = true,
                 useSourceOnlyPinColors = true,
+                showLiveOnlyControl = true,
+                liveOnlyEnabled = liveOnlyOnDeviceMap,
+                onLiveOnlyEnabledChange = { liveOnlyOnDeviceMap = it },
                 showMovingOnlyControl = true,
                 movingOnlyEnabled = movingOnlyOnDeviceMap,
                 onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
@@ -4796,11 +4802,15 @@ private fun DetectionMeshNetworkPage(
     var meshServiceActive by remember { mutableStateOf(MeshForegroundServiceController.isActive(context)) }
     var meshWipeGateState by remember { mutableStateOf(ScanSettings.getMeshWipeGateState(context)) }
 
-    LaunchedEffect(chainLinkEnabled, chainPersistentChannelEnabled) {
-        while (true) {
-            meshServiceActive = MeshForegroundServiceController.isActive(context)
-            meshWipeGateState = ScanSettings.getMeshWipeGateState(context)
-            delay(1500)
+    LaunchedEffect(context) {
+        MeshForegroundServiceController.observeActive(context).collect { isActive ->
+            meshServiceActive = isActive
+        }
+    }
+
+    LaunchedEffect(context) {
+        ScanSettings.observeMeshWipeGateState(context).collect { state ->
+            meshWipeGateState = state
         }
     }
 
@@ -5290,6 +5300,9 @@ private fun DetectionMapPage(
     onPinDetailsClick: (MapPin) -> Unit,
     liveUpdatesAllowed: Boolean = true,
     useSourceOnlyPinColors: Boolean = false,
+    showLiveOnlyControl: Boolean = false,
+    liveOnlyEnabled: Boolean = false,
+    onLiveOnlyEnabledChange: (Boolean) -> Unit = {},
     showMovingOnlyControl: Boolean = false,
     movingOnlyEnabled: Boolean = false,
     onMovingOnlyEnabledChange: (Boolean) -> Unit = {},
@@ -5311,6 +5324,7 @@ private fun DetectionMapPage(
     var pinLimitExpanded by remember { mutableStateOf(false) }
     var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
+    var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
     var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
@@ -5318,7 +5332,10 @@ private fun DetectionMapPage(
     val visiblePins = remember(pins, pinLimit) { selectVisiblePinsWithSourceCoverage(pins, pinLimit) }
     val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
 
-    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val currentLocation by LocationSnapshotProvider.observe(
+        context,
+        minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+    ).collectAsState(initial = LocationSnapshotProvider.read(context))
     val nearbyVisiblePins = remember(visiblePins, currentLocation) {
         filterPinsNearCurrentLocation(
             pins = visiblePins,
@@ -5336,6 +5353,7 @@ private fun DetectionMapPage(
         if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
 
         val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else visiblePins
+        val currentLocationSnapshot = currentLocation
 
         when {
             focusPins.size > 1 && mapLoaded -> {
@@ -5359,11 +5377,11 @@ private fun DetectionMapPage(
                 }
             }
 
-            currentLocation != null -> {
+            currentLocationSnapshot != null -> {
                 runCatching {
                     cameraPositionState.move(
                         CameraUpdateFactory.newLatLngZoom(
-                            LatLng(currentLocation.lat, currentLocation.lon),
+                            LatLng(currentLocationSnapshot.lat, currentLocationSnapshot.lon),
                             13f
                         )
                     )
@@ -5415,11 +5433,10 @@ private fun DetectionMapPage(
             return@LaunchedEffect
         }
 
-        while (liveModeEnabled) {
+        tickerFlow(periodMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).collect {
             liveCollectInProgress = true
             liveStatusMessage = onLiveCollect()
             liveCollectInProgress = false
-            delay(liveMapUpdateIntervalSeconds * 1000L)
         }
     }
 
@@ -5455,7 +5472,23 @@ private fun DetectionMapPage(
         if (legendItems.isNotEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Precise dots")
+                            Switch(
+                                checked = preciseDotsEnabled,
+                                onCheckedChange = { preciseDotsEnabled = it }
+                            )
+                        }
+                    }
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -5532,6 +5565,19 @@ private fun DetectionMapPage(
                                 text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
                                 color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
                             )
+                            if (showLiveOnlyControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Live Only")
+                                    Switch(
+                                        checked = liveOnlyEnabled,
+                                        onCheckedChange = onLiveOnlyEnabledChange
+                                    )
+                                }
+                            }
                             if (showMovingOnlyControl) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -5593,14 +5639,15 @@ private fun DetectionMapPage(
                             }
                         )
                         if (diagnosticsVisible) {
+                            val currentLocationSnapshot = currentLocation
                             Text("Loaded: ${if (mapLoaded) "yes" else "no"}")
                             Text("API key: $mapsApiKeyDiagnostic")
                             Text("Play Services: $playServicesDiagnostic")
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
                             Text("Pins rendered: ${visiblePins.size}/${pins.size}")
                             Text(
-                                text = if (currentLocation != null) {
-                                    "Current location: ${"%.5f".format(currentLocation.lat)}, ${"%.5f".format(currentLocation.lon)}"
+                                text = if (currentLocationSnapshot != null) {
+                                    "Current location: ${"%.5f".format(currentLocationSnapshot.lat)}, ${"%.5f".format(currentLocationSnapshot.lon)}"
                                 } else {
                                     "Current location: unavailable"
                                 }
@@ -5638,7 +5685,11 @@ private fun DetectionMapPage(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
                             snippet = pin.snippet,
-                            icon = markerIconForPin(pin, useSourceOnlyPinColors),
+                            icon = if (preciseDotsEnabled) {
+                                markerDotIconForPin(pin, useSourceOnlyPinColors)
+                            } else {
+                                markerIconForPin(pin, useSourceOnlyPinColors)
+                            },
                             onInfoWindowClick = {
                                 onPinDetailsClick(pin)
                             }
@@ -5780,7 +5831,8 @@ private data class MapPin(
     val primaryId: String,
     val encounterTimestampEpochMs: Long?,
     val motionBadge: String? = null,
-    val motionSpeedMps: Double? = null
+    val motionSpeedMps: Double? = null,
+    val isLive: Boolean = true
 )
 
 private data class PinLegendItem(
@@ -5992,12 +6044,14 @@ private fun markerHueForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false
 }
 
 private val deviceMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
+private val deviceDotMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 
 private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): BitmapDescriptor {
     val glyph = deviceGlyphForSource(pin.source)
     val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
     val key = "${pin.source}|${glyph}|${bgColor.toArgb()}"
     deviceMarkerIconCache[key]?.let { return it }
+    val alpha = if (pin.isLive) 255 else 140
 
     val width = when {
         glyph.length > 9 -> 148
@@ -6015,11 +6069,11 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
     val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = 3f
-        color = android.graphics.Color.argb(255, 16, 33, 34)
+        color = android.graphics.Color.argb(alpha, 16, 33, 34)
     }
     val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.FILL
-        color = android.graphics.Color.argb(255, 15, 21, 22)
+        color = android.graphics.Color.argb(alpha, 15, 21, 22)
         textAlign = android.graphics.Paint.Align.CENTER
         textSize = if (glyph.length > 9) 14f else if (glyph.length > 6) 16f else 18f
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
@@ -6037,12 +6091,53 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
     return descriptor
 }
 
-private fun markerBackgroundColorForPin(pin: MapPin, useSourceOnlyPinColors: Boolean): Color {
-    if (!useSourceOnlyPinColors && pin.motionBadge == "MOVING") {
-        return Color(0xFF43A047)
+private fun markerDotIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): BitmapDescriptor {
+    val dotColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
+    val key = "dot|${pin.source}|${pin.motionBadge.orEmpty()}|${dotColor.toArgb()}"
+    deviceDotMarkerIconCache[key]?.let { return it }
+    val strokeAlpha = if (pin.isLive) 220 else 130
+
+    val size = 32
+    val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+
+    val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = dotColor.toArgb()
+    }
+    val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 4f
+        color = android.graphics.Color.argb(strokeAlpha, 13, 24, 24)
     }
 
-    return markerLegendColorForSource(pin.source)
+    val center = size / 2f
+    val radius = 9.2f
+    canvas.drawCircle(center, center, radius, fillPaint)
+    canvas.drawCircle(center, center, radius, strokePaint)
+
+    val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
+    deviceDotMarkerIconCache[key] = descriptor
+    return descriptor
+}
+
+private fun markerBackgroundColorForPin(pin: MapPin, useSourceOnlyPinColors: Boolean): Color {
+    val baseColor = if (!useSourceOnlyPinColors && pin.motionBadge == "MOVING") {
+        Color(0xFF43A047)
+    } else {
+        markerLegendColorForSource(pin.source)
+    }
+
+    return if (pin.isLive) baseColor else baseColor.copy(alpha = 0.45f)
+}
+
+private fun formatMapPinAge(timestampEpochMs: Long, nowEpochMs: Long = System.currentTimeMillis()): String {
+    val ageSeconds = ((nowEpochMs - timestampEpochMs).coerceAtLeast(0L)) / 1000L
+    return when {
+        ageSeconds < 60L -> "${ageSeconds}s"
+        ageSeconds < 3600L -> "${ageSeconds / 60L}m"
+        else -> "${ageSeconds / 3600L}h"
+    }
 }
 
 private fun deviceGlyphForSource(source: String): String = when (source) {
@@ -6102,6 +6197,15 @@ private fun suggestSafeIntervalSeconds(referenceDurationMs: Long): Long {
         ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
     )
 }
+
+private fun tickerFlow(periodMs: Long): Flow<Long> = flow {
+    val safePeriodMs = periodMs.coerceAtLeast(250L)
+    emit(System.currentTimeMillis())
+    while (true) {
+        delay(safePeriodMs)
+        emit(System.currentTimeMillis())
+    }
+}.conflate()
 
 private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
     if (sensorGateSettings.wifiEnabled) {
@@ -7893,7 +7997,9 @@ private fun DevicesPage(
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
+        initial = LocationSnapshotProvider.read(context)
+    )
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
@@ -8117,7 +8223,9 @@ private fun EncountersPage(
     onEncounterClick: (Encounter) -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
+        initial = LocationSnapshotProvider.read(context)
+    )
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
@@ -8564,7 +8672,9 @@ private fun DeviceDetailPage(
     onOwnedChanged: (source: String, primaryId: String, owned: Boolean) -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
+        initial = LocationSnapshotProvider.read(context)
+    )
     var isOwnedState by remember(item?.source, item?.primaryId) { mutableStateOf(item?.isOwned == true) }
     var realtimeMapEnabled by rememberSaveable(item?.source, item?.primaryId) { mutableStateOf(false) }
     var pinnedMapLat by rememberSaveable(item?.source, item?.primaryId, initialPinnedLat) {
@@ -8782,7 +8892,9 @@ private fun EncounterDetailPage(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation = remember { LocationSnapshotProvider.read(context) }
+    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
+        initial = LocationSnapshotProvider.read(context)
+    )
 
     Column(
         modifier = Modifier
@@ -8817,6 +8929,7 @@ private fun EncounterDetailPage(
             },
 
             right = {
+                val currentLocationSnapshot = currentLocation
                 DetailRow("RSSI", encounter.rssiDbm?.toString() ?: "n/a")
                 DetailRow("Frequency", encounter.frequencyMhz?.toString() ?: "n/a")
                 DetailRow(
@@ -8829,8 +8942,8 @@ private fun EncounterDetailPage(
                 )
                 DetailRow(
                     "My Location Snapshot",
-                    if (currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)) {
-                        String.format(Locale.US, "%.6f, %.6f", currentLocation.lat, currentLocation.lon)
+                    if (currentLocationSnapshot != null && isValidLatLon(currentLocationSnapshot.lat, currentLocationSnapshot.lon)) {
+                        String.format(Locale.US, "%.6f, %.6f", currentLocationSnapshot.lat, currentLocationSnapshot.lon)
                     } else {
                         "n/a"
                     }

@@ -1,6 +1,7 @@
 package dev.argus.tracker.worker
 
 import android.content.Context
+import androidx.lifecycle.Observer
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
@@ -9,8 +10,12 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
@@ -134,4 +139,40 @@ object WorkScheduler {
                 info.state == WorkInfo.State.ENQUEUED || info.state == WorkInfo.State.RUNNING
             }
     }
+
+    fun observeTrackingActive(context: Context): Flow<Boolean> = callbackFlow {
+        val workManager = WorkManager.getInstance(context)
+        val periodicLiveData = workManager.getWorkInfosForUniqueWorkLiveData(PERIODIC_WORK_NAME)
+        val oneTimeLiveData = workManager.getWorkInfosForUniqueWorkLiveData(ONE_TIME_WORK_NAME)
+
+        var periodicInfos: List<WorkInfo> = periodicLiveData.value.orEmpty()
+        var oneTimeInfos: List<WorkInfo> = oneTimeLiveData.value.orEmpty()
+
+        fun emitTrackingState() {
+            val isActive = (periodicInfos + oneTimeInfos).any { info ->
+                info.state == WorkInfo.State.ENQUEUED ||
+                    info.state == WorkInfo.State.RUNNING ||
+                    info.state == WorkInfo.State.BLOCKED
+            }
+            trySend(isActive)
+        }
+
+        val periodicObserver = Observer<List<WorkInfo>> { infos ->
+            periodicInfos = infos.orEmpty()
+            emitTrackingState()
+        }
+        val oneTimeObserver = Observer<List<WorkInfo>> { infos ->
+            oneTimeInfos = infos.orEmpty()
+            emitTrackingState()
+        }
+
+        periodicLiveData.observeForever(periodicObserver)
+        oneTimeLiveData.observeForever(oneTimeObserver)
+        emitTrackingState()
+
+        awaitClose {
+            periodicLiveData.removeObserver(periodicObserver)
+            oneTimeLiveData.removeObserver(oneTimeObserver)
+        }
+    }.conflate()
 }

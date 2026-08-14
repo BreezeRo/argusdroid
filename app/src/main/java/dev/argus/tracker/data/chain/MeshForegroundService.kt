@@ -12,6 +12,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.worker.ScanSettings
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 
 class MeshForegroundService : Service() {
 
@@ -107,6 +111,20 @@ object MeshForegroundServiceController {
     fun isActive(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_MESH_FOREGROUND_ACTIVE, false)
+
+    fun observeActive(context: Context): Flow<Boolean> = callbackFlow {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+            if (key == KEY_MESH_FOREGROUND_ACTIVE) {
+                trySend(sharedPreferences.getBoolean(KEY_MESH_FOREGROUND_ACTIVE, false))
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(prefs.getBoolean(KEY_MESH_FOREGROUND_ACTIVE, false))
+        awaitClose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }.conflate()
 
     internal fun setActive(context: Context, active: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
