@@ -37,6 +37,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -58,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
@@ -142,6 +145,12 @@ private enum class EvasionProfile {
     QUIET,
     BALANCED,
     WATCH
+}
+
+private enum class AppThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK
 }
 
 private const val HOME_ROUTE = "home"
@@ -518,6 +527,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
+    var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
+    var meshWipeNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshWipeNotificationsEnabled(context)) }
     var foreignSignalRiskEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalRiskEnabled(context)) }
     var foreignSignalAlertsEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalAlertsEnabled(context)) }
     var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
@@ -558,6 +570,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var scanIntervalChangeEvents by remember { mutableStateOf(ScanSettings.getScanIntervalChangeEvents(context, 10)) }
     var autoAdjustConsecutiveOverruns by remember { mutableStateOf(mapOf<String, Int>()) }
     var autoAdjustStableCycles by remember { mutableStateOf(mapOf<String, Int>()) }
+    var appThemeMode by remember {
+        mutableStateOf(
+            runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
+                .getOrDefault(AppThemeMode.SYSTEM)
+        )
+    }
     var trackingStartMessage by remember { mutableStateOf<String?>(null) }
     var trackingStartMessageIsError by remember { mutableStateOf(false) }
     val approachStateByDevice = remember { mutableMapOf<String, Boolean>() }
@@ -1197,6 +1215,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
         val now = System.currentTimeMillis()
         if ((crossedDisturbanceBand || sharpIncrease) &&
+            magneticIncreaseNotificationsEnabled &&
             hasPostNotificationsPermission(context) &&
             now - lastMagneticIncreaseAlertEpochMs >= MAGNETIC_INCREASE_ALERT_COOLDOWN_MS
         ) {
@@ -1331,53 +1350,59 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
+    val darkThemeEnabled = when (appThemeMode) {
+        AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.DARK -> true
+    }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        bottomBar = {
-            if (currentRoute in topLevelRoutes) {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = currentRoute == HOME_ROUTE,
-                        onClick = { navController.navigate(HOME_ROUTE) },
-                        icon = { Text("H") },
-                        label = { Text("Home") }
-                    )
-                    NavigationBarItem(
-                        selected = currentRoute == DETECTION_ROUTE,
-                        onClick = { navController.navigate(DETECTION_ROUTE) },
-                        icon = { Text("R") },
-                        label = { Text("Detection") }
-                    )
-                    NavigationBarItem(
-                        selected = currentRoute == EVASION_ROUTE,
-                        onClick = { navController.navigate(EVASION_ROUTE) },
-                        icon = { Text("E") },
-                        label = { Text("Evasion") }
-                    )
-                    NavigationBarItem(
-                        selected = currentRoute == DEVICES_ENCOUNTERS_ROUTE,
-                        onClick = { navController.navigate(DEVICES_ENCOUNTERS_ROUTE) },
-                        icon = { Text("D") },
-                        label = { Text("Devices & Encounters") }
-                    )
-                    NavigationBarItem(
-                        selected = currentRoute == SETTINGS_ROUTE,
-                        onClick = { navController.navigate(SETTINGS_ROUTE) },
-                        icon = { Text("S") },
-                        label = { Text("Settings") }
-                    )
+    MaterialTheme(colorScheme = if (darkThemeEnabled) darkColorScheme() else lightColorScheme()) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                if (currentRoute in topLevelRoutes) {
+                    NavigationBar {
+                        NavigationBarItem(
+                            selected = currentRoute == HOME_ROUTE,
+                            onClick = { navController.navigate(HOME_ROUTE) },
+                            icon = { Text("H") },
+                            label = { Text("Home") }
+                        )
+                        NavigationBarItem(
+                            selected = currentRoute == DETECTION_ROUTE,
+                            onClick = { navController.navigate(DETECTION_ROUTE) },
+                            icon = { Text("R") },
+                            label = { Text("Detection") }
+                        )
+                        NavigationBarItem(
+                            selected = currentRoute == EVASION_ROUTE,
+                            onClick = { navController.navigate(EVASION_ROUTE) },
+                            icon = { Text("E") },
+                            label = { Text("Evasion") }
+                        )
+                        NavigationBarItem(
+                            selected = currentRoute == DEVICES_ENCOUNTERS_ROUTE,
+                            onClick = { navController.navigate(DEVICES_ENCOUNTERS_ROUTE) },
+                            icon = { Text("D") },
+                            label = { Text("Devices & Encounters") }
+                        )
+                        NavigationBarItem(
+                            selected = currentRoute == SETTINGS_ROUTE,
+                            onClick = { navController.navigate(SETTINGS_ROUTE) },
+                            icon = { Text("S") },
+                            label = { Text("Settings") }
+                        )
+                    }
                 }
             }
-        }
-    ) { padding ->
-        NavHost(
-            navController = navController,
-            startDestination = HOME_ROUTE,
-            modifier = Modifier
-                .padding(padding)
-                .padding(16.dp)
-        ) {
+        ) { padding ->
+            NavHost(
+                navController = navController,
+                startDestination = HOME_ROUTE,
+                modifier = Modifier
+                    .padding(padding)
+                    .padding(16.dp)
+            ) {
             composable(HOME_ROUTE) {
                 HomePage(
                     trackingActive = trackingActive,
@@ -1472,9 +1497,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     scanIntervalChangeEvents = scanIntervalChangeEvents,
                     autoAdjustScanIntervalEnabled = autoAdjustScanIntervalEnabled,
                     autoAdjustSuggestedIntervalSeconds = autoAdjustSuggestedIntervalSeconds,
+                    appThemeMode = appThemeMode,
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
+                    meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
+                    meshWipeNotificationsEnabled = meshWipeNotificationsEnabled,
                     foreignSignalRiskEnabled = foreignSignalRiskEnabled,
                     foreignSignalAlertsEnabled = foreignSignalAlertsEnabled,
                     foreignSignalAlertThreshold = foreignSignalAlertThreshold,
@@ -1519,6 +1548,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         )
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
                     },
+                    onThemeModeSelected = { mode ->
+                        appThemeMode = mode
+                        ScanSettings.setAppThemeMode(context, mode.name)
+                    },
                     onApproachDetectionChanged = { enabled ->
                         approachDetectionEnabled = enabled
                         ScanSettings.setApproachDetectionEnabled(context, enabled)
@@ -1530,6 +1563,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onTrackerNotificationsChanged = { enabled ->
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
+                    },
+                    onMagneticIncreaseNotificationsChanged = { enabled ->
+                        magneticIncreaseNotificationsEnabled = enabled
+                        ScanSettings.setMagneticIncreaseNotificationsEnabled(context, enabled)
+                    },
+                    onMeshConnectivityNotificationsChanged = { enabled ->
+                        meshConnectivityNotificationsEnabled = enabled
+                        ScanSettings.setMeshConnectivityNotificationsEnabled(context, enabled)
+                    },
+                    onMeshWipeNotificationsChanged = { enabled ->
+                        meshWipeNotificationsEnabled = enabled
+                        ScanSettings.setMeshWipeNotificationsEnabled(context, enabled)
                     },
                     onForeignSignalRiskEnabledChanged = { enabled ->
                         foreignSignalRiskEnabled = enabled
@@ -1602,6 +1647,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
+                            .getOrDefault(AppThemeMode.SYSTEM)
+                        approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
+                        trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                        meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
+                        meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                         foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
@@ -1646,6 +1698,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
+                            .getOrDefault(AppThemeMode.SYSTEM)
+                        approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
+                        trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                        meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
+                        meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                         foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
@@ -1692,6 +1751,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
                             chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
                             chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
+                            appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
+                                .getOrDefault(AppThemeMode.SYSTEM)
+                            approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
+                            trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                            magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                            meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
+                            meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                             foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
                             foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                             foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
@@ -2089,6 +2155,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     },
                     onBack = { navController.popBackStack() }
                 )
+            }
             }
         }
     }
@@ -2692,9 +2759,13 @@ private fun AppSettingsPage(
     scanIntervalChangeEvents: List<ScanSettings.IntervalChangeEvent>,
     autoAdjustScanIntervalEnabled: Boolean,
     autoAdjustSuggestedIntervalSeconds: Long,
+    appThemeMode: AppThemeMode,
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    magneticIncreaseNotificationsEnabled: Boolean,
+    meshConnectivityNotificationsEnabled: Boolean,
+    meshWipeNotificationsEnabled: Boolean,
     foreignSignalRiskEnabled: Boolean,
     foreignSignalAlertsEnabled: Boolean,
     foreignSignalAlertThreshold: String,
@@ -2703,9 +2774,13 @@ private fun AppSettingsPage(
     onScanIntervalSelected: (Long) -> Unit,
     onAutoAdjustScanIntervalChanged: (Boolean) -> Unit,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
+    onThemeModeSelected: (AppThemeMode) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
+    onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
+    onMeshWipeNotificationsChanged: (Boolean) -> Unit,
     onForeignSignalRiskEnabledChanged: (Boolean) -> Unit,
     onForeignSignalAlertsEnabledChanged: (Boolean) -> Unit,
     onForeignSignalAlertThresholdChanged: (String) -> Unit,
@@ -2724,10 +2799,13 @@ private fun AppSettingsPage(
     var liveMapIntervalExpanded by remember { mutableStateOf(false) }
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
     var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
+    var themeModeExpanded by remember { mutableStateOf(false) }
     var backupActionInProgress by remember { mutableStateOf(false) }
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
     var backupPassphrase by rememberSaveable { mutableStateOf("") }
+    var selectedSettingsTab by rememberSaveable { mutableStateOf(0) }
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
+    val settingsTabs = listOf("Appearance", "Scheduling", "Detection", "Notifications", "Data")
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
     val recommendedBySource = remember(sourceScanTimings) {
         sourceScanTimings.associate { timing ->
@@ -2743,438 +2821,531 @@ private fun AppSettingsPage(
             Text("Settings", style = MaterialTheme.typography.headlineMedium)
         }
         item {
-            Text("Worker Cadence (Global Scheduler)", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Text(
-                "Current worker cadence: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
-                fontWeight = FontWeight.Medium
-            )
-        }
-        item {
-            Button(onClick = { expanded = true }) {
-                Text("Change worker cadence")
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                ScanSettings.ALLOWED_INTERVALS_SECONDS.forEach { seconds ->
-                    DropdownMenuItem(
-                        text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                        onClick = {
-                            onScanIntervalSelected(seconds)
-                            expanded = false
-                        }
+            TabRow(selectedTabIndex = selectedSettingsTab) {
+                settingsTabs.forEachIndexed { index, label ->
+                    Tab(
+                        selected = selectedSettingsTab == index,
+                        onClick = { selectedSettingsTab = index },
+                        text = { Text(label) }
                     )
                 }
             }
         }
-        item {
-            Text("Worker cadence controls how often scan batches wake up.")
-        }
-        item {
-            Text("Per-source intervals are minimum per-source spacing; effective source cadence cannot exceed worker cadence.")
-        }
-        item {
-            Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
-        }
-        item {
-            Text("Per-Source Scan Intervals", fontWeight = FontWeight.Bold)
-        }
-        items(ScanSettings.SOURCE_TYPES) { sourceType ->
-            val currentInterval = sourceScanIntervals[sourceType]
-                ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
-            Card(modifier = Modifier.fillMaxWidth()) {
+        if (selectedSettingsTab == 0) {
+            item {
+                Text("Appearance", fontWeight = FontWeight.Bold)
+            }
+            item {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.Medium)
-                    Button(onClick = { sourceIntervalExpandedFor = sourceType }) {
-                        Text(ScanSettings.formatInterval(currentInterval))
+                    Text("Theme mode")
+                    Button(onClick = { themeModeExpanded = true }) {
+                        Text(appThemeMode.name)
                     }
                     DropdownMenu(
-                        expanded = sourceIntervalExpandedFor == sourceType,
-                        onDismissRequest = { sourceIntervalExpandedFor = null }
+                        expanded = themeModeExpanded,
+                        onDismissRequest = { themeModeExpanded = false }
                     ) {
-                        ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
+                        AppThemeMode.entries.forEach { mode ->
                             DropdownMenuItem(
-                                text = { Text(ScanSettings.formatInterval(seconds)) },
+                                text = { Text(mode.name) },
                                 onClick = {
-                                    onSourceScanIntervalSelected(sourceType, seconds)
-                                    sourceIntervalExpandedFor = null
+                                    onThemeModeSelected(mode)
+                                    themeModeExpanded = false
                                 }
                             )
                         }
                     }
                 }
             }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Auto-adjust scan interval")
-                        Switch(
-                            checked = autoAdjustScanIntervalEnabled,
-                            onCheckedChange = onAutoAdjustScanIntervalChanged
-                        )
-                    }
-                    Text("Recommended now (overall): every ${ScanSettings.formatInterval(autoAdjustSuggestedIntervalSeconds)}")
-                    if (recommendedBySource.isEmpty()) {
-                        Text("Recommended per source: waiting for timing samples")
-                    } else {
-                        ScanSettings.SOURCE_TYPES.forEach { sourceType ->
-                            val perSource = recommendedBySource[sourceType] ?: return@forEach
-                            Text(
-                                "${formatSourceTypeLabel(sourceType)}: every ${ScanSettings.formatInterval(perSource)}"
-                            )
-                        }
-                    }
-                    Text("Auto mode raises interval quickly when overloaded and lowers gradually when stable.")
-                }
-            }
-        }
-        item {
-            Text(
-                "Last scan duration: ${lastScanDurationMs?.let(::formatScanDuration) ?: "n/a"}",
-                fontWeight = FontWeight.Medium
-            )
-        }
-        if (intervalOverrun) {
             item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Warning: scan duration exceeded interval. Consider raising scan interval.",
-                        color = Color(0xFFB3261E),
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
+                Text("System follows your device theme. Light and Dark force a fixed app appearance.")
             }
         }
-        item {
-            Text("Per-Source Scan Timing", fontWeight = FontWeight.Bold)
-        }
-        if (sourceScanTimings.isEmpty()) {
+        if (selectedSettingsTab == 1) {
             item {
-                Text("No timing samples yet. Start tracking or run live scans.")
+                Text("Worker Cadence (Global Scheduler)", fontWeight = FontWeight.Bold)
             }
-        } else {
-            items(sourceScanTimings) { timing ->
-                val suggestedInterval = suggestSafeIntervalSeconds(timing.p95DurationMs)
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(formatSourceTypeLabel(timing.sourceType), fontWeight = FontWeight.SemiBold)
-                        Text("Samples: ${timing.sampleCount}")
-                        Text("Last: ${formatScanDuration(timing.lastDurationMs)} | Avg: ${formatScanDuration(timing.averageDurationMs)}")
-                        Text("p50: ${formatScanDuration(timing.p50DurationMs)} | p95: ${formatScanDuration(timing.p95DurationMs)} | Max: ${formatScanDuration(timing.maxDurationMs)}")
-                        Text("Suggested safe interval: ${ScanSettings.formatInterval(suggestedInterval)}")
-                    }
-                }
-            }
-        }
-        item {
-            Text("Auto-Adjust Activity Log", fontWeight = FontWeight.Bold)
-        }
-        if (scanIntervalChangeEvents.isEmpty()) {
             item {
-                Text("No interval changes logged yet.")
+                Text(
+                    "Current worker cadence: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
+                    fontWeight = FontWeight.Medium
+                )
             }
-        } else {
-            items(scanIntervalChangeEvents) { event ->
+            item {
+                Button(onClick = { expanded = true }) {
+                    Text("Change worker cadence")
+                }
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    ScanSettings.ALLOWED_INTERVALS_SECONDS.forEach { seconds ->
+                        DropdownMenuItem(
+                            text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
+                            onClick = {
+                                onScanIntervalSelected(seconds)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+            item {
+                Text("Worker cadence controls how often scan batches wake up.")
+            }
+            item {
+                Text("Per-source intervals are minimum per-source spacing; effective source cadence cannot exceed worker cadence.")
+            }
+            item {
+                Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
+            }
+            item {
+                Text("Per-Source Scan Intervals", fontWeight = FontWeight.Bold)
+            }
+            items(ScanSettings.SOURCE_TYPES) { sourceType ->
+                val currentInterval = sourceScanIntervals[sourceType]
+                    ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            "${ScanSettings.formatInterval(event.fromSeconds)} -> ${ScanSettings.formatInterval(event.toSeconds)}",
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text("Reason: ${formatIntervalChangeReason(event.reason)}")
-                        Text(formatEpoch(event.timestampEpochMs))
-                    }
-                }
-            }
-        }
-        item {
-            Text("Live Map Updates", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Text(
-                "Current: every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)}",
-                fontWeight = FontWeight.Medium
-            )
-        }
-        item {
-            Button(onClick = { liveMapIntervalExpanded = true }) {
-                Text("Change live map interval")
-            }
-            DropdownMenu(expanded = liveMapIntervalExpanded, onDismissRequest = { liveMapIntervalExpanded = false }) {
-                ScanSettings.ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS.forEach { seconds ->
-                    DropdownMenuItem(
-                        text = { Text(formatLiveMapIntervalLabel(seconds)) },
-                        onClick = {
-                            onLiveMapUpdateIntervalSelected(seconds)
-                            liveMapIntervalExpanded = false
-                        }
-                    )
-                }
-            }
-        }
-        item {
-            Text("Approach Detection", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Enable approach detection")
-                        Switch(
-                            checked = approachDetectionEnabled,
-                            onCheckedChange = onApproachDetectionChanged
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Approach notifications")
-                        Switch(
-                            checked = approachNotificationsEnabled,
-                            onCheckedChange = onApproachNotificationsChanged,
-                            enabled = approachDetectionEnabled
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Tracker suspicion alerts")
-                        Switch(
-                            checked = trackerNotificationsEnabled,
-                            onCheckedChange = onTrackerNotificationsChanged,
-                            enabled = approachDetectionEnabled
-                        )
-                    }
-                    Text("Notifications trigger when a tracked device changes into approaching state.")
-                    Text("Tracker alerts trigger when unknown devices show strong cross-location co-movement patterns.")
-                }
-            }
-        }
-        item {
-            Text("Foreign Signal Risk", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Enable foreign signal scoring")
-                        Switch(
-                            checked = foreignSignalRiskEnabled,
-                            onCheckedChange = onForeignSignalRiskEnabledChanged
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Foreign signal alerts")
-                        Switch(
-                            checked = foreignSignalAlertsEnabled,
-                            onCheckedChange = onForeignSignalAlertsEnabledChanged,
-                            enabled = foreignSignalRiskEnabled
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Direct acoustic channel")
-                        Switch(
-                            checked = foreignDirectAcousticEnabled,
-                            onCheckedChange = onForeignDirectAcousticEnabledChanged
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Direct magnetometer channel")
-                        Switch(
-                            checked = foreignDirectMagneticEnabled,
-                            onCheckedChange = onForeignDirectMagneticEnabledChanged
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Alert threshold")
-                        Button(
-                            onClick = { foreignSignalThresholdExpanded = true },
-                            enabled = foreignSignalRiskEnabled && foreignSignalAlertsEnabled
-                        ) {
-                            Text(foreignSignalAlertThreshold)
+                        Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.Medium)
+                        Button(onClick = { sourceIntervalExpandedFor = sourceType }) {
+                            Text(ScanSettings.formatInterval(currentInterval))
                         }
                         DropdownMenu(
-                            expanded = foreignSignalThresholdExpanded,
-                            onDismissRequest = { foreignSignalThresholdExpanded = false }
+                            expanded = sourceIntervalExpandedFor == sourceType,
+                            onDismissRequest = { sourceIntervalExpandedFor = null }
                         ) {
-                            ScanSettings.ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS.forEach { threshold ->
+                            ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
                                 DropdownMenuItem(
-                                    text = { Text(threshold) },
+                                    text = { Text(ScanSettings.formatInterval(seconds)) },
                                     onClick = {
-                                        onForeignSignalAlertThresholdChanged(threshold)
-                                        foreignSignalThresholdExpanded = false
+                                        onSourceScanIntervalSelected(sourceType, seconds)
+                                        sourceIntervalExpandedFor = null
                                     }
                                 )
                             }
                         }
                     }
-                    Text("HIGH triggers earlier alerts; CRITICAL reduces noise.")
-                    Text("Direct acoustic and magnetometer channels now ingest live samples when enabled.")
+                }
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Auto-adjust scan interval")
+                            Switch(
+                                checked = autoAdjustScanIntervalEnabled,
+                                onCheckedChange = onAutoAdjustScanIntervalChanged
+                            )
+                        }
+                        Text("Recommended now (overall): every ${ScanSettings.formatInterval(autoAdjustSuggestedIntervalSeconds)}")
+                        if (recommendedBySource.isEmpty()) {
+                            Text("Recommended per source: waiting for timing samples")
+                        } else {
+                            ScanSettings.SOURCE_TYPES.forEach { sourceType ->
+                                val perSource = recommendedBySource[sourceType] ?: return@forEach
+                                Text(
+                                    "${formatSourceTypeLabel(sourceType)}: every ${ScanSettings.formatInterval(perSource)}"
+                                )
+                            }
+                        }
+                        Text("Auto mode raises interval quickly when overloaded and lowers gradually when stable.")
+                    }
+                }
+            }
+            item {
+                Text(
+                    "Last scan duration: ${lastScanDurationMs?.let(::formatScanDuration) ?: "n/a"}",
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            if (intervalOverrun) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "Warning: scan duration exceeded interval. Consider raising scan interval.",
+                            color = Color(0xFFB3261E),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+            }
+            item {
+                Text("Per-Source Scan Timing", fontWeight = FontWeight.Bold)
+            }
+            if (sourceScanTimings.isEmpty()) {
+                item {
+                    Text("No timing samples yet. Start tracking or run live scans.")
+                }
+            } else {
+                items(sourceScanTimings) { timing ->
+                    val suggestedInterval = suggestSafeIntervalSeconds(timing.p95DurationMs)
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(formatSourceTypeLabel(timing.sourceType), fontWeight = FontWeight.SemiBold)
+                            Text("Samples: ${timing.sampleCount}")
+                            Text("Last: ${formatScanDuration(timing.lastDurationMs)} | Avg: ${formatScanDuration(timing.averageDurationMs)}")
+                            Text("p50: ${formatScanDuration(timing.p50DurationMs)} | p95: ${formatScanDuration(timing.p95DurationMs)} | Max: ${formatScanDuration(timing.maxDurationMs)}")
+                            Text("Suggested safe interval: ${ScanSettings.formatInterval(suggestedInterval)}")
+                        }
+                    }
+                }
+            }
+            item {
+                Text("Auto-Adjust Activity Log", fontWeight = FontWeight.Bold)
+            }
+            if (scanIntervalChangeEvents.isEmpty()) {
+                item {
+                    Text("No interval changes logged yet.")
+                }
+            } else {
+                items(scanIntervalChangeEvents) { event ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                "${ScanSettings.formatInterval(event.fromSeconds)} -> ${ScanSettings.formatInterval(event.toSeconds)}",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text("Reason: ${formatIntervalChangeReason(event.reason)}")
+                            Text(formatEpoch(event.timestampEpochMs))
+                        }
+                    }
+                }
+            }
+            item {
+                Text("Live Map Updates", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Text(
+                    "Current: every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)}",
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            item {
+                Button(onClick = { liveMapIntervalExpanded = true }) {
+                    Text("Change live map interval")
+                }
+                DropdownMenu(expanded = liveMapIntervalExpanded, onDismissRequest = { liveMapIntervalExpanded = false }) {
+                    ScanSettings.ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS.forEach { seconds ->
+                        DropdownMenuItem(
+                            text = { Text(formatLiveMapIntervalLabel(seconds)) },
+                            onClick = {
+                                onLiveMapUpdateIntervalSelected(seconds)
+                                liveMapIntervalExpanded = false
+                            }
+                        )
+                    }
                 }
             }
         }
-        item {
-            Text("Backup and Restore", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Export creates an app-wide snapshot (encounters + settings/logs).")
-                    Text("Import restores the latest snapshot from internal app backup storage.")
-                    Text("Encrypted backup uses AES-GCM and a passphrase-derived key.")
-                    OutlinedTextField(
-                        value = backupPassphrase,
-                        onValueChange = { backupPassphrase = it },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        label = { Text("Encryption passphrase (min 8 chars)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        if (selectedSettingsTab == 2) {
+            item {
+                Text("Approach Detection", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
-                            enabled = !backupActionInProgress,
-                            onClick = {
-                                scope.launch {
-                                    backupActionInProgress = true
-                                    backupStatusMessage = runCatching { onExportBackup() }
-                                        .getOrElse { error -> "Export failed: ${error.message ?: "unknown error"}" }
-                                    backupActionInProgress = false
-                                }
-                            }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(if (backupActionInProgress) "Working..." else "Export Backup")
+                            Text("Enable approach detection")
+                            Switch(
+                                checked = approachDetectionEnabled,
+                                onCheckedChange = onApproachDetectionChanged
+                            )
                         }
-                        Button(
-                            enabled = !backupActionInProgress,
-                            onClick = {
-                                scope.launch {
-                                    backupActionInProgress = true
-                                    backupStatusMessage = runCatching { onImportLatestBackup() }
-                                        .getOrElse { error -> "Import failed: ${error.message ?: "unknown error"}" }
-                                    backupActionInProgress = false
-                                }
-                            }
-                        ) {
-                            Text("Import Latest Backup")
-                        }
+                        Text("Approach detection drives approaching-state analysis and tracker-risk modeling.")
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                }
+            }
+            item {
+                Text("Foreign Signal Risk", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
-                            enabled = !backupActionInProgress && hasStrongPassphrase,
-                            onClick = {
-                                scope.launch {
-                                    backupActionInProgress = true
-                                    backupStatusMessage = runCatching {
-                                        onExportEncryptedBackup(backupPassphrase.trim())
-                                    }.getOrElse { error ->
-                                        "Encrypted export failed: ${error.message ?: "unknown error"}"
-                                    }
-                                    backupActionInProgress = false
-                                }
-                            }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(if (backupActionInProgress) "Working..." else "Export Encrypted Backup")
+                            Text("Enable foreign signal scoring")
+                            Switch(
+                                checked = foreignSignalRiskEnabled,
+                                onCheckedChange = onForeignSignalRiskEnabledChanged
+                            )
                         }
-                        Button(
-                            enabled = !backupActionInProgress && hasStrongPassphrase,
-                            onClick = {
-                                scope.launch {
-                                    backupActionInProgress = true
-                                    backupStatusMessage = runCatching {
-                                        onImportLatestEncryptedBackup(backupPassphrase.trim())
-                                    }.getOrElse { error ->
-                                        "Encrypted import failed: ${error.message ?: "unknown error"}"
-                                    }
-                                    backupActionInProgress = false
-                                }
-                            }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Import Latest Encrypted")
+                            Text("Direct acoustic channel")
+                            Switch(
+                                checked = foreignDirectAcousticEnabled,
+                                onCheckedChange = onForeignDirectAcousticEnabledChanged
+                            )
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Direct magnetometer channel")
+                            Switch(
+                                checked = foreignDirectMagneticEnabled,
+                                onCheckedChange = onForeignDirectMagneticEnabledChanged
+                            )
+                        }
+                        Text("Direct acoustic and magnetometer channels ingest live samples when enabled.")
                     }
-                    if (!hasStrongPassphrase) {
-                        Text("Set a passphrase of at least 8 characters to enable encrypted backup/export.")
-                    }
-                    if (backupStatusMessage != null) {
-                        Text(backupStatusMessage!!)
-                    }
-                    Text("Backups are stored in internal app files under backups/.")
                 }
             }
         }
-        item {
-            Text("Reset", fontWeight = FontWeight.Bold)
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Soft reset clears local encounters/devices and all logs.")
-                    Text("Hard reset does soft reset plus wipes mesh network settings (chain link config, passphrase, and mesh toggles).")
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        if (selectedSettingsTab == 3) {
+            item {
+                Text("Notifications", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(onClick = onSoftReset) {
-                            Text("Soft Reset")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Approach notifications")
+                            Switch(
+                                checked = approachNotificationsEnabled,
+                                onCheckedChange = onApproachNotificationsChanged,
+                                enabled = approachDetectionEnabled
+                            )
                         }
-                        Button(onClick = onHardReset) {
-                            Text("Hard Reset")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Tracker suspicion alerts")
+                            Switch(
+                                checked = trackerNotificationsEnabled,
+                                onCheckedChange = onTrackerNotificationsChanged,
+                                enabled = approachDetectionEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Foreign signal alerts")
+                            Switch(
+                                checked = foreignSignalAlertsEnabled,
+                                onCheckedChange = onForeignSignalAlertsEnabledChanged,
+                                enabled = foreignSignalRiskEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Magnetic disturbance alerts")
+                            Switch(
+                                checked = magneticIncreaseNotificationsEnabled,
+                                onCheckedChange = onMagneticIncreaseNotificationsChanged
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Mesh peer connectivity alerts")
+                            Switch(
+                                checked = meshConnectivityNotificationsEnabled,
+                                onCheckedChange = onMeshConnectivityNotificationsChanged
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Mesh wipe lifecycle alerts")
+                            Switch(
+                                checked = meshWipeNotificationsEnabled,
+                                onCheckedChange = onMeshWipeNotificationsChanged
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Alert threshold")
+                            Button(
+                                onClick = { foreignSignalThresholdExpanded = true },
+                                enabled = foreignSignalRiskEnabled && foreignSignalAlertsEnabled
+                            ) {
+                                Text(foreignSignalAlertThreshold)
+                            }
+                            DropdownMenu(
+                                expanded = foreignSignalThresholdExpanded,
+                                onDismissRequest = { foreignSignalThresholdExpanded = false }
+                            ) {
+                                ScanSettings.ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS.forEach { threshold ->
+                                    DropdownMenuItem(
+                                        text = { Text(threshold) },
+                                        onClick = {
+                                            onForeignSignalAlertThresholdChanged(threshold)
+                                            foreignSignalThresholdExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        Text("HIGH triggers earlier foreign-signal alerts; CRITICAL reduces noise.")
+                    }
+                }
+            }
+        }
+        if (selectedSettingsTab == 4) {
+            item {
+                Text("Backup and Restore", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Export creates an app-wide snapshot (encounters + settings/logs).")
+                        Text("Import restores the latest snapshot from internal app backup storage.")
+                        Text("Encrypted backup uses AES-GCM and a passphrase-derived key.")
+                        OutlinedTextField(
+                            value = backupPassphrase,
+                            onValueChange = { backupPassphrase = it },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            label = { Text("Encryption passphrase (min 8 chars)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                enabled = !backupActionInProgress,
+                                onClick = {
+                                    scope.launch {
+                                        backupActionInProgress = true
+                                        backupStatusMessage = runCatching { onExportBackup() }
+                                            .getOrElse { error -> "Export failed: ${error.message ?: "unknown error"}" }
+                                        backupActionInProgress = false
+                                    }
+                                }
+                            ) {
+                                Text(if (backupActionInProgress) "Working..." else "Export Backup")
+                            }
+                            Button(
+                                enabled = !backupActionInProgress,
+                                onClick = {
+                                    scope.launch {
+                                        backupActionInProgress = true
+                                        backupStatusMessage = runCatching { onImportLatestBackup() }
+                                            .getOrElse { error -> "Import failed: ${error.message ?: "unknown error"}" }
+                                        backupActionInProgress = false
+                                    }
+                                }
+                            ) {
+                                Text("Import Latest Backup")
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                enabled = !backupActionInProgress && hasStrongPassphrase,
+                                onClick = {
+                                    scope.launch {
+                                        backupActionInProgress = true
+                                        backupStatusMessage = runCatching {
+                                            onExportEncryptedBackup(backupPassphrase.trim())
+                                        }.getOrElse { error ->
+                                            "Encrypted export failed: ${error.message ?: "unknown error"}"
+                                        }
+                                        backupActionInProgress = false
+                                    }
+                                }
+                            ) {
+                                Text(if (backupActionInProgress) "Working..." else "Export Encrypted Backup")
+                            }
+                            Button(
+                                enabled = !backupActionInProgress && hasStrongPassphrase,
+                                onClick = {
+                                    scope.launch {
+                                        backupActionInProgress = true
+                                        backupStatusMessage = runCatching {
+                                            onImportLatestEncryptedBackup(backupPassphrase.trim())
+                                        }.getOrElse { error ->
+                                            "Encrypted import failed: ${error.message ?: "unknown error"}"
+                                        }
+                                        backupActionInProgress = false
+                                    }
+                                }
+                            ) {
+                                Text("Import Latest Encrypted")
+                            }
+                        }
+                        if (!hasStrongPassphrase) {
+                            Text("Set a passphrase of at least 8 characters to enable encrypted backup/export.")
+                        }
+                        if (backupStatusMessage != null) {
+                            Text(backupStatusMessage!!)
+                        }
+                        Text("Backups are stored in internal app files under backups/.")
+                    }
+                }
+            }
+            item {
+                Text("Reset", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Soft reset clears local encounters/devices and all logs.")
+                        Text("Hard reset does soft reset plus wipes mesh network settings (chain link config, passphrase, and mesh toggles).")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(onClick = onSoftReset) {
+                                Text("Soft Reset")
+                            }
+                            Button(onClick = onHardReset) {
+                                Text("Hard Reset")
+                            }
                         }
                     }
                 }
