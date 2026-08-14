@@ -157,6 +157,20 @@ class LocalMeshChainLinkCoordinator(
             addWipeNotice(notice)
             publishSnapshot()
         },
+        onIncomingHeartbeat = { requesterNodeId, requesterDeviceName, requesterHost ->
+            mergePeerStatus(
+                nodeId = requesterNodeId,
+                deviceName = requesterDeviceName,
+                host = requesterHost,
+                state = ChainPeerState.CONNECTED,
+                failure = null,
+                sharedLocationLat = null,
+                sharedLocationLon = null,
+                sharedLocationAccuracyMeters = null,
+                sharedLocationTimestampEpochMs = null
+            )
+            publishSnapshot(lastRefresh = System.currentTimeMillis())
+        },
         onIncomingLinkRequest = { request ->
             synchronized(incomingRequests) {
                 incomingRequests.add(0, request)
@@ -184,6 +198,9 @@ class LocalMeshChainLinkCoordinator(
         if (!ScanSettings.isChainLinkEnabled(context)) return
         server.start()
         ensurePersistentChannelLoop()
+        scope.launch {
+            runCatching { refreshPeers() }
+        }
     }
 
     override fun stopServer() {
@@ -822,6 +839,7 @@ class LocalMeshChainLinkCoordinator(
     private suspend fun sendHeartbeat(peer: DiscoveredPeer, sharedSecret: String): Boolean = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("nodeId", nodeId)
+            put("deviceName", ScanSettings.getChainDeviceName(context))
             put("timestampEpochMs", System.currentTimeMillis())
         }.toString()
 
@@ -1058,6 +1076,7 @@ private class ChainLinkServer(
     private val scope: CoroutineScope,
     private val authSecretProvider: () -> String,
     private val onWipeNotice: (MeshWipeNotice) -> Unit,
+    private val onIncomingHeartbeat: (requesterNodeId: String, requesterDeviceName: String?, requesterHost: String) -> Unit,
     private val onIncomingLinkRequest: (IncomingLinkRequest) -> Unit
 ) {
     @Volatile
@@ -1245,6 +1264,16 @@ private class ChainLinkServer(
                     if (!authValid) {
                         writeHttpResponse(writer, statusCode = 401, body = "unauthorized")
                         return@runCatching
+                    }
+
+                    val heartbeatObj = runCatching { JSONObject(body) }.getOrNull()
+                    val requesterDeviceName = heartbeatObj
+                        ?.optString("deviceName", null)
+                        ?.trim()
+                        ?.ifBlank { null }
+                    val requesterHost = socket.inetAddress?.hostAddress?.trim().orEmpty()
+                    if (requesterHost.isNotBlank()) {
+                        onIncomingHeartbeat(authNodeId, requesterDeviceName, requesterHost)
                     }
 
                     val heartbeatAck = JSONObject().apply {

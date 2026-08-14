@@ -457,7 +457,7 @@ object ScanSettings {
 
     fun isChainPersistentChannelEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED, false)
+            .getBoolean(KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED, true)
 
     fun setChainPersistentChannelEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

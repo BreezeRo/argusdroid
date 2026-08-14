@@ -770,6 +770,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
         sensorStatuses = SensorStatusProvider.read(context)
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
+        if (chainLinkEnabled && chainSharedSecret.isNotBlank() && !chainPersistentChannelEnabled) {
+            chainPersistentChannelEnabled = true
+            ScanSettings.setChainPersistentChannelEnabled(context, true)
+        }
         MeshForegroundServiceController.ensureState(context)
     }
 
@@ -1556,6 +1560,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onChainLinkChanged = { enabled ->
                         chainLinkEnabled = enabled
                         ScanSettings.setChainLinkEnabled(context, enabled)
+                        if (enabled && chainSharedSecret.isNotBlank() && !chainPersistentChannelEnabled) {
+                            chainPersistentChannelEnabled = true
+                            ScanSettings.setChainPersistentChannelEnabled(context, true)
+                        }
                         if (enabled) {
                             app.container.chainLinkCoordinator.ensureServerRunning()
                         } else {
@@ -1570,6 +1578,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onChainSharedSecretChanged = { newSecret ->
                         chainSharedSecret = newSecret.trim()
                         ScanSettings.setChainSharedSecret(context, newSecret)
+                        if (chainLinkEnabled && chainSharedSecret.isNotBlank() && !chainPersistentChannelEnabled) {
+                            chainPersistentChannelEnabled = true
+                            ScanSettings.setChainPersistentChannelEnabled(context, true)
+                            app.container.chainLinkCoordinator.ensureServerRunning()
+                            MeshForegroundServiceController.ensureState(context)
+                        }
                     },
                     onChainAutoSyncChanged = { enabled ->
                         chainAutoSyncEnabled = enabled
