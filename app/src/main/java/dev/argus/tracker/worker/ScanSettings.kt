@@ -83,7 +83,9 @@ object ScanSettings {
     const val DEFAULT_APP_THEME_MODE = "SYSTEM"
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
-    val ALLOWED_INTERVALS_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
+    private val SHARED_ALLOWED_CADENCE_SECONDS: List<Long> =
+        (1L..60L).toList() + listOf(120L, 300L, 600L, 1800L, 3600L)
+    val ALLOWED_INTERVALS_SECONDS = SHARED_ALLOWED_CADENCE_SECONDS
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
@@ -106,8 +108,7 @@ object ScanSettings {
         "acoustic",
         "magnetic"
     )
-    val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> =
-        (1L..60L).toList() + listOf(120L, 300L, 600L, 1800L, 3600L)
+    val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
 
     data class SourceScanTiming(
         val sourceType: String,

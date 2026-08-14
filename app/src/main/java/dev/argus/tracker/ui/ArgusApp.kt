@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -163,6 +164,8 @@ private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primary
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}?lat={lat}&lon={lon}&ts={ts}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 private val DETAIL_TWO_COLUMN_MIN_WIDTH: Dp = 720.dp
+private val HOME_TWO_COLUMN_MIN_WIDTH: Dp = 560.dp
+private val HOME_THREE_COLUMN_MIN_WIDTH: Dp = 920.dp
 
 private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, EVASION_ROUTE, DEVICES_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -244,6 +247,14 @@ private data class ForeignSignalRiskSignal(
     val directAcousticObserved: Boolean,
     val directMagneticObserved: Boolean,
     val unavailableSignals: List<String>
+)
+
+private data class HomeSensorToggle(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val enabled: Boolean,
+    val status: SensorStatus?
 )
 
 private data class DeviceItem(
@@ -566,10 +577,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var alertLogs by remember { mutableStateOf(AlertLogStore.read(context)) }
     var lastScanDurationMs by remember { mutableStateOf(ScanSettings.getLastScanDurationMs(context)) }
     var sourceScanTimings by remember { mutableStateOf(ScanSettings.getSourceScanTimings(context)) }
-    var autoAdjustScanIntervalEnabled by remember { mutableStateOf(ScanSettings.isAutoAdjustScanIntervalEnabled(context)) }
     var scanIntervalChangeEvents by remember { mutableStateOf(ScanSettings.getScanIntervalChangeEvents(context, 10)) }
-    var autoAdjustConsecutiveOverruns by remember { mutableStateOf(mapOf<String, Int>()) }
-    var autoAdjustStableCycles by remember { mutableStateOf(mapOf<String, Int>()) }
     var appThemeMode by remember {
         mutableStateOf(
             runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
@@ -669,16 +677,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             launchSingleTop = true
         }
     }
-    val autoAdjustSuggestedIntervalSeconds = remember(sourceScanTimings, sensorGateSettings) {
-        computeRecommendedIntervalSeconds(sourceScanTimings, sensorGateSettings)
-    }
-    val autoAdjustSuggestedBySource = remember(sourceScanTimings) {
-        sourceScanTimings.associate { timing ->
-            timing.sourceType to suggestSafeIntervalSeconds(timing.p95DurationMs)
-        }
-    }
-
-    suspend fun applyScanInterval(seconds: Long, sourceLabel: String, reasonCode: String) {
+    suspend fun applyScanInterval(
+        seconds: Long,
+        sourceLabel: String,
+        reasonCode: String,
+        announceResult: Boolean = true
+    ) {
         val previous = scanIntervalSeconds
         if (seconds == previous) return
         scanIntervalSeconds = seconds
@@ -693,14 +697,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         if (trackingActive) {
             WorkScheduler.stop(context)
             val restartResult = WorkScheduler.startAndVerify(context)
-            trackingStartMessage = if (restartResult.success) {
-                "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)} and restarted tracking."
-            } else {
-                "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)}, but restart failed: ${restartResult.message}"
+            if (announceResult) {
+                trackingStartMessage = if (restartResult.success) {
+                    "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)} and restarted tracking."
+                } else {
+                    "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)}, but restart failed: ${restartResult.message}"
+                }
+                trackingStartMessageIsError = !restartResult.success
             }
-            trackingStartMessageIsError = !restartResult.success
             trackingActive = WorkScheduler.isTrackingActive(context)
-        } else {
+        } else if (announceResult) {
             trackingStartMessage = "$sourceLabel set interval to ${ScanSettings.formatInterval(seconds)}."
             trackingStartMessageIsError = false
         }
@@ -714,6 +720,21 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             .minOrNull()
             ?.coerceAtLeast(1L)
             ?: scanIntervalSeconds
+    }
+
+    fun nearestAllowedGlobalInterval(seconds: Long): Long {
+        return ScanSettings.ALLOWED_INTERVALS_SECONDS.minByOrNull { abs(it - seconds) }
+            ?: ScanSettings.DEFAULT_SCAN_INTERVAL_SECONDS
+    }
+
+    suspend fun alignWorkerCadenceWithSources(reasonCode: String) {
+        val targetInterval = nearestAllowedGlobalInterval(minimumEnabledSourceIntervalSeconds())
+        applyScanInterval(
+            seconds = targetInterval,
+            sourceLabel = "Cadence sync",
+            reasonCode = reasonCode,
+            announceResult = false
+        )
     }
 
     fun appendEvasionAction(action: String, detail: String) {
@@ -753,11 +774,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         return raw.coerceIn(ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS, ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS)
     }
 
-    fun nearestAllowedGlobalInterval(seconds: Long): Long {
-        return ScanSettings.ALLOWED_INTERVALS_SECONDS.minByOrNull { abs(it - seconds) }
-            ?: ScanSettings.DEFAULT_SCAN_INTERVAL_SECONDS
-    }
-
     suspend fun applyEvasionCadence(
         profile: EvasionProfile,
         reasonCode: String,
@@ -765,7 +781,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         jitterPercent: Int,
         appendLog: Boolean
     ) {
-        val (baseSourceIntervals, baseGlobalTick) = evasionBaseCadence(profile)
+        val (baseSourceIntervals, _) = evasionBaseCadence(profile)
         val resolvedSourceIntervals = if (jitterEnabled) {
             baseSourceIntervals.mapValues { (_, value) -> jitterSeconds(value, jitterPercent) }
         } else {
@@ -776,24 +792,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             ScanSettings.setSourceScanIntervalSeconds(context, source, seconds)
         }
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
-
-        val targetGlobalTick = if (jitterEnabled) {
-            nearestAllowedGlobalInterval(jitterSeconds(baseGlobalTick, jitterPercent))
-        } else {
-            nearestAllowedGlobalInterval(baseGlobalTick)
-        }
-
-        if (scanIntervalSeconds != targetGlobalTick) {
-            ScanSettings.appendScanIntervalChangeEvent(
-                context = context,
-                fromSeconds = scanIntervalSeconds,
-                toSeconds = targetGlobalTick,
-                reason = reasonCode
-            )
-            scanIntervalSeconds = targetGlobalTick
-            ScanSettings.setScanIntervalSeconds(context, targetGlobalTick)
-            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
-        }
+        alignWorkerCadenceWithSources(reasonCode = reasonCode)
 
         if (appendLog) {
             appendEvasionAction(
@@ -917,73 +916,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
-        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
         sensorStatuses = SensorStatusProvider.read(context)
         readinessItems = DetectionReadinessAdvisor.evaluate(context)
         MeshForegroundServiceController.ensureState(context)
-    }
-
-    LaunchedEffect(autoAdjustScanIntervalEnabled, trackingActive, sourceScanTimings, sensorGateSettings, sourceScanIntervals, scanIntervalSeconds) {
-        if (!autoAdjustScanIntervalEnabled || !trackingActive) return@LaunchedEffect
-
-        while (true) {
-            val timingBySource = sourceScanTimings.associateBy { it.sourceType }
-            enabledSourceTypes(sensorGateSettings).forEach { sourceType ->
-                val timing = timingBySource[sourceType] ?: return@forEach
-                val currentSourceInterval = sourceScanIntervals[sourceType]
-                    ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
-                val currentSourceIntervalMs = currentSourceInterval * 1000L
-                val overrun = timing.lastDurationMs > currentSourceIntervalMs
-                val suggestedSource = autoAdjustSuggestedBySource[sourceType] ?: currentSourceInterval
-
-                val overrunCount = autoAdjustConsecutiveOverruns[sourceType] ?: 0
-                val stableCount = autoAdjustStableCycles[sourceType] ?: 0
-
-                if (overrun) {
-                    autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to (overrunCount + 1))
-                    autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to 0)
-                    if (overrunCount + 1 >= 2) {
-                        val updated = (currentSourceInterval + 1L)
-                            .coerceAtMost(ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS)
-                        if (updated != currentSourceInterval) {
-                            ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
-                            sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
-                            ScanSettings.appendScanIntervalChangeEvent(
-                                context = context,
-                                fromSeconds = currentSourceInterval,
-                                toSeconds = updated,
-                                reason = "auto-overrun-$sourceType"
-                            )
-                            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
-                        }
-                        autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to 0)
-                    }
-                } else {
-                    autoAdjustConsecutiveOverruns = autoAdjustConsecutiveOverruns + (sourceType to 0)
-                    autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to (stableCount + 1))
-                    if (stableCount + 1 >= 10 && currentSourceInterval > suggestedSource) {
-                        val updated = (currentSourceInterval - 1L)
-                            .coerceAtLeast(suggestedSource)
-                            .coerceAtLeast(ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS)
-                        if (updated != currentSourceInterval) {
-                            ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
-                            sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
-                            ScanSettings.appendScanIntervalChangeEvent(
-                                context = context,
-                                fromSeconds = currentSourceInterval,
-                                toSeconds = updated,
-                                reason = "auto-stable-$sourceType"
-                            )
-                            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
-                        }
-                        autoAdjustStableCycles = autoAdjustStableCycles + (sourceType to 0)
-                    }
-                }
-            }
-
-            delay(2000)
-        }
     }
 
     LaunchedEffect(chainLinkEnabled, chainAutoSyncEnabled, chainAutoSyncIntervalSeconds, chainSharedSecret) {
@@ -994,6 +930,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             runCatching { app.container.chainLinkCoordinator.syncNow() }
             delay(chainAutoSyncIntervalSeconds * 1000L)
         }
+    }
+
+    LaunchedEffect(sourceScanIntervals, sensorGateSettings) {
+        alignWorkerCadenceWithSources(reasonCode = "scheduler-align")
     }
 
     LaunchedEffect(chainLinkEnabled) {
@@ -1473,6 +1413,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                             foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                             sensorStatuses = SensorStatusProvider.read(context)
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-sensor-gate")
                             trackingStartMessage = "Sensor gating updated."
                             trackingStartMessageIsError = false
                         }
@@ -1502,8 +1443,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     lastScanDurationMs = lastScanDurationMs,
                     sourceScanTimings = sourceScanTimings,
                     scanIntervalChangeEvents = scanIntervalChangeEvents,
-                    autoAdjustScanIntervalEnabled = autoAdjustScanIntervalEnabled,
-                    autoAdjustSuggestedIntervalSeconds = autoAdjustSuggestedIntervalSeconds,
                     appThemeMode = appThemeMode,
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
@@ -1516,28 +1455,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     foreignSignalAlertThreshold = foreignSignalAlertThreshold,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
                     foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
-                    onScanIntervalSelected = { seconds ->
-                        scope.launch {
-                            applyScanInterval(seconds, "Manual update", "manual")
-                        }
-                    },
-                    onAutoAdjustScanIntervalChanged = { enabled ->
-                        autoAdjustScanIntervalEnabled = enabled
-                        ScanSettings.setAutoAdjustScanIntervalEnabled(context, enabled)
-                        autoAdjustConsecutiveOverruns = emptyMap()
-                        autoAdjustStableCycles = emptyMap()
-                        if (enabled) {
-                            scope.launch {
-                                val alignedSourceIntervals = ScanSettings.SOURCE_TYPES.associateWith { source ->
-                                    val suggested = autoAdjustSuggestedBySource[source]
-                                        ?: (sourceScanIntervals[source] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS)
-                                    ScanSettings.setSourceScanIntervalSeconds(context, source, suggested)
-                                    suggested
-                                }
-                                sourceScanIntervals = alignedSourceIntervals
-                            }
-                        }
-                    },
                     onSourceScanIntervalSelected = { sourceType, seconds ->
                         val previous = sourceScanIntervals[sourceType]
                             ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
@@ -1554,6 +1471,37 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             reason = "manual-$sourceType"
                         )
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                        scope.launch {
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-manual-$sourceType")
+                        }
+                    },
+                    onAllSourceScanIntervalsSelected = { seconds ->
+                        var hasChanges = false
+                        ScanSettings.SOURCE_TYPES.forEach { sourceType ->
+                            val previous = sourceScanIntervals[sourceType]
+                                ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+                            val updated = seconds.coerceIn(
+                                ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
+                                ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
+                            )
+                            if (previous != updated) {
+                                hasChanges = true
+                                ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
+                                ScanSettings.appendScanIntervalChangeEvent(
+                                    context = context,
+                                    fromSeconds = previous,
+                                    toSeconds = updated,
+                                    reason = "manual-all-$sourceType"
+                                )
+                            }
+                        }
+                        if (hasChanges) {
+                            sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+                            scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+                            scope.launch {
+                                alignWorkerCadenceWithSources(reasonCode = "scheduler-align-manual-all")
+                            }
+                        }
                     },
                     onThemeModeSelected = { mode ->
                         appThemeMode = mode
@@ -1599,11 +1547,17 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignDirectAcousticEnabled = enabled
                         ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
                         sensorGateSettings = readSensorGateSettings(context)
+                        scope.launch {
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-acoustic")
+                        }
                     },
                     onForeignDirectMagneticEnabledChanged = { enabled ->
                         foreignDirectMagneticEnabled = enabled
                         ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
                         sensorGateSettings = readSensorGateSettings(context)
+                        scope.launch {
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-magnetic")
+                        }
                     },
                     onLiveMapUpdateIntervalSelected = { seconds ->
                         liveMapUpdateIntervalSeconds = seconds
@@ -1668,7 +1622,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
-                        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
@@ -1719,7 +1672,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
-                        autoAdjustScanIntervalEnabled = ScanSettings.isAutoAdjustScanIntervalEnabled(context)
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
@@ -2510,20 +2462,7 @@ private fun HomePage(
                     append(if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped")
                     append(" | Last scan: ")
                     append(lastScanEpochMs?.let(::formatEpoch) ?: "Never")
-                    append(" | Last scan cycle total: ")
-                    append(lastScanDurationMs?.let(::formatScanDuration) ?: "n/a")
                 },
-                fontWeight = FontWeight.Medium
-            )
-        }
-        item {
-            val perSourceSummary = sourceScanTimings
-                .joinToString(separator = " | ") { timing ->
-                    "${formatSourceTypeLabel(timing.sourceType)} ${formatScanDuration(timing.lastDurationMs)}"
-                }
-                .ifBlank { "n/a" }
-            Text(
-                text = "Per-source last durations: $perSourceSummary",
                 fontWeight = FontWeight.Medium
             )
         }
@@ -2606,27 +2545,64 @@ private fun HomePage(
             }
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!trackingActive) {
-                    Button(onClick = onStart) {
-                        Text("Start Tracking")
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (!trackingActive) {
+                            Button(onClick = onStart, modifier = Modifier.weight(1f)) {
+                                Text("Start Tracking")
+                            }
+                        }
+                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.weight(1f)) {
+                            Text("Stop")
+                        }
+                        Button(onClick = onRefresh, modifier = Modifier.weight(1f)) {
+                            Text("Refresh")
+                        }
                     }
-                }
-                Button(onClick = onStop, enabled = trackingActive) {
-                    Text("Stop")
-                }
-                Button(onClick = onRefresh) {
-                    Text("Refresh")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!trackingActive) {
+                            Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
+                                Text("Start Tracking")
+                            }
+                        }
+                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.fillMaxWidth()) {
+                            Text("Stop")
+                        }
+                        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+                            Text("Refresh")
+                        }
+                    }
                 }
             }
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onClearEncounters) {
-                    Text("Clear Encounters")
-                }
-                Button(onClick = onClearDevices) {
-                    Text("Clear Devices")
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(onClick = onClearEncounters, modifier = Modifier.weight(1f)) {
+                            Text("Clear Encounters")
+                        }
+                        Button(onClick = onClearDevices, modifier = Modifier.weight(1f)) {
+                            Text("Clear Devices")
+                        }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onClearEncounters, modifier = Modifier.fillMaxWidth()) {
+                            Text("Clear Encounters")
+                        }
+                        Button(onClick = onClearDevices, modifier = Modifier.fillMaxWidth()) {
+                            Text("Clear Devices")
+                        }
+                    }
                 }
             }
         }
@@ -2642,99 +2618,106 @@ private fun HomePage(
                 ) {
                     Text("Sensor Collection Toggles", fontWeight = FontWeight.Medium)
                     Text("Only enabled sensors are collected during tracking and live scans.")
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Wi-Fi")
-                        Switch(
-                            checked = sensorGateSettings.wifiEnabled,
-                            onCheckedChange = { onSensorGateChanged("wifi", it) }
+                    val sensorStatusByName = sensorStatuses.associateBy { it.name }
+                    val toggles = listOf(
+                        HomeSensorToggle(
+                            "wifi",
+                            "Wi-Fi",
+                            "Nearby network environment",
+                            sensorGateSettings.wifiEnabled,
+                            sensorStatusByName["Wi-Fi"]
+                        ),
+                        HomeSensorToggle(
+                            "bluetooth",
+                            "Bluetooth LE",
+                            "Low-energy beacon scan",
+                            sensorGateSettings.bluetoothEnabled,
+                            sensorStatusByName["Bluetooth LE"]
+                        ),
+                        HomeSensorToggle(
+                            "cellular",
+                            "Cellular",
+                            "Cell and network telemetry",
+                            sensorGateSettings.cellularEnabled,
+                            sensorStatusByName["Cellular"]
+                        ),
+                        HomeSensorToggle(
+                            "remote_id",
+                            "Remote ID",
+                            "Drone identity broadcasts",
+                            sensorGateSettings.remoteIdEnabled,
+                            sensorStatusByName["Remote ID"]
+                        ),
+                        HomeSensorToggle(
+                            "uwb",
+                            "UWB",
+                            "Ultra-wideband activity",
+                            sensorGateSettings.uwbEnabled,
+                            sensorStatusByName["UWB"]
+                        ),
+                        HomeSensorToggle(
+                            "sdr",
+                            "SDR",
+                            "Software-defined radio ingest",
+                            sensorGateSettings.sdrEnabled,
+                            sensorStatusByName["SDR"]
+                        ),
+                        HomeSensorToggle(
+                            "direct_acoustic",
+                            "Acoustic (Direct)",
+                            "On-device acoustic proxy",
+                            sensorGateSettings.directAcousticEnabled,
+                            sensorStatusByName["Acoustic (Direct)"]
+                        ),
+                        HomeSensorToggle(
+                            "direct_magnetic",
+                            "Magnetometer (Direct)",
+                            "On-device magnetic proxy",
+                            sensorGateSettings.directMagneticEnabled,
+                            sensorStatusByName["Magnetometer (Direct)"]
                         )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Bluetooth LE")
-                        Switch(
-                            checked = sensorGateSettings.bluetoothEnabled,
-                            onCheckedChange = { onSensorGateChanged("bluetooth", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Cellular")
-                        Switch(
-                            checked = sensorGateSettings.cellularEnabled,
-                            onCheckedChange = { onSensorGateChanged("cellular", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Remote ID")
-                        Switch(
-                            checked = sensorGateSettings.remoteIdEnabled,
-                            onCheckedChange = { onSensorGateChanged("remote_id", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("UWB")
-                        Switch(
-                            checked = sensorGateSettings.uwbEnabled,
-                            onCheckedChange = { onSensorGateChanged("uwb", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("SDR")
-                        Switch(
-                            checked = sensorGateSettings.sdrEnabled,
-                            onCheckedChange = { onSensorGateChanged("sdr", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Acoustic (Direct)")
-                        Switch(
-                            checked = sensorGateSettings.directAcousticEnabled,
-                            onCheckedChange = { onSensorGateChanged("direct_acoustic", it) }
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Magnetometer (Direct)")
-                        Switch(
-                            checked = sensorGateSettings.directMagneticEnabled,
-                            onCheckedChange = { onSensorGateChanged("direct_magnetic", it) }
-                        )
-                    }
-                }
-            }
-        }
-        items(sensorStatuses) { sensor ->
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(sensor.name)
-                    Text(
-                        "${if (sensor.isOn) "On" else "Off"} | ${if (sensor.factoredByArgus) "Factored" else "Not factored"}"
                     )
+                    HomeResponsiveGrid(
+                        items = toggles,
+                        twoColumnMinWidth = HOME_TWO_COLUMN_MIN_WIDTH,
+                        threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+                    ) { toggle ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(toggle.title, fontWeight = FontWeight.Medium)
+                                    Text(
+                                        toggle.subtitle,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    toggle.status?.let { sensorStatus ->
+                                        val statusText = "${if (sensorStatus.isOn) "On" else "Off"} | ${if (sensorStatus.factoredByArgus) "Factored" else "Not factored"}"
+                                        val statusColor = if (sensorStatus.isOn && sensorStatus.factoredByArgus) {
+                                            Color(0xFF2E7D32)
+                                        } else {
+                                            Color(0xFFE65100)
+                                        }
+                                        Text(
+                                            text = statusText,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = statusColor,
+                                            modifier = Modifier.padding(top = 6.dp)
+                                        )
+                                    }
+                                }
+                                Switch(
+                                    checked = toggle.enabled,
+                                    onCheckedChange = { onSensorGateChanged(toggle.key, it) }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2742,14 +2725,78 @@ private fun HomePage(
         item {
             Text("Last 24h Summary", fontWeight = FontWeight.Bold)
         }
-        items(summary) { item ->
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        item {
+            if (summary.isEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "No source activity recorded in the last 24 hours.",
+                        modifier = Modifier.padding(12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                HomeResponsiveGrid(
+                    items = summary,
+                    twoColumnMinWidth = HOME_TWO_COLUMN_MIN_WIDTH,
+                    threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+                ) { sourceSummary ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = sourceSummary.source,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = sourceSummary.count.toString(),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (sourceSummary.count == 1) "event" else "events",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> HomeResponsiveGrid(
+    items: List<T>,
+    twoColumnMinWidth: Dp,
+    threeColumnMinWidth: Dp,
+    itemContent: @Composable (T) -> Unit
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val columns = when {
+            maxWidth >= threeColumnMinWidth -> 3
+            maxWidth >= twoColumnMinWidth -> 2
+            else -> 1
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items.chunked(columns).forEach { rowItems ->
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(item.source)
-                    Text(item.count.toString())
+                    rowItems.forEach { gridItem ->
+                        Box(modifier = Modifier.weight(1f)) {
+                            itemContent(gridItem)
+                        }
+                    }
+                    repeat(columns - rowItems.size) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -2764,8 +2811,6 @@ private fun AppSettingsPage(
     lastScanDurationMs: Long?,
     sourceScanTimings: List<ScanSettings.SourceScanTiming>,
     scanIntervalChangeEvents: List<ScanSettings.IntervalChangeEvent>,
-    autoAdjustScanIntervalEnabled: Boolean,
-    autoAdjustSuggestedIntervalSeconds: Long,
     appThemeMode: AppThemeMode,
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
@@ -2778,9 +2823,8 @@ private fun AppSettingsPage(
     foreignSignalAlertThreshold: String,
     foreignDirectAcousticEnabled: Boolean,
     foreignDirectMagneticEnabled: Boolean,
-    onScanIntervalSelected: (Long) -> Unit,
-    onAutoAdjustScanIntervalChanged: (Boolean) -> Unit,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
+    onAllSourceScanIntervalsSelected: (Long) -> Unit,
     onThemeModeSelected: (AppThemeMode) -> Unit,
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
@@ -2802,9 +2846,9 @@ private fun AppSettingsPage(
     onHardReset: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var expanded by remember { mutableStateOf(false) }
     var liveMapIntervalExpanded by remember { mutableStateOf(false) }
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
+    var allSourceIntervalsExpanded by remember { mutableStateOf(false) }
     var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
     var themeModeExpanded by remember { mutableStateOf(false) }
     var backupActionInProgress by remember { mutableStateOf(false) }
@@ -2814,11 +2858,6 @@ private fun AppSettingsPage(
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
     val settingsTabs = listOf("Appearance", "Scheduling", "Detection", "Notifications", "Data")
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
-    val recommendedBySource = remember(sourceScanTimings) {
-        sourceScanTimings.associate { timing ->
-            timing.sourceType to suggestSafeIntervalSeconds(timing.p95DurationMs)
-        }
-    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -2873,41 +2912,52 @@ private fun AppSettingsPage(
         }
         if (selectedSettingsTab == 1) {
             item {
-                Text("Worker Cadence (Global Scheduler)", fontWeight = FontWeight.Bold)
+                Text("Scan Cadence", fontWeight = FontWeight.Bold)
             }
             item {
                 Text(
-                    "Current worker cadence: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
+                    "Worker cadence (auto): every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
                     fontWeight = FontWeight.Medium
                 )
             }
             item {
-                Button(onClick = { expanded = true }) {
-                    Text("Change worker cadence")
-                }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    ScanSettings.ALLOWED_INTERVALS_SECONDS.forEach { seconds ->
-                        DropdownMenuItem(
-                            text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                            onClick = {
-                                onScanIntervalSelected(seconds)
-                                expanded = false
-                            }
-                        )
-                    }
-                }
+                Text("Worker cadence is aligned automatically to the fastest enabled per-source interval.")
             }
             item {
-                Text("Worker cadence controls how often scan batches wake up.")
-            }
-            item {
-                Text("Per-source intervals are minimum per-source spacing; effective source cadence cannot exceed worker cadence.")
+                Text("Per-source intervals are the single source of truth for scan spacing.")
             }
             item {
                 Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
             }
             item {
                 Text("Per-Source Scan Intervals", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Set all sources", fontWeight = FontWeight.Medium)
+                        Button(onClick = { allSourceIntervalsExpanded = true }) {
+                            Text("Choose interval")
+                        }
+                        DropdownMenu(
+                            expanded = allSourceIntervalsExpanded,
+                            onDismissRequest = { allSourceIntervalsExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text(ScanSettings.formatInterval(seconds)) },
+                                    onClick = {
+                                        onAllSourceScanIntervalsSelected(seconds)
+                                        allSourceIntervalsExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
             }
             items(ScanSettings.SOURCE_TYPES) { sourceType ->
                 val currentInterval = sourceScanIntervals[sourceType]
@@ -2935,37 +2985,6 @@ private fun AppSettingsPage(
                                 )
                             }
                         }
-                    }
-                }
-            }
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Auto-adjust scan interval")
-                            Switch(
-                                checked = autoAdjustScanIntervalEnabled,
-                                onCheckedChange = onAutoAdjustScanIntervalChanged
-                            )
-                        }
-                        Text("Recommended now (overall): every ${ScanSettings.formatInterval(autoAdjustSuggestedIntervalSeconds)}")
-                        if (recommendedBySource.isEmpty()) {
-                            Text("Recommended per source: waiting for timing samples")
-                        } else {
-                            ScanSettings.SOURCE_TYPES.forEach { sourceType ->
-                                val perSource = recommendedBySource[sourceType] ?: return@forEach
-                                Text(
-                                    "${formatSourceTypeLabel(sourceType)}: every ${ScanSettings.formatInterval(perSource)}"
-                                )
-                            }
-                        }
-                        Text("Auto mode raises interval quickly when overloaded and lowers gradually when stable.")
                     }
                 }
             }
@@ -6082,40 +6101,6 @@ private fun suggestSafeIntervalSeconds(referenceDurationMs: Long): Long {
         ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
         ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
     )
-}
-
-private fun computeRecommendedIntervalSeconds(
-    timings: List<ScanSettings.SourceScanTiming>,
-    sensorGateSettings: SensorGateSettings
-): Long {
-    val enabledTypes = buildSet {
-        if (sensorGateSettings.wifiEnabled) {
-            add("wifi")
-            add("wifi_direct")
-        }
-        if (sensorGateSettings.bluetoothEnabled) {
-            add("ble")
-            add("bt_classic")
-        }
-        if (sensorGateSettings.cellularEnabled) add("cellular")
-        if (sensorGateSettings.remoteIdEnabled) add("remote_id")
-        if (sensorGateSettings.uwbEnabled) add("uwb")
-        if (sensorGateSettings.sdrEnabled) add("sdr")
-        if (sensorGateSettings.directAcousticEnabled) add("acoustic")
-        if (sensorGateSettings.directMagneticEnabled) add("magnetic")
-    }
-    val suggested = timings
-        .filter { it.sourceType in enabledTypes }
-        .map { suggestSafeIntervalSeconds(it.p95DurationMs) }
-        .maxOrNull()
-    return suggested ?: ScanSettings.DEFAULT_SCAN_INTERVAL_SECONDS
-}
-
-private fun nextLowerInterval(currentIntervalSeconds: Long): Long {
-    val options = ScanSettings.ALLOWED_INTERVALS_SECONDS
-    val idx = options.indexOf(currentIntervalSeconds)
-    if (idx <= 0) return options.first()
-    return options[idx - 1]
 }
 
 private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
