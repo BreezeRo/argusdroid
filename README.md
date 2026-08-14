@@ -65,6 +65,9 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 	- Optional diagnostics panel (default OFF)
 	- Compact LIVE badge in header when live updates are enabled
 - Device Location Map supports a Moving Only filter toggle.
+- Device Location Map supports an optional Since Snapshot filter:
+	- Capture Snapshot sets a timestamp baseline.
+	- Since Snapshot shows only pins seen at or after that baseline.
 - Tapping a moving device pin opens a dedicated single-device map with that device's historical path.
 - Device-location pin info windows use compact single-line summaries to reduce clipping on smaller displays.
 
@@ -136,8 +139,9 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 
 ### Scan interval tuning and telemetry
 
-- Global scan interval supports fast options including 1s and 3s.
+- Global worker cadence supports fast options including 1s and 3s (default 15s).
 - Per-source scan intervals are configurable independently (Wi-Fi, Wi-Fi Direct, BLE, Bluetooth Classic, Cellular, Remote ID, UWB, SDR, Acoustic, Magnetometer).
+- Per-source intervals are minimum per-source spacing within scan batches; effective per-source cadence cannot exceed the global worker cadence.
 - Per-source timing telemetry tracks last, avg, p50, p95, and max durations.
 - Auto-adjust mode can increase/decrease source intervals based on overrun/stability behavior.
 - Settings include a recent auto-adjust/manual interval change activity log.
@@ -222,9 +226,9 @@ If a sensor is disabled from Home, that scanner is skipped in both scheduled and
 
 - Under 15 minutes: chained one-time work requests.
 - 15 minutes and above: periodic WorkManager requests.
-- Scheduler alignment may set the global scheduler tick to the fastest enabled source interval when per-source intervals are used.
-
-This behavior is intentional to support short intervals while still supporting periodic scheduling for longer cadences.
+- Global worker cadence controls scan-batch wakeups.
+- Per-source intervals only gate individual sources within those batches.
+- The app does not force worker cadence changes just because a per-source interval is faster.
 
 ## Troubleshooting
 
