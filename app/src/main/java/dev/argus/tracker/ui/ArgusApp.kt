@@ -100,6 +100,8 @@ import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
 import dev.argus.tracker.sensing.TowerLookupResult
 import dev.argus.tracker.sensing.remoteid.RemoteIdPayloadParser
+import dev.argus.tracker.wear.WearDevicePoint
+import dev.argus.tracker.wear.WearStatusBridgePublisher
 import dev.argus.tracker.worker.ScanSettings
 import dev.argus.tracker.worker.WorkScheduler
 import kotlinx.coroutines.launch
@@ -566,6 +568,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
+    var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -573,6 +576,40 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
+
+    LaunchedEffect(chainMesh, alertLogs, allEncounters) {
+        val peersTotal = chainMesh.peers.size
+        val peersConnected = chainMesh.peers.count { it.state == ChainPeerState.CONNECTED }
+        val meshDashboardUrl = chainMesh.peers
+            .asSequence()
+            .filter { it.state == ChainPeerState.CONNECTED }
+            .mapNotNull { peer ->
+                peer.host
+                    .takeIf { host -> host.isNotBlank() }
+                    ?.let { host -> "http://$host:8091/" }
+            }
+            .firstOrNull()
+        val recentDevicePoints = buildWearDevicePoints(allEncounters)
+        val latestAlert = alertLogs.maxByOrNull { it.timestampEpochMs }
+        val alertMessage = latestAlert?.message?.takeIf { it.isNotBlank() } ?: "No recent alerts"
+        val alertEpochMs = latestAlert?.timestampEpochMs
+        val pointsSignature = recentDevicePoints.joinToString(separator = "|") {
+            "${it.label}:${it.lat}:${it.lon}:${it.timestampEpochMs}"
+        }
+        val signature = "$peersTotal|$peersConnected|$alertMessage|${alertEpochMs ?: 0L}|${meshDashboardUrl.orEmpty()}|$pointsSignature"
+        if (signature == lastWearStatusSignature) return@LaunchedEffect
+
+        lastWearStatusSignature = signature
+        WearStatusBridgePublisher.publishStatus(
+            context = context,
+            peersTotal = peersTotal,
+            peersConnected = peersConnected,
+            lastAlertMessage = alertMessage,
+            lastAlertEpochMs = alertEpochMs,
+            devicePoints = recentDevicePoints,
+            dashboardMapUrlOverride = meshDashboardUrl
+        )
+    }
 
     LaunchedEffect(allEncounters, ownedDeviceKeys) {
         val updatedKeys = autoMarkConnectedWifiAsOwned(
@@ -8200,6 +8237,83 @@ private fun remoteIdBroadcastLatLon(encounter: Encounter): Pair<Double, Double>?
 
     if (!isValidLatLon(lat, lon)) return null
     return lat!! to lon!!
+}
+
+private fun extractWearPointLatLon(encounter: Encounter): Pair<Double, Double>? {
+    if (isValidLatLon(encounter.lat, encounter.lon)) {
+        return encounter.lat!! to encounter.lon!!
+    }
+
+    if (encounter.source == EncounterSource.REMOTE_ID) {
+        remoteIdBroadcastLatLon(encounter)?.let { return it }
+    }
+
+    val payload = runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
+    val decoded = payload?.optJSONObject("remoteIdDecoded")
+
+    val candidateLat = listOfNotNull(
+        payload.optDoubleOrNull("lat"),
+        payload.optDoubleOrNull("latitude"),
+        payload.optDoubleOrNull("droneLat"),
+        payload.optDoubleOrNull("towerLat"),
+        decoded.optDoubleOrNull("lat"),
+        decoded.optDoubleOrNull("latitude"),
+        decoded.optDoubleOrNull("droneLat")
+    ).firstOrNull { it.isFinite() }
+
+    val candidateLon = listOfNotNull(
+        payload.optDoubleOrNull("lon"),
+        payload.optDoubleOrNull("lng"),
+        payload.optDoubleOrNull("longitude"),
+        payload.optDoubleOrNull("droneLon"),
+        payload.optDoubleOrNull("towerLon"),
+        decoded.optDoubleOrNull("lon"),
+        decoded.optDoubleOrNull("lng"),
+        decoded.optDoubleOrNull("longitude"),
+        decoded.optDoubleOrNull("droneLon")
+    ).firstOrNull { it.isFinite() }
+
+    return if (isValidLatLon(candidateLat, candidateLon)) {
+        candidateLat!! to candidateLon!!
+    } else {
+        null
+    }
+}
+
+private fun buildWearDevicePoints(encounters: List<Encounter>): List<WearDevicePoint> {
+    if (encounters.isEmpty()) return emptyList()
+
+    return encounters
+        .groupBy { "${it.source.name}|${it.primaryId}" }
+        .values
+        .mapNotNull { deviceEncounters ->
+            val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+            val resolvedLatLon = when (latest.source) {
+                EncounterSource.REMOTE_ID -> {
+                    latestRemoteIdBroadcastPoint(deviceEncounters)?.let { it.lat to it.lon }
+                        ?: extractWearPointLatLon(latest)
+                }
+
+                EncounterSource.WIFI,
+                EncounterSource.BLUETOOTH_LE -> {
+                    inferLikelyDeviceLocation(deviceEncounters)
+                        ?.let { it.lat to it.lon }
+                        ?: extractWearPointLatLon(latest)
+                }
+
+                else -> extractWearPointLatLon(latest)
+            } ?: return@mapNotNull null
+
+            val shortId = latest.primaryId.takeLast(6)
+            WearDevicePoint(
+                label = "${latest.source.name} $shortId",
+                lat = resolvedLatLon.first,
+                lon = resolvedLatLon.second,
+                timestampEpochMs = latest.timestampEpochMs
+            )
+        }
+        .sortedByDescending { it.timestampEpochMs }
+        .take(40)
 }
 
 private fun JSONObject?.optDoubleOrNull(key: String): Double? {
