@@ -907,19 +907,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 }
             }
 
-            val schedulerTick = minimumEnabledSourceIntervalSeconds()
-            if (schedulerTick != scanIntervalSeconds) {
-                applyScanInterval(schedulerTick, "Auto-adjust", "scheduler-align")
-            }
             delay(2000)
-        }
-    }
-
-    LaunchedEffect(trackingActive, autoAdjustScanIntervalEnabled, sensorGateSettings, sourceScanIntervals, scanIntervalSeconds) {
-        if (!trackingActive || autoAdjustScanIntervalEnabled) return@LaunchedEffect
-        val schedulerTick = minimumEnabledSourceIntervalSeconds()
-        if (schedulerTick != scanIntervalSeconds) {
-            applyScanInterval(schedulerTick, "Scheduler alignment", "scheduler-align")
         }
     }
 
@@ -1474,10 +1462,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                     suggested
                                 }
                                 sourceScanIntervals = alignedSourceIntervals
-                                val schedulerTick = minimumEnabledSourceIntervalSeconds()
-                                if (schedulerTick != scanIntervalSeconds) {
-                                    applyScanInterval(schedulerTick, "Auto-adjust", "auto-bootstrap")
-                                }
                             }
                         }
                     },
@@ -1497,12 +1481,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             reason = "manual-$sourceType"
                         )
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
-                        scope.launch {
-                            val schedulerTick = minimumEnabledSourceIntervalSeconds()
-                            if (schedulerTick != scanIntervalSeconds) {
-                                applyScanInterval(schedulerTick, "Scheduler alignment", "scheduler-align")
-                            }
-                        }
                     },
                     onApproachDetectionChanged = { enabled ->
                         approachDetectionEnabled = enabled
@@ -3784,7 +3762,10 @@ private fun DetectionPage(
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
+    var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
+    var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
+    val isDeviceLocationTabActive = selectedTab == 3
     val foreignSignalRisk = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
         if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
@@ -3819,39 +3800,43 @@ private fun DetectionPage(
             .toList()
     }
 
-    val allDeviceCandidates = remember(meshInsightEncounters, approachDetectionEnabled, ownedDeviceKeys) {
-        meshInsightEncounters
-            .asSequence()
-            .groupBy { "${it.source.name}|${it.primaryId}" }
-            .mapNotNull { (_, deviceEncounters) ->
-                val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
-                val owned = OwnedDeviceRegistry.keyFor(latest.source.name, latest.primaryId) in ownedDeviceKeys
-                val approachSignal = if (approachDetectionEnabled) {
-                    analyzeApproachSignal(deviceEncounters)
-                } else {
-                    null
-                }
-                val motionSignal = analyzeMotionSignal(deviceEncounters)
-                DeviceLocationCandidate(
-                    source = latest.source.name,
-                    primaryId = latest.primaryId,
-                    secondaryId = latest.secondaryId,
-                    latestTimestampEpochMs = latest.timestampEpochMs,
-                    seenCount = deviceEncounters.size,
-                    encounters = deviceEncounters,
-                    hasChainLinkedData = deviceEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
-                    chainLinkedPeerCount = deviceEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
-                    isOwned = owned,
-                    approachSignal = approachSignal,
-                    motionSignal = motionSignal,
-                    trackerRisk = analyzeTrackerRisk(
+    val allDeviceCandidates = remember(isDeviceLocationTabActive, meshInsightEncounters, approachDetectionEnabled, ownedDeviceKeys) {
+        if (!isDeviceLocationTabActive) {
+            emptyList()
+        } else {
+            meshInsightEncounters
+                .asSequence()
+                .groupBy { "${it.source.name}|${it.primaryId}" }
+                .mapNotNull { (_, deviceEncounters) ->
+                    val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+                    val owned = OwnedDeviceRegistry.keyFor(latest.source.name, latest.primaryId) in ownedDeviceKeys
+                    val approachSignal = if (approachDetectionEnabled) {
+                        analyzeApproachSignal(deviceEncounters)
+                    } else {
+                        null
+                    }
+                    val motionSignal = analyzeMotionSignal(deviceEncounters)
+                    DeviceLocationCandidate(
+                        source = latest.source.name,
+                        primaryId = latest.primaryId,
+                        secondaryId = latest.secondaryId,
+                        latestTimestampEpochMs = latest.timestampEpochMs,
+                        seenCount = deviceEncounters.size,
                         encounters = deviceEncounters,
+                        hasChainLinkedData = deviceEncounters.any { it.provenance == EncounterProvenance.CHAIN_LINKED },
+                        chainLinkedPeerCount = deviceEncounters.mapNotNull { it.provenanceNodeId }.toSet().size,
                         isOwned = owned,
-                        approachSignal = approachSignal
+                        approachSignal = approachSignal,
+                        motionSignal = motionSignal,
+                        trackerRisk = analyzeTrackerRisk(
+                            encounters = deviceEncounters,
+                            isOwned = owned,
+                            approachSignal = approachSignal
+                        )
                     )
-                )
-            }
-            .sortedByDescending { it.latestTimestampEpochMs }
+                }
+                .sortedByDescending { it.latestTimestampEpochMs }
+        }
     }
 
     val deviceLocationLookupKey = remember(allDeviceCandidates) {
@@ -3861,8 +3846,8 @@ private fun DetectionPage(
     }
     var estimatedDeviceLocationPins by remember { mutableStateOf(emptyList<MapPin>()) }
 
-    LaunchedEffect(deviceLocationLookupKey) {
-        if (allDeviceCandidates.isEmpty()) {
+    LaunchedEffect(deviceLocationLookupKey, isDeviceLocationTabActive) {
+        if (!isDeviceLocationTabActive || allDeviceCandidates.isEmpty()) {
             estimatedDeviceLocationPins = emptyList()
             return@LaunchedEffect
         }
@@ -4098,11 +4083,20 @@ private fun DetectionPage(
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
         } else if (selectedTab == 3) {
-            val deviceMapPins = if (movingOnlyOnDeviceMap) {
-                estimatedDeviceLocationPins.filter { it.motionBadge == "MOVING" }
-            } else {
-                estimatedDeviceLocationPins
-            }
+            val deviceMapPins = estimatedDeviceLocationPins
+                .asSequence()
+                .filter { pin ->
+                    if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
+                }
+                .filter { pin ->
+                    if (!sinceSnapshotOnlyOnDeviceMap) {
+                        true
+                    } else {
+                        val snapshotEpoch = deviceMapSnapshotEpochMs
+                        snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                    }
+                }
+                .toList()
             DetectionMapPage(
                 mapTitle = "Device Location Map",
                 mapDescription = "Pins show estimated cell tower locations and inferred Wi-Fi/BLE device locations.",
@@ -4127,6 +4121,18 @@ private fun DetectionPage(
                 showMovingOnlyControl = true,
                 movingOnlyEnabled = movingOnlyOnDeviceMap,
                 onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
+                showSinceSnapshotControl = true,
+                sinceSnapshotEnabled = sinceSnapshotOnlyOnDeviceMap,
+                snapshotEpochMs = deviceMapSnapshotEpochMs,
+                onSinceSnapshotEnabledChange = { enabled ->
+                    sinceSnapshotOnlyOnDeviceMap = enabled
+                    if (enabled && deviceMapSnapshotEpochMs == null) {
+                        deviceMapSnapshotEpochMs = System.currentTimeMillis()
+                    }
+                },
+                onCaptureSnapshot = {
+                    deviceMapSnapshotEpochMs = System.currentTimeMillis()
+                },
                 onLiveCollect = onLiveCollect,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
@@ -5053,6 +5059,11 @@ private fun DetectionMapPage(
     showMovingOnlyControl: Boolean = false,
     movingOnlyEnabled: Boolean = false,
     onMovingOnlyEnabledChange: (Boolean) -> Unit = {},
+    showSinceSnapshotControl: Boolean = false,
+    sinceSnapshotEnabled: Boolean = false,
+    snapshotEpochMs: Long? = null,
+    onSinceSnapshotEnabledChange: (Boolean) -> Unit = {},
+    onCaptureSnapshot: () -> Unit = {},
     onLiveCollect: suspend () -> String,
     liveMapUpdateIntervalSeconds: Long
 ) {
@@ -5298,6 +5309,31 @@ private fun DetectionMapPage(
                                         checked = movingOnlyEnabled,
                                         onCheckedChange = onMovingOnlyEnabledChange
                                     )
+                                }
+                            }
+                            if (showSinceSnapshotControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Since Snapshot")
+                                    Switch(
+                                        checked = sinceSnapshotEnabled,
+                                        onCheckedChange = onSinceSnapshotEnabledChange
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = snapshotEpochMs?.let { "Snapshot: ${formatEpoch(it)}" } ?: "Snapshot: not captured"
+                                    )
+                                    Button(onClick = onCaptureSnapshot) {
+                                        Text("Capture")
+                                    }
                                 }
                             }
                         }
