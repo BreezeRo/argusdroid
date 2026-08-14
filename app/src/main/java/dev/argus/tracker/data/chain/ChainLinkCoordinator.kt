@@ -647,6 +647,7 @@ class LocalMeshChainLinkCoordinator(
         val current = updated?.state ?: return
         if (previous == current) return
         if (current != ChainPeerState.CONNECTED && previous != ChainPeerState.CONNECTED) return
+        if (!ScanSettings.isMeshConnectivityNotificationsEnabled(context)) return
         if (!hasPostNotificationsPermission(context)) return
 
         ensureConnectivityNotificationChannel(context)
@@ -702,6 +703,7 @@ class LocalMeshChainLinkCoordinator(
     }
 
     private fun maybeNotifyMeshWipeNotice(notice: MeshWipeNotice) {
+        if (!ScanSettings.isMeshWipeNotificationsEnabled(context)) return
         if (!hasPostNotificationsPermission(context)) return
         ensureMeshWipeNotificationChannel(context)
 

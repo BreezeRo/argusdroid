@@ -21,6 +21,9 @@ object ScanSettings {
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
+    private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
+    private const val KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED = "mesh_connectivity_notifications_enabled"
+    private const val KEY_MESH_WIPE_NOTIFICATIONS_ENABLED = "mesh_wipe_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD = "foreign_signal_alert_threshold"
     private const val KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED = "foreign_direct_acoustic_enabled"
     private const val KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED = "foreign_direct_magnetic_enabled"
@@ -50,6 +53,7 @@ object ScanSettings {
     private const val KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME = "mesh_wipe_gate_initiator_device_name"
     private const val KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS = "mesh_wipe_gate_updated_epoch_ms"
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
+    private const val KEY_APP_THEME_MODE = "app_theme_mode"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
     private const val KEY_SCAN_INTERVAL_CHANGE_EVENTS = "scan_interval_change_events"
@@ -76,6 +80,7 @@ object ScanSettings {
     const val DEFAULT_EVASION_BURST_WATCH_SECONDS = 45L
     const val DEFAULT_EVASION_BURST_COOLDOWN_SECONDS = 300L
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
+    const val DEFAULT_APP_THEME_MODE = "SYSTEM"
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     val ALLOWED_INTERVALS_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 5L * 60L, 15L * 60L, 30L * 60L, 60L * 60L)
@@ -88,6 +93,7 @@ object ScanSettings {
     val ALLOWED_EVASION_BURST_WATCH_SECONDS = listOf(15L, 30L, 45L, 60L, 90L, 120L)
     val ALLOWED_EVASION_BURST_COOLDOWN_SECONDS = listOf(60L, 120L, 180L, 300L, 600L, 900L)
     val ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS = listOf("HIGH", "CRITICAL")
+    val ALLOWED_APP_THEME_MODES = listOf("SYSTEM", "LIGHT", "DARK")
     val SOURCE_TYPES = listOf(
         "wifi",
         "wifi_direct",
@@ -263,6 +269,39 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMagneticIncreaseNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED, true)
+
+    fun setMagneticIncreaseNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMeshConnectivityNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, true)
+
+    fun setMeshConnectivityNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMeshWipeNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MESH_WIPE_NOTIFICATIONS_ENABLED, true)
+
+    fun setMeshWipeNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MESH_WIPE_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
@@ -703,6 +742,24 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, safeValue)
+            .apply()
+    }
+
+    fun getAppThemeMode(context: Context): String {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_APP_THEME_MODE, DEFAULT_APP_THEME_MODE)
+            .orEmpty()
+            .trim()
+            .uppercase()
+        return raw.takeIf { it in ALLOWED_APP_THEME_MODES } ?: DEFAULT_APP_THEME_MODE
+    }
+
+    fun setAppThemeMode(context: Context, mode: String) {
+        val safe = mode.trim().uppercase().takeIf { it in ALLOWED_APP_THEME_MODES }
+            ?: DEFAULT_APP_THEME_MODE
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_APP_THEME_MODE, safe)
             .apply()
     }
 
