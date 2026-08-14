@@ -65,6 +65,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
@@ -157,6 +158,7 @@ private const val HOME_ROUTE = "home"
 private const val SETTINGS_ROUTE = "settings"
 private const val DETECTION_ROUTE = "detection"
 private const val LOGS_ROUTE = "logs"
+private const val LOGS_ENCOUNTERS_ROUTE = "logsEncounters"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
 private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primaryId}"
@@ -166,7 +168,7 @@ private val DETAIL_TWO_COLUMN_MIN_WIDTH: Dp = 720.dp
 private val HOME_TWO_COLUMN_MIN_WIDTH: Dp = 560.dp
 private val HOME_THREE_COLUMN_MIN_WIDTH: Dp = 920.dp
 
-private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, LOGS_ROUTE, DEVICES_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
+private val topLevelRoutes = setOf(HOME_ROUTE, DETECTION_ROUTE, LOGS_ROUTE, LOGS_ENCOUNTERS_ROUTE, SETTINGS_ROUTE)
 private val timeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
@@ -181,6 +183,10 @@ private const val MAGNETIC_INCREASE_MIN_CURRENT_UT = 55.0
 private const val MAGNETIC_DISTURBANCE_UPPER_BOUND_UT = 65.0
 private const val ALERT_LOG_MAX_ENTRIES = 400
 private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
+private const val MAP_CAMERA_BOUNDS_SAMPLE_LIMIT = 220
+private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
+private const val MAP_RENDER_PIN_LIMIT_FAR = 260
+private const val MAP_RENDER_PIN_LIMIT_MID = 420
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
 private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
@@ -1060,16 +1066,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             label = { Text("Detection") }
                         )
                         NavigationBarItem(
-                            selected = currentRoute == LOGS_ROUTE,
+                            selected =
+                                currentRoute == LOGS_ROUTE ||
+                                    currentRoute == LOGS_ENCOUNTERS_ROUTE ||
+                                    currentRoute == DEVICES_ENCOUNTERS_ROUTE,
                             onClick = { navController.navigate(LOGS_ROUTE) },
                             icon = { Text("L") },
                             label = { Text("Logs") }
-                        )
-                        NavigationBarItem(
-                            selected = currentRoute == DEVICES_ENCOUNTERS_ROUTE,
-                            onClick = { navController.navigate(DEVICES_ENCOUNTERS_ROUTE) },
-                            icon = { Text("D") },
-                            label = { Text("Devices & Encounters") }
                         )
                         NavigationBarItem(
                             selected = currentRoute == SETTINGS_ROUTE,
@@ -1167,6 +1170,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         scope.launch {
                             app.container.repository.clearDevices()
                             viewModel.refreshSummary()
+                        }
+                    },
+                    onOpenDevicesEncounters = {
+                        navController.navigate(LOGS_ENCOUNTERS_ROUTE) {
+                            launchSingleTop = true
                         }
                     },
                     startMessage = trackingStartMessage,
@@ -1464,11 +1472,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     chainMeshSnapshot = chainMesh,
-                    onEncounterMapPinClick = { source, primaryId, timestampEpochMs ->
-                        navController.navigate(
-                            "encounterDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}/${timestampEpochMs}"
-                        )
-                    },
                     onDeviceMapPinClick = { source, primaryId, lat, lon, timestampEpochMs ->
                         val queryParts = buildList {
                             lat?.let { add("lat=${Uri.encode(it.toString())}") }
@@ -1478,6 +1481,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}" 
                         navController.navigate(
                             "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}$query"
+                        )
+                    },
+                    onDeviceClick = { device ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
                         )
                     },
                     onMovingDeviceMapPinClick = { source, primaryId ->
@@ -1617,8 +1625,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             }
 
             composable(LOGS_ROUTE) {
-                DetectionLogsPage(
+                LogsHubPage(
                     logs = alertLogs,
+                    recentEncounters = recent100,
+                    allEncounters = allEncounters,
+                    ownedDeviceKeys = ownedDeviceKeys,
+                    initialTab = 0,
                     onClearLogs = {
                         AlertLogStore.clear(context)
                         alertLogs = emptyList()
@@ -1629,20 +1641,58 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ) {
                             launchSingleTop = true
                         }
+                    },
+                    onEncounterClick = { encounter ->
+                        navController.navigate(
+                            "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
+                        )
+                    }
+                )
+            }
+
+            composable(LOGS_ENCOUNTERS_ROUTE) {
+                LogsHubPage(
+                    logs = alertLogs,
+                    recentEncounters = recent100,
+                    allEncounters = allEncounters,
+                    ownedDeviceKeys = ownedDeviceKeys,
+                    initialTab = 1,
+                    onClearLogs = {
+                        AlertLogStore.clear(context)
+                        alertLogs = emptyList()
+                    },
+                    onOpenApproachMap = { source, primaryId ->
+                        navController.navigate(
+                            "approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onEncounterClick = { encounter ->
+                        navController.navigate(
+                            "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
+                        )
                     }
                 )
             }
 
             composable(DEVICES_ENCOUNTERS_ROUTE) {
-                DevicesEncountersPage(
+                LogsHubPage(
+                    logs = alertLogs,
                     recentEncounters = recent100,
                     allEncounters = allEncounters,
-                    approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
-                    onDeviceClick = { device ->
+                    initialTab = 1,
+                    onClearLogs = {
+                        AlertLogStore.clear(context)
+                        alertLogs = emptyList()
+                    },
+                    onOpenApproachMap = { source, primaryId ->
                         navController.navigate(
-                            "deviceDetail/${Uri.encode(device.source)}/${Uri.encode(device.primaryId)}"
-                        )
+                            "approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        ) {
+                            launchSingleTop = true
+                        }
                     },
                     onEncounterClick = { encounter ->
                         navController.navigate(
@@ -2004,6 +2054,7 @@ private fun HomePage(
     onSensorGateChanged: (String, Boolean) -> Unit,
     onClearEncounters: () -> Unit,
     onClearDevices: () -> Unit,
+    onOpenDevicesEncounters: () -> Unit,
     startMessage: String?,
     startMessageIsError: Boolean
 ) {
@@ -2047,6 +2098,18 @@ private fun HomePage(
             }
         }
     }
+    val sourceHealthSummary = when {
+        currentSourceOverruns.isNotEmpty() -> "Warning: one or more active source scans are exceeding their configured interval."
+        staleSourceOverruns.isNotEmpty() -> "Caution: prior scans exceeded interval, but no current active overrun is detected."
+        hasFreshSourceScans -> "Healthy: no current scan overrun warnings."
+        else -> "Status pending: no recent source scans yet."
+    }
+    val sourceHealthColor = when {
+        currentSourceOverruns.isNotEmpty() -> Color(0xFFB3261E)
+        staleSourceOverruns.isNotEmpty() -> Color(0xFFE65100)
+        hasFreshSourceScans -> Color(0xFF2E7D32)
+        else -> Color(0xFFE65100)
+    }
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(bottom = 16.dp)
@@ -2055,17 +2118,74 @@ private fun HomePage(
             Text("Argus Home", style = MaterialTheme.typography.headlineMedium)
         }
         item {
-            Text("Tracking controls and source health overview.")
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped",
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text("Last scan: ${lastScanEpochMs?.let(::formatEpoch) ?: "Never"}")
+                    Text("Worker cadence: every ${ScanSettings.formatInterval(scanIntervalSeconds)}")
+                    Text(
+                        text = sourceHealthSummary,
+                        color = sourceHealthColor,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (startMessage != null) {
+                        val statusColor = if (startMessageIsError) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                        Text(
+                            text = startMessage,
+                            color = statusColor,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
         }
         item {
-            Text(
-                text = buildString {
-                    append(if (trackingActive) "Tracking Status: Running" else "Tracking Status: Stopped")
-                    append(" | Last scan: ")
-                    append(lastScanEpochMs?.let(::formatEpoch) ?: "Never")
-                },
-                fontWeight = FontWeight.Medium
-            )
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (!trackingActive) {
+                            Button(onClick = onStart, modifier = Modifier.weight(1f)) {
+                                Text("Start Tracking")
+                            }
+                        }
+                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.weight(1f)) {
+                            Text("Stop")
+                        }
+                        Button(onClick = onRefresh, modifier = Modifier.weight(1f)) {
+                            Text("Refresh")
+                        }
+                        Button(onClick = onOpenDevicesEncounters, modifier = Modifier.weight(1f)) {
+                            Text("Devices & Encounters")
+                        }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!trackingActive) {
+                            Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
+                                Text("Start Tracking")
+                            }
+                        }
+                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.fillMaxWidth()) {
+                            Text("Stop")
+                        }
+                        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+                            Text("Refresh")
+                        }
+                        Button(onClick = onOpenDevicesEncounters, modifier = Modifier.fillMaxWidth()) {
+                            Text("Devices & Encounters")
+                        }
+                    }
+                }
+            }
         }
         if (currentSourceOverruns.isNotEmpty()) {
             item {
@@ -2088,7 +2208,8 @@ private fun HomePage(
                     }
                 }
             }
-        } else if (staleSourceOverruns.isNotEmpty()) {
+        }
+        if (staleSourceOverruns.isNotEmpty() && currentSourceOverruns.isEmpty()) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -2109,73 +2230,66 @@ private fun HomePage(
                     }
                 }
             }
-        } else if (hasFreshSourceScans) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "No current scan overrun warnings.",
-                        color = Color(0xFF2E7D32),
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
-        } else {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Overrun status is stale: no recent source scans yet.",
-                        color = Color(0xFFE65100),
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
         }
-        if (startMessage != null) {
-            item {
-                val statusColor = if (startMessageIsError) Color(0xFFB3261E) else Color(0xFF2E7D32)
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = startMessage,
-                        color = statusColor,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
+
+        item {
+            Text("Last 24h Summary", fontWeight = FontWeight.Bold)
         }
         item {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (!trackingActive) {
-                            Button(onClick = onStart, modifier = Modifier.weight(1f)) {
-                                Text("Start Tracking")
+            if (summary.isEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "No source activity recorded in the last 24 hours.",
+                        modifier = Modifier.padding(12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val columnSpacing = 8.dp
+                    val targetCardMinWidth = 170.dp
+                    val computedColumns = ((maxWidth + columnSpacing) / (targetCardMinWidth + columnSpacing))
+                        .toInt()
+                        .coerceIn(1, 3)
+
+                    Column(verticalArrangement = Arrangement.spacedBy(columnSpacing)) {
+                        summary.chunked(computedColumns).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(columnSpacing)
+                            ) {
+                                rowItems.forEach { sourceSummary ->
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        Card(modifier = Modifier.fillMaxWidth()) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = sourceSummary.source,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Text(
+                                                    text = sourceSummary.count.toString(),
+                                                    style = MaterialTheme.typography.headlineSmall,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = if (sourceSummary.count == 1) "event" else "events",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                repeat(computedColumns - rowItems.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
                             }
-                        }
-                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.weight(1f)) {
-                            Text("Stop")
-                        }
-                        Button(onClick = onRefresh, modifier = Modifier.weight(1f)) {
-                            Text("Refresh")
-                        }
-                    }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (!trackingActive) {
-                            Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                                Text("Start Tracking")
-                            }
-                        }
-                        Button(onClick = onStop, enabled = trackingActive, modifier = Modifier.fillMaxWidth()) {
-                            Text("Stop")
-                        }
-                        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
-                            Text("Refresh")
                         }
                     }
                 }
@@ -2291,52 +2405,6 @@ private fun HomePage(
                                     onCheckedChange = { onSensorGateChanged(toggle.key, it) }
                                 )
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("Last 24h Summary", fontWeight = FontWeight.Bold)
-        }
-        item {
-            if (summary.isEmpty()) {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "No source activity recorded in the last 24 hours.",
-                        modifier = Modifier.padding(12.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                HomeResponsiveGrid(
-                    items = summary,
-                    twoColumnMinWidth = HOME_TWO_COLUMN_MIN_WIDTH,
-                    threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
-                ) { sourceSummary ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = sourceSummary.source,
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = sourceSummary.count.toString(),
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = if (sourceSummary.count == 1) "event" else "events",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
                         }
                     }
                 }
@@ -3121,8 +3189,8 @@ private fun DetectionPage(
     chainSharePreciseLocationEnabled: Boolean,
     liveMapUpdateIntervalSeconds: Long,
     chainMeshSnapshot: ChainMeshSnapshot,
-    onEncounterMapPinClick: (source: String, primaryId: String, timestampEpochMs: Long) -> Unit,
     onDeviceMapPinClick: (source: String, primaryId: String, lat: Double?, lon: Double?, timestampEpochMs: Long?) -> Unit,
+    onDeviceClick: (DeviceItem) -> Unit,
     onMovingDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
@@ -3142,7 +3210,6 @@ private fun DetectionPage(
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(0) }
-    var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(true) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
@@ -3150,43 +3217,16 @@ private fun DetectionPage(
     var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     val deviceMapLiveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
     val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
-    val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Mesh Network")
+    val tabs = listOf("Status", "Devices", "Signal", "Map", "Mesh")
     val isDeviceLocationTabActive = selectedTab == 3
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
     val signalIntel = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
-        if (selectedTab == 1) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
+        if (selectedTab == 2) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
     }
     val topSpeedRecords = remember(meshInsightEncounters) {
         DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
-    }
-
-    val encounterPins = remember(encounters) {
-        encounters
-            .asSequence()
-            .mapNotNull { encounter ->
-                val lat = encounter.lat
-                val lon = encounter.lon
-                if (!isValidLatLon(lat, lon)) {
-                    null
-                } else {
-                    val provenanceBadge = provenanceBadge(encounter.provenance, encounter.provenanceNodeId)
-                    MapPin(
-                        position = LatLng(lat!!, lon!!),
-                        title = "${encounter.source} • ${encounter.primaryId}$provenanceBadge",
-                        snippet = "${formatEpoch(encounter.timestampEpochMs)}$provenanceBadge",
-                        timestampEpochMs = encounter.timestampEpochMs,
-                        source = encounter.source.name,
-                        primaryId = encounter.primaryId,
-                        encounterTimestampEpochMs = encounter.timestampEpochMs,
-                        motionBadge = null,
-                        motionSpeedMps = null
-                    )
-                }
-            }
-            .sortedByDescending { it.timestampEpochMs }
-            .toList()
     }
 
     val maxDeviceCandidatesToResolve = remember(cellDevicePinLimit) {
@@ -3372,7 +3412,20 @@ private fun DetectionPage(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Detection", style = MaterialTheme.typography.headlineMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Detection", style = MaterialTheme.typography.headlineMedium)
+            if (selectedTab == 3) {
+                Text(
+                    text = "● LIVE",
+                    color = Color(0xFF2E7D32),
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
         TabRow(selectedTabIndex = selectedTab) {
             tabs.forEachIndexed { index, title ->
                 Tab(
@@ -3487,6 +3540,14 @@ private fun DetectionPage(
                 }
             }
         } else if (selectedTab == 1) {
+            DevicesPage(
+                recentEncounters = encounters,
+                allEncounters = meshInsightEncounters,
+                approachDetectionEnabled = approachDetectionEnabled,
+                ownedDeviceKeys = ownedDeviceKeys,
+                onDeviceClick = onDeviceClick
+            )
+        } else if (selectedTab == 2) {
             signalIntel?.let {
                 DetectionSignalIntelPage(
                     intel = it,
@@ -3494,21 +3555,6 @@ private fun DetectionPage(
                     onRefresh = onRefresh
                 )
             }
-        } else if (selectedTab == 2) {
-            DetectionMapPage(
-                mapTitle = "Device Encounters Map",
-                mapDescription = "Pins show individual encounter points.",
-                pins = encounterPins,
-                pinLimit = encounterPinLimit,
-                onPinLimitChange = { encounterPinLimit = it },
-                onPinDetailsClick = { pin ->
-                    val timestamp = pin.encounterTimestampEpochMs ?: return@DetectionMapPage
-                    onEncounterMapPinClick(pin.source, pin.primaryId, timestamp)
-                },
-                liveUpdatesAllowed = false,
-                onLiveCollect = onLiveCollect,
-                liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-            )
         } else if (selectedTab == 3) {
             val deviceMapPins = estimatedDeviceLocationPins
                 .asSequence()
@@ -3528,7 +3574,7 @@ private fun DetectionPage(
                 }
                 .toList()
             DetectionMapPage(
-                mapTitle = "Device Location Map",
+                mapTitle = "Map",
                 mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
                 pins = deviceMapPins,
                 pinLimit = cellDevicePinLimit,
@@ -3821,23 +3867,85 @@ private fun DetectionSignalIntelPage(
 }
 
 @Composable
+private fun LogsHubPage(
+    logs: List<AlertLogEntry>,
+    recentEncounters: List<Encounter>,
+    allEncounters: List<Encounter>,
+    ownedDeviceKeys: Set<String>,
+    initialTab: Int,
+    onClearLogs: () -> Unit,
+    onOpenApproachMap: (source: String, primaryId: String) -> Unit,
+    onEncounterClick: (Encounter) -> Unit
+) {
+    var selectedTab by rememberSaveable { mutableStateOf(initialTab.coerceIn(0, 1)) }
+    val tabs = listOf("Alerts", "Encounters")
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        TabRow(selectedTabIndex = selectedTab) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(title) }
+                )
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (selectedTab == 0) {
+                DetectionLogsPage(
+                    logs = logs,
+                    onClearLogs = onClearLogs,
+                    onOpenApproachMap = onOpenApproachMap
+                )
+            } else {
+                EncountersPage(
+                    recentEncounters = recentEncounters,
+                    allEncounters = allEncounters,
+                    ownedDeviceKeys = ownedDeviceKeys,
+                    onEncounterClick = onEncounterClick
+                )
+            }
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DetectionLogsPage(
     logs: List<AlertLogEntry>,
     onClearLogs: () -> Unit,
     onOpenApproachMap: (source: String, primaryId: String) -> Unit
 ) {
-    var showApproachLogs by rememberSaveable { mutableStateOf(true) }
-    var showTrackerLogs by rememberSaveable { mutableStateOf(true) }
-    var showForeignSignalLogs by rememberSaveable { mutableStateOf(true) }
+    var selectedLogTab by rememberSaveable { mutableStateOf(0) }
 
-    val filteredLogs = remember(logs, showApproachLogs, showTrackerLogs, showForeignSignalLogs) {
-        logs.filter { entry ->
-            (showApproachLogs && entry.type == AlertLogType.APPROACH) ||
-                (showTrackerLogs && entry.type == AlertLogType.TRACKER) ||
-                (showForeignSignalLogs && entry.type == AlertLogType.FOREIGN_SIGNAL)
-        }.sortedByDescending { it.timestampEpochMs }
+    val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
+    val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
+    val foreignCount = remember(logs) { logs.count { it.type == AlertLogType.FOREIGN_SIGNAL } }
+    val tabLabels = listOf(
+        "All (${logs.size})",
+        "Approach ($approachCount)",
+        "Tracker ($trackerCount)",
+        "Foreign ($foreignCount)"
+    )
+
+    val filteredLogs = remember(logs, selectedLogTab) {
+        logs.asSequence()
+            .filter { entry ->
+                when (selectedLogTab) {
+                    1 -> entry.type == AlertLogType.APPROACH
+                    2 -> entry.type == AlertLogType.TRACKER
+                    3 -> entry.type == AlertLogType.FOREIGN_SIGNAL
+                    else -> true
+                }
+            }
+            .sortedByDescending { it.timestampEpochMs }
+            .toList()
     }
+    val latestLogEpoch = remember(filteredLogs) { filteredLogs.firstOrNull()?.timestampEpochMs }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -3855,46 +3963,44 @@ private fun DetectionLogsPage(
             }
         }
         item {
-            Text("Review historical approach and tracker-risk events.")
+            Text("Review historical alerts by category.")
         }
         item {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Approach")
-                    Switch(
-                        checked = showApproachLogs,
-                        onCheckedChange = { showApproachLogs = it }
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Tracker")
-                    Switch(
-                        checked = showTrackerLogs,
-                        onCheckedChange = { showTrackerLogs = it }
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Foreign Signal")
-                    Switch(
-                        checked = showForeignSignalLogs,
-                        onCheckedChange = { showForeignSignalLogs = it }
+            TabRow(selectedTabIndex = selectedLogTab) {
+                tabLabels.forEachIndexed { index, label ->
+                    Tab(
+                        selected = selectedLogTab == index,
+                        onClick = { selectedLogTab = index },
+                        text = { Text(label) }
                     )
                 }
             }
         }
         item {
-            Text("Showing ${filteredLogs.size} of ${logs.size} logs")
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AssistChip(onClick = { }, label = { Text("Total ${logs.size}") })
+                AssistChip(onClick = { }, label = { Text("Approach $approachCount") })
+                AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
+                AssistChip(onClick = { }, label = { Text("Foreign $foreignCount") })
+            }
+        }
+        item {
+            val latest = latestLogEpoch?.let(::formatEpoch) ?: "n/a"
+            Text(
+                "Showing ${filteredLogs.size} log${if (filteredLogs.size == 1) "" else "s"} • Latest: $latest",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         if (filteredLogs.isEmpty()) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "No alert logs for current filters.",
+                        text = "No logs in this tab.",
                         modifier = Modifier.padding(12.dp)
                     )
                 }
@@ -3912,6 +4018,11 @@ private fun DetectionLogsPage(
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
                 AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
+            }
+            val typeLabel = when (entry.type) {
+                AlertLogType.APPROACH -> "Approach"
+                AlertLogType.TRACKER -> "Tracker"
+                AlertLogType.FOREIGN_SIGNAL -> "Foreign Signal"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
             val confidenceLabel = entry.confidence
@@ -3936,15 +4047,19 @@ private fun DetectionLogsPage(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "${entry.type.name} • ${listSourceLabel(entry.source, null)} • ${entry.primaryId}",
+                        text = "$typeLabel • ${listSourceLabel(entry.source, null)}",
                         color = typeColor,
                         fontWeight = FontWeight.Bold
                     )
+                    Text(
+                        text = "ID: ${entry.primaryId} • ${formatEpoch(entry.timestampEpochMs)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(entry.message + confidenceLabel)
-                    Text(formatEpoch(entry.timestampEpochMs))
                     if (isApproachEntry) {
                         Text(
-                            text = "Tap to open Approach Alert Map",
+                            text = "Tap to open approach map",
                             color = Color(0xFF1565C0),
                             fontWeight = FontWeight.Medium
                         )
@@ -4010,6 +4125,8 @@ private fun DetectionMeshNetworkPage(
 
     val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
     val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
+    val meshReady = chainLinkEnabled && chainSharedSecret.isNotBlank()
+    val wipeGateActive = meshWipeGateState.enabled
     val meshCoverageInsights = remember(encounters, chainMeshSnapshot, chainNodeId) {
         buildMeshCoverageInsights(
             encounters = encounters,
@@ -4043,6 +4160,26 @@ private fun DetectionMeshNetworkPage(
             }
         }
         item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("Quick Status", fontWeight = FontWeight.Bold)
+                    Text("Chain Link: ${if (chainLinkEnabled) "On" else "Off"} • Auth: ${if (chainSharedSecret.isNotBlank()) "Set" else "Missing"}")
+                    Text("Peers: $connectedCount connected • $unconnectedCount unconnected")
+                    Text("Auto Sync: ${if (chainAutoSyncEnabled) "On" else "Off"} • Persistent Channel: ${if (chainPersistentChannelEnabled) "On" else "Off"}")
+                    Text("Wipe Gate: ${if (wipeGateActive) "Active" else "Inactive"}")
+                    if (!meshReady) {
+                        Text(
+                            "To sync with peers: enable Chain Link and set a shared passphrase.",
+                            color = Color(0xFFE65100)
+                        )
+                    }
+                }
+            }
+        }
+        item {
             ChainMeshVisualizer(
                 snapshot = chainMeshSnapshot,
                 sharePreciseLocationEnabled = chainSharePreciseLocationEnabled
@@ -4054,7 +4191,7 @@ private fun DetectionMeshNetworkPage(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("Mesh Wipe Coordination", fontWeight = FontWeight.Bold)
+                    Text("Wipe Coordination", fontWeight = FontWeight.Bold)
                     if (meshWipeGateState.enabled) {
                         val initiator = meshWipeGateState.initiatorDeviceName
                             ?: meshWipeGateState.initiatorNodeId
@@ -4087,9 +4224,9 @@ private fun DetectionMeshNetworkPage(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("Blind-Spot Fill Insights", fontWeight = FontWeight.Bold)
-                    Text("Last 2h across mesh-visible devices. Credits observations to origin node (not relay sender) to reduce sync-forwarding bias.")
+                    Text("Last 2h across mesh-visible devices. Observations are credited to the origin node.")
                     if (meshCoverageInsights.isEmpty()) {
-                        Text("No enough mesh-attributed observations yet. Run sync and collect more detections.")
+                        Text("Not enough mesh-attributed observations yet. Run sync and collect more detections.")
                     } else {
                         val topSpotter = meshCoverageInsights.maxByOrNull { it.seenDevices }
                         val leastSpotter = meshCoverageInsights.minByOrNull { it.seenDevices }
@@ -4125,11 +4262,12 @@ private fun DetectionMeshNetworkPage(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Text("Setup", fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Enable chain linking")
+                        Text("Chain Link")
                         Switch(
                             checked = chainLinkEnabled,
                             onCheckedChange = onChainLinkChanged
@@ -4148,12 +4286,12 @@ private fun DetectionMeshNetworkPage(
                     OutlinedTextField(
                         value = chainSharedSecret,
                         onValueChange = onChainSharedSecretChanged,
-                        label = { Text("Chain Shared Passphrase") },
+                        label = { Text("Shared Passphrase") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                         enabled = chainLinkEnabled
                     )
-                    Text("Use the exact same passphrase on every linked device.")
+                    Text("Use the same passphrase on every linked device.")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -4209,6 +4347,7 @@ private fun DetectionMeshNetworkPage(
                         )
                     }
                     Text("When enabled, this device shares its current location with linked peers to improve mesh map accuracy.")
+                    Text("Operations", fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -4262,7 +4401,7 @@ private fun DetectionMeshNetworkPage(
                         }
                     }
                     Button(
-                        enabled = chainLinkEnabled && chainSharedSecret.isNotBlank() && !syncInProgress,
+                        enabled = meshReady && !syncInProgress,
                         onClick = {
                             scope.launch {
                                 syncInProgress = true
@@ -4283,11 +4422,11 @@ private fun DetectionMeshNetworkPage(
                             }
                         }
                     ) {
-                        Text(if (wipeInProgress) "Resetting Mesh..." else "Mesh Soft Reset (All Devices)")
+                        Text(if (wipeInProgress) "Wiping Mesh Data..." else "Wipe Mesh Data (All Devices)")
                     }
-                    Text("Backs up then clears encounters/devices/logs locally and on discovered peers with authenticated coordination to keep two (or more) mesh devices better synchronized.")
+                    Text("Backs up then clears encounters, devices, and logs locally and on discovered authenticated peers.")
 
-                    Text("Send Linking Request", fontWeight = FontWeight.SemiBold)
+                    Text("Manual Link Request", fontWeight = FontWeight.Bold)
                     OutlinedTextField(
                         value = linkHostInput,
                         onValueChange = { linkHostInput = it },
@@ -4323,7 +4462,7 @@ private fun DetectionMeshNetworkPage(
                     }
 
                     if (chainMeshSnapshot.peers.isNotEmpty()) {
-                        Text("Peers", fontWeight = FontWeight.SemiBold)
+                        Text("Known Peers", fontWeight = FontWeight.Bold)
                         chainMeshSnapshot.peers.take(24).forEach { peer ->
                             val canRequestPeerLink = peer.state != ChainPeerState.CONNECTED &&
                                 peer.state != ChainPeerState.REQUESTED
@@ -4510,6 +4649,7 @@ private fun DetectionMapPage(
     liveMapUpdateIntervalSeconds: Long
 ) {
     val pinLimitOptions = listOf(100, 250, 500, 1000)
+    val compactMapLayout = LocalConfiguration.current.screenWidthDp < 420
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
@@ -4558,20 +4698,42 @@ private fun DetectionMapPage(
             maxDistanceMeters = MAP_AUTO_FOCUS_MAX_DISTANCE_METERS
         )
     }
+    val cameraFocusPins = remember(nearbyVisiblePins, filteredVisiblePins) {
+        val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else filteredVisiblePins
+        samplePinsForCamera(focusPins, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
+    }
     var autoPositioned by rememberSaveable { mutableStateOf(false) }
 
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 2f)
     }
+    val zoomBucket = remember(cameraPositionState.position.zoom) {
+        (cameraPositionState.position.zoom * 2f).roundToInt()
+    }
+    val renderPinLimit = remember(zoomBucket, pinLimit) {
+        val bucketZoom = zoomBucket / 2f
+        when {
+            bucketZoom < 8.0f -> MAP_RENDER_PIN_LIMIT_FAR
+            bucketZoom < 11.0f -> MAP_RENDER_PIN_LIMIT_MID
+            else -> pinLimit.coerceAtMost(MOVING_PATH_RENDER_POINT_LIMIT)
+        }
+    }
+    val renderedPins = remember(filteredVisiblePins, renderPinLimit) {
+        samplePinsForRender(filteredVisiblePins, renderPinLimit)
+    }
+    val useDenseDotMarkers = remember(zoomBucket, filteredVisiblePins.size) {
+        val bucketZoom = zoomBucket / 2f
+        filteredVisiblePins.size > MAP_RENDER_PIN_LIMIT_MID || bucketZoom < 9.5f
+    }
 
-    LaunchedEffect(currentLocation, visiblePins, nearbyVisiblePins, hasMapsApiKey, autoPositioned) {
-        if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
+    LaunchedEffect(currentLocation, cameraFocusPins, hasMapsApiKey, autoPositioned, mapLoaded) {
+        if (!hasMapsApiKey || autoPositioned || !mapLoaded) return@LaunchedEffect
 
-        val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else filteredVisiblePins
+        val focusPins = cameraFocusPins
         val currentLocationSnapshot = currentLocation
 
         when {
-            focusPins.size > 1 && mapLoaded -> {
+            focusPins.size > 1 -> {
                 val boundsBuilder = LatLngBounds.Builder()
                 focusPins.forEach { pin -> boundsBuilder.include(pin.position) }
                 val bounds = boundsBuilder.build()
@@ -4684,108 +4846,106 @@ private fun DetectionMapPage(
     ) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(mapTitle, fontWeight = FontWeight.Bold)
-                        Text(mapDescription)
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                    ) {
-                        if (liveModeEnabled) {
-                            Text(
-                                text = "● LIVE",
-                                color = Color(0xFF2E7D32),
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
-                            Text("Panels")
-                            Switch(
-                                checked = controlsVisible,
-                                onCheckedChange = { controlsVisible = it }
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
+                if (compactMapLayout) {
                     Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                    Text(mapDescription, style = MaterialTheme.typography.bodySmall)
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
-                        Button(
-                            onClick = {
-                                val location = currentLocation
-                                if (location == null) {
-                                    mapError = "Current location unavailable. Wait for GPS fix and try again."
-                                    return@Button
-                                }
-                                mapError = null
-                                scope.launch {
-                                    runCatching {
-                                        cameraPositionState.animate(
-                                            CameraUpdateFactory.newLatLngZoom(
-                                                LatLng(location.lat, location.lon),
-                                                17f
-                                            ),
-                                            650
-                                        )
-                                    }.onFailure {
-                                        mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
-                                    }
-                                }
-                            },
-                            enabled = currentLocation != null
-                        ) {
-                            Text("Current Location")
+                        Spacer(modifier = Modifier)
+                        Button(onClick = { controlsVisible = !controlsVisible }) {
+                            Text(if (controlsVisible) "Hide Controls" else "Show Controls")
                         }
-                        Text("Precise dots")
-                        Switch(
-                            checked = preciseDotsEnabled,
-                            onCheckedChange = { preciseDotsEnabled = it }
-                        )
                     }
-                }
-
-                if (legendItems.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
-                        legendItems.forEach { item ->
-                            val sourceVisible = item.source !in hiddenLegendSources
-                            FilterChip(
-                                selected = sourceVisible,
+                        Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            AssistChip(
+                                onClick = { controlsVisible = !controlsVisible },
+                                label = {
+                                    Text(
+                                        text = if (controlsVisible) "Panels: On" else "Panels: Off",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
+                            AssistChip(
                                 onClick = {
-                                    hiddenLegendSources = if (sourceVisible) {
-                                        hiddenLegendSources + item.source
-                                    } else {
-                                        hiddenLegendSources - item.source
+                                    val location = currentLocation
+                                    if (location == null) {
+                                        mapError = "Current location unavailable. Wait for GPS fix and try again."
+                                        return@AssistChip
+                                    }
+                                    mapError = null
+                                    scope.launch {
+                                        runCatching {
+                                            cameraPositionState.animate(
+                                                CameraUpdateFactory.newLatLngZoom(
+                                                    LatLng(location.lat, location.lon),
+                                                    17f
+                                                ),
+                                                650
+                                            )
+                                        }.onFailure {
+                                            mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+                                        }
                                     }
                                 },
-                                label = { Text(item.label) },
-                                leadingIcon = {
+                                enabled = currentLocation != null,
+                                label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            AssistChip(
+                                onClick = { preciseDotsEnabled = !preciseDotsEnabled },
+                                label = {
                                     Text(
-                                        text = "●",
-                                        color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                        text = if (preciseDotsEnabled) "Precise Dots: On" else "Precise Dots: Off",
+                                        style = MaterialTheme.typography.labelSmall
                                     )
                                 }
                             )
                         }
                     }
-                } else {
-                    Text("No source pins available for legend yet.")
+
+                    Text(mapDescription, style = MaterialTheme.typography.bodySmall)
+
+                    if (legendItems.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            legendItems.forEach { item ->
+                                val sourceVisible = item.source !in hiddenLegendSources
+                                FilterChip(
+                                    selected = sourceVisible,
+                                    onClick = {
+                                        hiddenLegendSources = if (sourceVisible) {
+                                            hiddenLegendSources + item.source
+                                        } else {
+                                            hiddenLegendSources - item.source
+                                        }
+                                    },
+                                    label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
+                                    leadingIcon = {
+                                        Text(
+                                            text = "●",
+                                            color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    } else {
+                        Text("No source pins available for legend yet.")
+                    }
                 }
             }
         }
@@ -4797,108 +4957,216 @@ private fun DetectionMapPage(
                 }
             }
         } else {
-            if (controlsVisible) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(IntrinsicSize.Min),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Pin Limit", fontWeight = FontWeight.Bold)
-                                Button(onClick = { pinLimitExpanded = true }) {
-                                    Text("$pinLimit")
+            if (controlsVisible && !compactMapLayout) {
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val splitControlPanels = maxWidth >= 700.dp
+                    if (splitControlPanels) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(IntrinsicSize.Min),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Pin Limit", fontWeight = FontWeight.Bold)
+                                        Button(onClick = { pinLimitExpanded = true }) {
+                                            Text("$pinLimit")
+                                        }
+                                    }
+                                    Text("Showing ${visiblePins.size}/${pins.size}")
+                                    DropdownMenu(expanded = pinLimitExpanded, onDismissRequest = { pinLimitExpanded = false }) {
+                                        pinLimitOptions.forEach { option ->
+                                            DropdownMenuItem(
+                                                text = { Text(option.toString()) },
+                                                onClick = {
+                                                    onPinLimitChange(option)
+                                                    pinLimitExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                            Text("Showing ${visiblePins.size}/${pins.size}")
-                            DropdownMenu(expanded = pinLimitExpanded, onDismissRequest = { pinLimitExpanded = false }) {
-                                pinLimitOptions.forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option.toString()) },
-                                        onClick = {
-                                            onPinLimitChange(option)
-                                            pinLimitExpanded = false
-                                        }
+                            Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
+                                        Switch(
+                                            checked = liveModeEnabled && liveUpdatesAllowed,
+                                            onCheckedChange = { enabled ->
+                                                if (liveUpdatesAllowed) {
+                                                    liveModeEnabled = enabled
+                                                }
+                                            },
+                                            enabled = liveUpdatesAllowed
+                                        )
+                                    }
+                                    Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
+                                    Text(
+                                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
+                                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
                                     )
+                                    if (showLiveOnlyControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Live Only")
+                                            Switch(
+                                                checked = liveOnlyEnabled,
+                                                onCheckedChange = onLiveOnlyEnabledChange
+                                            )
+                                        }
+                                    }
+                                    if (showMovingOnlyControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Moving Only")
+                                            Switch(
+                                                checked = movingOnlyEnabled,
+                                                onCheckedChange = onMovingOnlyEnabledChange
+                                            )
+                                        }
+                                    }
+                                    if (showSinceSnapshotControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Since Snapshot")
+                                            Switch(
+                                                checked = sinceSnapshotEnabled,
+                                                onCheckedChange = onSinceSnapshotEnabledChange
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = snapshotEpochMs?.let { "Snapshot: ${formatEpoch(it)}" } ?: "Snapshot: not captured"
+                                            )
+                                            Button(onClick = onCaptureSnapshot) {
+                                                Text("Capture")
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                    Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Live Map Updates", fontWeight = FontWeight.Bold)
-                                Switch(
-                                    checked = liveModeEnabled && liveUpdatesAllowed,
-                                    onCheckedChange = { enabled ->
-                                        if (liveUpdatesAllowed) {
-                                            liveModeEnabled = enabled
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Pin Limit", fontWeight = FontWeight.Bold)
+                                        Button(onClick = { pinLimitExpanded = true }) {
+                                            Text("$pinLimit")
                                         }
-                                    },
-                                    enabled = liveUpdatesAllowed
-                                )
-                            }
-                            Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
-                            Text(
-                                text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
-                                color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
-                            )
-                            if (showLiveOnlyControl) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                ) {
-                                    Text("Live Only")
-                                    Switch(
-                                        checked = liveOnlyEnabled,
-                                        onCheckedChange = onLiveOnlyEnabledChange
-                                    )
+                                    }
+                                    Text("Showing ${visiblePins.size}/${pins.size}")
+                                    DropdownMenu(expanded = pinLimitExpanded, onDismissRequest = { pinLimitExpanded = false }) {
+                                        pinLimitOptions.forEach { option ->
+                                            DropdownMenuItem(
+                                                text = { Text(option.toString()) },
+                                                onClick = {
+                                                    onPinLimitChange(option)
+                                                    pinLimitExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                            if (showMovingOnlyControl) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                ) {
-                                    Text("Moving Only")
-                                    Switch(
-                                        checked = movingOnlyEnabled,
-                                        onCheckedChange = onMovingOnlyEnabledChange
-                                    )
-                                }
-                            }
-                            if (showSinceSnapshotControl) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                ) {
-                                    Text("Since Snapshot")
-                                    Switch(
-                                        checked = sinceSnapshotEnabled,
-                                        onCheckedChange = onSinceSnapshotEnabledChange
-                                    )
-                                }
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                ) {
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
+                                        Switch(
+                                            checked = liveModeEnabled && liveUpdatesAllowed,
+                                            onCheckedChange = { enabled ->
+                                                if (liveUpdatesAllowed) {
+                                                    liveModeEnabled = enabled
+                                                }
+                                            },
+                                            enabled = liveUpdatesAllowed
+                                        )
+                                    }
+                                    Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
                                     Text(
-                                        text = snapshotEpochMs?.let { "Snapshot: ${formatEpoch(it)}" } ?: "Snapshot: not captured"
+                                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
+                                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
                                     )
-                                    Button(onClick = onCaptureSnapshot) {
-                                        Text("Capture")
+                                    if (showLiveOnlyControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Live Only")
+                                            Switch(
+                                                checked = liveOnlyEnabled,
+                                                onCheckedChange = onLiveOnlyEnabledChange
+                                            )
+                                        }
+                                    }
+                                    if (showMovingOnlyControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Moving Only")
+                                            Switch(
+                                                checked = movingOnlyEnabled,
+                                                onCheckedChange = onMovingOnlyEnabledChange
+                                            )
+                                        }
+                                    }
+                                    if (showSinceSnapshotControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text("Since Snapshot")
+                                            Switch(
+                                                checked = sinceSnapshotEnabled,
+                                                onCheckedChange = onSinceSnapshotEnabledChange
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = snapshotEpochMs?.let { "Snapshot: ${formatEpoch(it)}" } ?: "Snapshot: not captured"
+                                            )
+                                            Button(onClick = onCaptureSnapshot) {
+                                                Text("Capture")
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -4930,7 +5198,7 @@ private fun DetectionMapPage(
                             Text("API key: $mapsApiKeyDiagnostic")
                             Text("Play Services: $playServicesDiagnostic")
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
-                            Text("Pins rendered: ${filteredVisiblePins.size}/${pins.size}")
+                            Text("Pins rendered: ${renderedPins.size}/${pins.size}")
                             Text(
                                 text = if (currentLocationSnapshot != null) {
                                     "Current location: ${"%.5f".format(currentLocationSnapshot.lat)}, ${"%.5f".format(currentLocationSnapshot.lon)}"
@@ -4986,15 +5254,15 @@ private fun DetectionMapPage(
                         scrollGesturesEnabled = true,
                         tiltGesturesEnabled = false,
                         rotationGesturesEnabled = false,
-                        myLocationButtonEnabled = false
+                        myLocationButtonEnabled = hasLocationPermission
                     )
                 ) {
-                    filteredVisiblePins.forEach { pin ->
+                    renderedPins.forEach { pin ->
                         Marker(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
                             snippet = pin.snippet,
-                            icon = if (preciseDotsEnabled) {
+                            icon = if (preciseDotsEnabled || useDenseDotMarkers) {
                                 markerDotIconForPin(pin, useSourceOnlyPinColors)
                             } else {
                                 markerIconForPin(pin, useSourceOnlyPinColors)
@@ -5003,6 +5271,180 @@ private fun DetectionMapPage(
                                 onPinDetailsClick(pin)
                             }
                         )
+                    }
+                }
+
+                if (compactMapLayout && controlsVisible) {
+                    Card(
+                        modifier = Modifier
+                            .align(androidx.compose.ui.Alignment.TopEnd)
+                            .padding(10.dp)
+                            .fillMaxWidth(0.72f)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Map Menu", fontWeight = FontWeight.Bold)
+                            AssistChip(
+                                onClick = {
+                                    val location = currentLocation
+                                    if (location == null) {
+                                        mapError = "Current location unavailable. Wait for GPS fix and try again."
+                                        return@AssistChip
+                                    }
+                                    mapError = null
+                                    scope.launch {
+                                        runCatching {
+                                            cameraPositionState.animate(
+                                                CameraUpdateFactory.newLatLngZoom(
+                                                    LatLng(location.lat, location.lon),
+                                                    17f
+                                                ),
+                                                650
+                                            )
+                                        }.onFailure {
+                                            mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+                                        }
+                                    }
+                                },
+                                enabled = currentLocation != null,
+                                label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Precise dots", style = MaterialTheme.typography.labelSmall)
+                                Switch(
+                                    checked = preciseDotsEnabled,
+                                    onCheckedChange = { preciseDotsEnabled = it }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Pin Limit", fontWeight = FontWeight.Bold)
+                                Button(onClick = { pinLimitExpanded = true }) {
+                                    Text("$pinLimit")
+                                }
+                            }
+                            DropdownMenu(expanded = pinLimitExpanded, onDismissRequest = { pinLimitExpanded = false }) {
+                                pinLimitOptions.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.toString()) },
+                                        onClick = {
+                                            onPinLimitChange(option)
+                                            pinLimitExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                            Text("Showing ${visiblePins.size}/${pins.size}", style = MaterialTheme.typography.bodySmall)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Live updates", fontWeight = FontWeight.Bold)
+                                Switch(
+                                    checked = liveModeEnabled && liveUpdatesAllowed,
+                                    onCheckedChange = { enabled ->
+                                        if (liveUpdatesAllowed) {
+                                            liveModeEnabled = enabled
+                                        }
+                                    },
+                                    enabled = liveUpdatesAllowed
+                                )
+                            }
+                            if (showLiveOnlyControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Live Only")
+                                    Switch(
+                                        checked = liveOnlyEnabled,
+                                        onCheckedChange = onLiveOnlyEnabledChange
+                                    )
+                                }
+                            }
+                            if (showMovingOnlyControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Moving Only")
+                                    Switch(
+                                        checked = movingOnlyEnabled,
+                                        onCheckedChange = onMovingOnlyEnabledChange
+                                    )
+                                }
+                            }
+                            if (showSinceSnapshotControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Since Snapshot")
+                                    Switch(
+                                        checked = sinceSnapshotEnabled,
+                                        onCheckedChange = onSinceSnapshotEnabledChange
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = snapshotEpochMs?.let { "Snapshot: ${formatEpoch(it)}" } ?: "Snapshot: not captured",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Button(onClick = onCaptureSnapshot) {
+                                        Text("Capture")
+                                    }
+                                }
+                            }
+                            Text("Pin Color Legend", fontWeight = FontWeight.Bold)
+                            if (legendItems.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    legendItems.forEach { item ->
+                                        val sourceVisible = item.source !in hiddenLegendSources
+                                        FilterChip(
+                                            selected = sourceVisible,
+                                            onClick = {
+                                                hiddenLegendSources = if (sourceVisible) {
+                                                    hiddenLegendSources + item.source
+                                                } else {
+                                                    hiddenLegendSources - item.source
+                                                }
+                                            },
+                                            label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
+                                            leadingIcon = {
+                                                Text(
+                                                    text = "●",
+                                                    color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text("No source pins available for legend yet.")
+                            }
+                        }
                     }
                 }
             }
@@ -5040,22 +5482,28 @@ private fun MovingDevicePathMapPage(
                 acc
             }
     }
+    val renderedPathPoints = remember(pathPoints) {
+        decimateLatLngPoints(pathPoints, MOVING_PATH_RENDER_POINT_LIMIT)
+    }
+    val cameraPathPoints = remember(pathPoints) {
+        decimateLatLngPoints(pathPoints, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
+    }
     val latestMotion = remember(deviceEncounters) { analyzeMotionSignal(deviceEncounters) }
 
-    LaunchedEffect(pathPoints) {
+    LaunchedEffect(cameraPathPoints) {
         when {
-            pathPoints.size > 1 -> {
+            cameraPathPoints.size > 1 -> {
                 val boundsBuilder = LatLngBounds.Builder()
-                pathPoints.forEach { point -> boundsBuilder.include(point) }
+                cameraPathPoints.forEach { point -> boundsBuilder.include(point) }
                 runCatching {
                     cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 120))
                 }
             }
 
-            pathPoints.size == 1 -> {
+            cameraPathPoints.size == 1 -> {
                 runCatching {
                     cameraPositionState.move(
-                        CameraUpdateFactory.newLatLngZoom(pathPoints.first(), 15f)
+                        CameraUpdateFactory.newLatLngZoom(cameraPathPoints.first(), 15f)
                     )
                 }
             }
@@ -5076,7 +5524,7 @@ private fun MovingDevicePathMapPage(
             }
         } ?: "Status: n/a"
         Text(statusText)
-        Text("Path points: ${pathPoints.size}")
+        Text("Path points: ${renderedPathPoints.size}/${pathPoints.size}")
         Text("Blue path direction: starts at GREEN marker and ends at RED marker.")
 
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -5092,9 +5540,9 @@ private fun MovingDevicePathMapPage(
                     myLocationButtonEnabled = false
                 )
             ) {
-                if (pathPoints.size >= 2) {
+                if (renderedPathPoints.size >= 2) {
                     Polyline(
-                        points = pathPoints,
+                        points = renderedPathPoints,
                         color = Color(0xFF1565C0),
                         width = 8f
                     )
@@ -5257,6 +5705,91 @@ private fun spreadOverlappingMapPins(pins: List<MapPin>): List<MapPin> {
     }
 
     return adjusted.sortedByDescending { it.timestampEpochMs }
+}
+
+private fun samplePinsForCamera(pins: List<MapPin>, maxPoints: Int): List<MapPin> {
+    if (pins.size <= maxPoints) return pins
+    val safeLimit = maxPoints.coerceAtLeast(8)
+    val selected = LinkedHashMap<String, MapPin>()
+
+    fun add(pin: MapPin?) {
+        if (pin == null || selected.size >= safeLimit) return
+        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        selected[key] = pin
+    }
+
+    add(pins.firstOrNull())
+    add(pins.lastOrNull())
+    add(pins.maxByOrNull { it.position.latitude })
+    add(pins.minByOrNull { it.position.latitude })
+    add(pins.maxByOrNull { it.position.longitude })
+    add(pins.minByOrNull { it.position.longitude })
+
+    if (selected.size < safeLimit) {
+        val step = pins.size.toDouble() / safeLimit.toDouble()
+        var index = 0.0
+        while (selected.size < safeLimit && index < pins.size) {
+            add(pins[index.toInt().coerceIn(0, pins.lastIndex)])
+            index += step
+        }
+    }
+
+    return selected.values.toList()
+}
+
+private fun samplePinsForRender(pins: List<MapPin>, maxPoints: Int): List<MapPin> {
+    if (pins.size <= maxPoints) return pins
+    val safeLimit = maxPoints.coerceAtLeast(24)
+
+    val newestPerSource = pins
+        .groupBy { it.source }
+        .values
+        .mapNotNull { grouped -> grouped.maxByOrNull { it.timestampEpochMs } }
+        .sortedByDescending { it.timestampEpochMs }
+
+    val selected = LinkedHashMap<String, MapPin>()
+    newestPerSource.take(safeLimit).forEach { pin ->
+        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        selected[key] = pin
+    }
+
+    if (selected.size < safeLimit) {
+        val step = pins.size.toDouble() / safeLimit.toDouble()
+        var index = 0.0
+        while (selected.size < safeLimit && index < pins.size) {
+            val pin = pins[index.toInt().coerceIn(0, pins.lastIndex)]
+            val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+            selected[key] = pin
+            index += step
+        }
+    }
+
+    return selected.values
+        .sortedByDescending { it.timestampEpochMs }
+        .take(safeLimit)
+}
+
+private fun decimateLatLngPoints(points: List<LatLng>, maxPoints: Int): List<LatLng> {
+    if (points.size <= maxPoints || maxPoints < 3) return points
+
+    val lastIndex = points.lastIndex
+    val sampled = ArrayList<LatLng>(maxPoints)
+    val step = lastIndex.toDouble() / (maxPoints - 1).toDouble()
+    var previousIndex = -1
+
+    for (sampleIndex in 0 until maxPoints) {
+        val pointIndex = (sampleIndex * step).roundToInt().coerceIn(0, lastIndex)
+        if (pointIndex != previousIndex) {
+            sampled += points[pointIndex]
+            previousIndex = pointIndex
+        }
+    }
+
+    if (sampled.lastOrNull() != points.last()) {
+        sampled += points.last()
+    }
+
+    return sampled
 }
 
 private fun markerHueForSource(source: String): Float = when (source) {
