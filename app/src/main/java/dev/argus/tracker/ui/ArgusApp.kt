@@ -587,6 +587,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
+    var lastWearStatusPublishEpochMs by remember { mutableStateOf(0L) }
+    var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -595,7 +597,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
 
-    LaunchedEffect(chainMesh, alertLogs, allEncounters) {
+    LaunchedEffect(chainMesh, alertLogs, recent100) {
+        delay(750)
         val peersTotal = chainMesh.peers.size
         val peersConnected = chainMesh.peers.count { it.state == ChainPeerState.CONNECTED }
         val meshDashboardUrl = chainMesh.peers
@@ -607,17 +610,20 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     ?.let { host -> "http://$host:8091/" }
             }
             .firstOrNull()
-        val recentDevicePoints = buildWearDevicePoints(allEncounters)
+        val recentDevicePoints = withContext(Dispatchers.Default) {
+            buildWearDevicePoints(recent100)
+        }
         val latestAlert = alertLogs.maxByOrNull { it.timestampEpochMs }
         val alertMessage = latestAlert?.message?.takeIf { it.isNotBlank() } ?: "No recent alerts"
         val alertEpochMs = latestAlert?.timestampEpochMs
-        val pointsSignature = recentDevicePoints.joinToString(separator = "|") {
-            "${it.label}:${it.lat}:${it.lon}:${it.timestampEpochMs}"
-        }
+        val pointsSignature = recentDevicePoints.hashCode()
         val signature = "$peersTotal|$peersConnected|$alertMessage|${alertEpochMs ?: 0L}|${meshDashboardUrl.orEmpty()}|$pointsSignature"
         if (signature == lastWearStatusSignature) return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        if (now - lastWearStatusPublishEpochMs < 3_000L) return@LaunchedEffect
 
         lastWearStatusSignature = signature
+        lastWearStatusPublishEpochMs = now
         WearStatusBridgePublisher.publishStatus(
             context = context,
             peersTotal = peersTotal,
@@ -637,6 +643,20 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         )
         if (updatedKeys != ownedDeviceKeys) {
             ownedDeviceKeys = updatedKeys
+        }
+    }
+
+    LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled) {
+        if (!approachDetectionEnabled) {
+            analyzedDevices = emptyList()
+            return@LaunchedEffect
+        }
+        analyzedDevices = withContext(Dispatchers.Default) {
+            buildDeviceItems(
+                encounters = allEncounters,
+                approachDetectionEnabled = true,
+                ownedDeviceKeys = ownedDeviceKeys
+            )
         }
     }
 
@@ -996,16 +1016,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(allEncounters, ownedDeviceKeys, approachDetectionEnabled, approachNotificationsEnabled) {
+    LaunchedEffect(analyzedDevices, approachDetectionEnabled, approachNotificationsEnabled) {
         if (!approachDetectionEnabled) return@LaunchedEffect
         val now = System.currentTimeMillis()
-        val devices = withContext(Dispatchers.Default) {
-            buildDeviceItems(
-                encounters = allEncounters,
-                approachDetectionEnabled = true,
-                ownedDeviceKeys = ownedDeviceKeys
-            )
-        }
+        val devices = analyzedDevices
         val seenKeys = mutableSetOf<String>()
         val approachLogsToAppend = mutableListOf<AlertLogEntry>()
 
@@ -1056,8 +1070,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
 
     LaunchedEffect(
-        allEncounters,
-        ownedDeviceKeys,
+        analyzedDevices,
         approachDetectionEnabled,
         trackerNotificationsEnabled,
         evasionAutoEscalateEnabled,
@@ -1066,13 +1079,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     ) {
         if (!approachDetectionEnabled) return@LaunchedEffect
         val now = System.currentTimeMillis()
-        val devices = withContext(Dispatchers.Default) {
-            buildDeviceItems(
-                encounters = allEncounters,
-                approachDetectionEnabled = true,
-                ownedDeviceKeys = ownedDeviceKeys
-            )
-        }
+        val devices = analyzedDevices
         val seenKeys = mutableSetOf<String>()
         val trackerLogsToAppend = mutableListOf<AlertLogEntry>()
 
