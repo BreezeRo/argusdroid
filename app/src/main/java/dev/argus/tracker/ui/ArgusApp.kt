@@ -63,6 +63,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
@@ -480,14 +482,27 @@ private object DeviceSpeedRecordStore {
     private const val PREFS_NAME = "argus_settings"
     private const val KEY_DEVICE_TOP_SPEEDS = "device_top_speeds_mps"
 
-    fun getRecordSpeedMps(context: android.content.Context, source: String, primaryId: String): Double? {
-        val key = "${source}|${primaryId}"
+    fun getAllRecordSpeedsMps(context: android.content.Context): Map<String, Double> {
         val raw = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
             .getString(KEY_DEVICE_TOP_SPEEDS, "{}")
             .orEmpty()
         val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
-        if (!obj.has(key)) return null
-        return obj.optDouble(key).takeIf { it.isFinite() && it >= 0.0 }
+        val keys = obj.keys().asSequence().toList()
+        if (keys.isEmpty()) return emptyMap()
+
+        val records = LinkedHashMap<String, Double>(keys.size)
+        keys.forEach { key ->
+            val value = obj.optDouble(key, Double.NaN)
+            if (value.isFinite() && value >= 0.0) {
+                records[key] = value
+            }
+        }
+        return records
+    }
+
+    fun getRecordSpeedMps(context: android.content.Context, source: String, primaryId: String): Double? {
+        val key = "${source}|${primaryId}"
+        return getAllRecordSpeedsMps(context)[key]
     }
 
     fun updateIfHigher(
@@ -3972,7 +3987,7 @@ private fun DetectionPage(
     var selectedTab by remember { mutableStateOf(0) }
     var encounterPinLimit by rememberSaveable { mutableStateOf(1000) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
-    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
+    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(true) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -3980,11 +3995,14 @@ private fun DetectionPage(
     val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
     val tabs = listOf("Readiness", "Signal Intel", "Device Encounters Map", "Device Location Map", "Alert Logs", "Mesh Network")
     val isDeviceLocationTabActive = selectedTab == 3
-    val foreignSignalRisk = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
-        if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
+    val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
+        if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
-    val signalIntel = remember(meshInsightEncounters, foreignSignalRiskEnabled) {
-        buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled)
+    val signalIntel = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
+        if (selectedTab == 1) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
+    }
+    val topSpeedRecords = remember(meshInsightEncounters) {
+        DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
 
     val encounterPins = remember(encounters) {
@@ -4014,12 +4032,16 @@ private fun DetectionPage(
             .toList()
     }
 
+    val maxDeviceCandidatesToResolve = remember(cellDevicePinLimit) {
+        (cellDevicePinLimit * 2).coerceIn(200, 2000)
+    }
     val allDeviceCandidates = remember(
         isDeviceLocationTabActive,
         meshInsightEncounters,
         approachDetectionEnabled,
         ownedDeviceKeys,
-        deviceMapRecentWindowMs
+        deviceMapRecentWindowMs,
+        maxDeviceCandidatesToResolve
     ) {
         if (!isDeviceLocationTabActive) {
             emptyList()
@@ -4060,12 +4082,18 @@ private fun DetectionPage(
                     )
                 }
                 .sortedByDescending { it.latestTimestampEpochMs }
+                .take(maxDeviceCandidatesToResolve)
         }
     }
 
     val deviceLocationLookupKey = remember(allDeviceCandidates) {
-        allDeviceCandidates.joinToString(separator = "|") { candidate ->
-            "${candidate.source}:${candidate.primaryId}:${candidate.latestTimestampEpochMs}:${candidate.seenCount}"
+        allDeviceCandidates.fold(17L) { acc, candidate ->
+            var hash = acc
+            hash = hash * 31L + candidate.source.hashCode().toLong()
+            hash = hash * 31L + candidate.primaryId.hashCode().toLong()
+            hash = hash * 31L + candidate.latestTimestampEpochMs
+            hash = hash * 31L + candidate.seenCount.toLong()
+            hash
         }
     }
     var estimatedDeviceLocationPins by remember { mutableStateOf(emptyList<MapPin>()) }
@@ -4076,24 +4104,26 @@ private fun DetectionPage(
             return@LaunchedEffect
         }
 
-        val resolvedCandidates = buildList {
-            allDeviceCandidates.forEach { candidate ->
-                val latest = candidate.encounters.maxByOrNull { it.timestampEpochMs } ?: return@forEach
-                val sourceEnum = runCatching { EncounterSource.valueOf(candidate.source) }.getOrDefault(EncounterSource.UNKNOWN_RF)
-                val resolvedLocation = resolveDeviceLocation(
-                    source = sourceEnum,
-                    encounters = candidate.encounters
-                )
-                val resolvedCandidate = resolvedLocation?.let { resolved ->
-                    candidate.copy(
-                        approximateLocation = DetectionLocation(resolved.lat, resolved.lon),
-                        approximateMethod = resolved.method,
-                        approximateRangeMeters = resolved.approximateRangeMeters
+        val resolvedCandidates = withContext(Dispatchers.IO) {
+            buildList {
+                allDeviceCandidates.forEach { candidate ->
+                    val latest = candidate.encounters.maxByOrNull { it.timestampEpochMs } ?: return@forEach
+                    val sourceEnum = runCatching { EncounterSource.valueOf(candidate.source) }.getOrDefault(EncounterSource.UNKNOWN_RF)
+                    val resolvedLocation = resolveDeviceLocation(
+                        source = sourceEnum,
+                        encounters = candidate.encounters
                     )
-                }
+                    val resolvedCandidate = resolvedLocation?.let { resolved ->
+                        candidate.copy(
+                            approximateLocation = DetectionLocation(resolved.lat, resolved.lon),
+                            approximateMethod = resolved.method,
+                            approximateRangeMeters = resolved.approximateRangeMeters
+                        )
+                    }
 
-                if (resolvedCandidate != null) {
-                    add(resolvedCandidate)
+                    if (resolvedCandidate != null) {
+                        add(resolvedCandidate)
+                    }
                 }
             }
         }
@@ -4146,8 +4176,8 @@ private fun DetectionPage(
                     "Motion: STATIC ${formatSpeedLabel(signal.speedMps)}"
                 }
             } ?: "Motion: n/a"
-            val topSpeedLine = DeviceSpeedRecordStore
-                .getRecordSpeedMps(context, candidate.source, candidate.primaryId)
+            val topSpeedLine = topSpeedRecords
+                .get("${candidate.source}|${candidate.primaryId}")
                 ?.let { " • Top ${formatSpeedLabel(it)}" }
                 .orEmpty()
             val freshnessSnippet = if (isLive) {
@@ -4271,7 +4301,11 @@ private fun DetectionPage(
                         }
                     }
                 }
-                items(readinessItems) { item ->
+                items(
+                    items = readinessItems,
+                    key = { item -> item.id },
+                    contentType = { "readiness" }
+                ) { item ->
                     val statusText = if (item.isMissing) "MISSING" else "READY"
                     val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
@@ -4296,11 +4330,13 @@ private fun DetectionPage(
                 }
             }
         } else if (selectedTab == 1) {
-            DetectionSignalIntelPage(
-                intel = signalIntel,
-                riskEnabled = foreignSignalRiskEnabled,
-                onRefresh = onRefresh
-            )
+            signalIntel?.let {
+                DetectionSignalIntelPage(
+                    intel = it,
+                    riskEnabled = foreignSignalRiskEnabled,
+                    onRefresh = onRefresh
+                )
+            }
         } else if (selectedTab == 2) {
             DetectionMapPage(
                 mapTitle = "Device Encounters Map",
@@ -4336,7 +4372,7 @@ private fun DetectionPage(
                 .toList()
             DetectionMapPage(
                 mapTitle = "Device Location Map",
-                mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context.",
+                mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
                 pins = deviceMapPins,
                 pinLimit = cellDevicePinLimit,
                 onPinLimitChange = { cellDevicePinLimit = it },
@@ -4355,6 +4391,7 @@ private fun DetectionPage(
                 },
                 liveUpdatesAllowed = true,
                 useSourceOnlyPinColors = true,
+                enableVerticalScroll = true,
                 showLiveOnlyControl = true,
                 liveOnlyEnabled = liveOnlyOnDeviceMap,
                 onLiveOnlyEnabledChange = { liveOnlyOnDeviceMap = it },
@@ -4713,7 +4750,13 @@ private fun DetectionLogsPage(
             }
         }
 
-        items(filteredLogs) { entry ->
+        items(
+            items = filteredLogs,
+            key = { entry ->
+                "${entry.timestampEpochMs}|${entry.type.name}|${entry.source}|${entry.primaryId}|${entry.message.hashCode()}"
+            },
+            contentType = { "alertLog" }
+        ) { entry ->
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
@@ -5290,7 +5333,7 @@ private fun buildMeshCoverageInsights(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
@@ -5300,6 +5343,7 @@ private fun DetectionMapPage(
     onPinDetailsClick: (MapPin) -> Unit,
     liveUpdatesAllowed: Boolean = true,
     useSourceOnlyPinColors: Boolean = false,
+    enableVerticalScroll: Boolean = false,
     showLiveOnlyControl: Boolean = false,
     liveOnlyEnabled: Boolean = false,
     onLiveOnlyEnabledChange: (Boolean) -> Unit = {},
@@ -5329,16 +5373,28 @@ private fun DetectionMapPage(
     var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
+    var mapTouchInProgress by remember { mutableStateOf(false) }
+    var hiddenLegendSources by remember { mutableStateOf(setOf<String>()) }
+    val useScrollableLayout = enableVerticalScroll && controlsVisible
     val visiblePins = remember(pins, pinLimit) { selectVisiblePinsWithSourceCoverage(pins, pinLimit) }
     val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
+    val legendSources = remember(legendItems) { legendItems.map { it.source }.toSet() }
+    val filteredVisiblePins = remember(visiblePins, hiddenLegendSources) {
+        if (hiddenLegendSources.isEmpty()) {
+            visiblePins
+        } else {
+            visiblePins.filter { pin -> pin.source !in hiddenLegendSources }
+        }
+    }
+    val scrollState = if (useScrollableLayout) rememberScrollState() else null
 
     val currentLocation by LocationSnapshotProvider.observe(
         context,
         minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
     ).collectAsState(initial = LocationSnapshotProvider.read(context))
-    val nearbyVisiblePins = remember(visiblePins, currentLocation) {
+    val nearbyVisiblePins = remember(filteredVisiblePins, currentLocation) {
         filterPinsNearCurrentLocation(
-            pins = visiblePins,
+            pins = filteredVisiblePins,
             currentLocation = currentLocation,
             maxDistanceMeters = MAP_AUTO_FOCUS_MAX_DISTANCE_METERS
         )
@@ -5352,7 +5408,7 @@ private fun DetectionMapPage(
     LaunchedEffect(currentLocation, visiblePins, nearbyVisiblePins, hasMapsApiKey, autoPositioned) {
         if (!hasMapsApiKey || autoPositioned) return@LaunchedEffect
 
-        val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else visiblePins
+        val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else filteredVisiblePins
         val currentLocationSnapshot = currentLocation
 
         when {
@@ -5440,7 +5496,33 @@ private fun DetectionMapPage(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LaunchedEffect(useScrollableLayout) {
+        if (!useScrollableLayout) {
+            mapTouchInProgress = false
+        }
+    }
+
+    LaunchedEffect(legendSources) {
+        hiddenLegendSources = hiddenLegendSources.intersect(legendSources)
+    }
+
+    LaunchedEffect(mapTouchInProgress, useScrollableLayout) {
+        if (!useScrollableLayout || !mapTouchInProgress) return@LaunchedEffect
+        // Failsafe: occasionally ACTION_UP/CANCEL is missed when touch ends off-map.
+        delay(1200)
+        mapTouchInProgress = false
+    }
+
+    Column(
+        modifier = if (useScrollableLayout) {
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState!!, enabled = !mapTouchInProgress)
+        } else {
+            Modifier.fillMaxSize()
+        },
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
@@ -5494,10 +5576,24 @@ private fun DetectionMapPage(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         legendItems.forEach { item ->
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("●", color = item.color)
-                                Text(item.label)
-                            }
+                            val sourceVisible = item.source !in hiddenLegendSources
+                            FilterChip(
+                                selected = sourceVisible,
+                                onClick = {
+                                    hiddenLegendSources = if (sourceVisible) {
+                                        hiddenLegendSources + item.source
+                                    } else {
+                                        hiddenLegendSources - item.source
+                                    }
+                                },
+                                label = { Text(item.label) },
+                                leadingIcon = {
+                                    Text(
+                                        text = "●",
+                                        color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                    )
+                                }
+                            )
                         }
                     }
                 }
@@ -5644,7 +5740,7 @@ private fun DetectionMapPage(
                             Text("API key: $mapsApiKeyDiagnostic")
                             Text("Play Services: $playServicesDiagnostic")
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
-                            Text("Pins rendered: ${visiblePins.size}/${pins.size}")
+                            Text("Pins rendered: ${filteredVisiblePins.size}/${pins.size}")
                             Text(
                                 text = if (currentLocationSnapshot != null) {
                                     "Current location: ${"%.5f".format(currentLocationSnapshot.lat)}, ${"%.5f".format(currentLocationSnapshot.lon)}"
@@ -5663,7 +5759,29 @@ private fun DetectionMapPage(
                     }
                 }
             }
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            Box(
+                modifier = if (useScrollableLayout) {
+                    Modifier
+                        .pointerInteropFilter { motionEvent ->
+                            when (motionEvent.actionMasked) {
+                                android.view.MotionEvent.ACTION_DOWN,
+                                android.view.MotionEvent.ACTION_POINTER_DOWN,
+                                android.view.MotionEvent.ACTION_MOVE -> mapTouchInProgress = true
+
+                                android.view.MotionEvent.ACTION_UP,
+                                android.view.MotionEvent.ACTION_POINTER_UP,
+                                android.view.MotionEvent.ACTION_CANCEL -> mapTouchInProgress = false
+                            }
+                            false
+                        }
+                        .fillMaxWidth()
+                        .height(420.dp)
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                }
+            ) {
                 GoogleMap(
                     modifier = Modifier.fillMaxSize(),
                     cameraPositionState = cameraPositionState,
@@ -5680,7 +5798,7 @@ private fun DetectionMapPage(
                         myLocationButtonEnabled = false
                     )
                 ) {
-                    visiblePins.forEach { pin ->
+                    filteredVisiblePins.forEach { pin ->
                         Marker(
                             state = MarkerState(position = pin.position),
                             title = pin.title,
@@ -5836,6 +5954,7 @@ private data class MapPin(
 )
 
 private data class PinLegendItem(
+    val source: String,
     val label: String,
     val color: Color
 )
@@ -6006,6 +6125,7 @@ private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
 
     return orderedSources.map { source ->
         PinLegendItem(
+            source = source,
             label = markerLegendLabelForSource(source),
             color = markerLegendColorForSource(source)
         )
@@ -7997,9 +8117,6 @@ private fun DevicesPage(
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
-        initial = LocationSnapshotProvider.read(context)
-    )
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
@@ -8009,6 +8126,13 @@ private fun DevicesPage(
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
+    val currentLocation by if (showDistance) {
+        LocationSnapshotProvider.observe(context).collectAsState(
+            initial = LocationSnapshotProvider.read(context)
+        )
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val devices = remember(selectedEncounters, sortMode, approachDetectionEnabled, ownedDeviceKeys) {
         buildDeviceItems(
@@ -8019,6 +8143,9 @@ private fun DevicesPage(
         )
     }
     val sourceOptions = remember(devices) { devices.map { it.source }.distinct().sorted() }
+    val topSpeedByDevice = remember(selectedEncounters) {
+        DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
+    }
     val filteredDevices = remember(devices, sourceFilter, queryFilter, showOwnedOnly, showTrackerRiskOnly) {
         devices.filter { device ->
             val sourceMatches = sourceFilter == null || device.source == sourceFilter
@@ -8035,10 +8162,22 @@ private fun DevicesPage(
         if (!showDistance || !sortByDistance) {
             filteredDevices
         } else {
-            filteredDevices.sortedWith(
-                compareByDescending<DeviceItem> { distanceForDeviceMeters(it, currentLocation) ?: Double.MIN_VALUE }
-                    .thenByDescending { it.lastSeenEpochMs }
-            )
+            filteredDevices
+                .map { device -> device to (distanceForDeviceMeters(device, currentLocation) ?: Double.MIN_VALUE) }
+                .sortedWith(
+                    compareByDescending<Pair<DeviceItem, Double>> { it.second }
+                        .thenByDescending { it.first.lastSeenEpochMs }
+                )
+                .map { it.first }
+        }
+    }
+    val distanceByDeviceKey = remember(displayedDevices, showDistance, currentLocation) {
+        if (!showDistance || currentLocation == null) {
+            emptyMap()
+        } else {
+            displayedDevices.associate { device ->
+                "${device.source}|${device.primaryId}" to distanceForDeviceMeters(device, currentLocation)
+            }
         }
     }
 
@@ -8117,7 +8256,11 @@ private fun DevicesPage(
         }
         Text("Showing ${displayedDevices.size} of ${devices.size}")
         LazyColumn {
-            items(displayedDevices) { device ->
+            items(
+                items = displayedDevices,
+                key = { device -> "${device.source}|${device.primaryId}" },
+                contentType = { "device" }
+            ) { device ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -8168,7 +8311,7 @@ private fun DevicesPage(
                                 fontWeight = FontWeight.Medium
                             )
                         }
-                        val recordSpeed = DeviceSpeedRecordStore.getRecordSpeedMps(context, device.source, device.primaryId)
+                        val recordSpeed = topSpeedByDevice["${device.source}|${device.primaryId}"]
                         if (recordSpeed != null) {
                             Text(
                                 text = "Top Speed Record • ${formatSpeedLabel(recordSpeed)}",
@@ -8200,7 +8343,7 @@ private fun DevicesPage(
                             Text("${secondaryIdLabel(device.source)}: ${device.secondaryId}")
                         }
                         if (showDistance) {
-                            val distanceMeters = distanceForDeviceMeters(device, currentLocation)
+                            val distanceMeters = distanceByDeviceKey["${device.source}|${device.primaryId}"]
                             Text(
                                 "Distance: ${distanceMeters?.let(::formatDistanceFeetMiles) ?: "n/a"}"
                             )
@@ -8223,9 +8366,6 @@ private fun EncountersPage(
     onEncounterClick: (Encounter) -> Unit
 ) {
     val context = LocalContext.current
-    val currentLocation by LocationSnapshotProvider.observe(context).collectAsState(
-        initial = LocationSnapshotProvider.read(context)
-    )
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
@@ -8233,6 +8373,13 @@ private fun EncountersPage(
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
+    val currentLocation by if (showDistance) {
+        LocationSnapshotProvider.observe(context).collectAsState(
+            initial = LocationSnapshotProvider.read(context)
+        )
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
     val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
     val sourceOptions = remember(encounters) { encounters.map { it.source.name }.distinct().sorted() }
     val filteredEncounters = remember(encounters, sourceFilter, queryFilter, showOwnedOnly, ownedDeviceKeys) {
@@ -8251,10 +8398,23 @@ private fun EncountersPage(
         if (!showDistance || !sortByDistance) {
             filteredEncounters
         } else {
-            filteredEncounters.sortedWith(
-                compareByDescending<Encounter> { distanceForEncounterMeters(it, currentLocation) ?: Double.MIN_VALUE }
-                    .thenByDescending { it.timestampEpochMs }
-            )
+            filteredEncounters
+                .map { encounter -> encounter to (distanceForEncounterMeters(encounter, currentLocation) ?: Double.MIN_VALUE) }
+                .sortedWith(
+                    compareByDescending<Pair<Encounter, Double>> { it.second }
+                        .thenByDescending { it.first.timestampEpochMs }
+                )
+                .map { it.first }
+        }
+    }
+    val distanceByEncounterKey = remember(displayedEncounters, showDistance, currentLocation) {
+        if (!showDistance || currentLocation == null) {
+            emptyMap()
+        } else {
+            displayedEncounters.associate { encounter ->
+                "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}" to
+                    distanceForEncounterMeters(encounter, currentLocation)
+            }
         }
     }
 
@@ -8322,7 +8482,11 @@ private fun EncountersPage(
         }
         Text("Showing ${displayedEncounters.size} of ${encounters.size}")
         LazyColumn {
-            items(displayedEncounters) { encounter ->
+            items(
+                items = displayedEncounters,
+                key = { encounter -> "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}" },
+                contentType = { "encounter" }
+            ) { encounter ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -8354,7 +8518,9 @@ private fun EncountersPage(
                             Text("${secondaryIdLabel(encounter.source.name)}: ${encounter.secondaryId}")
                         }
                         if (showDistance) {
-                            val distanceMeters = distanceForEncounterMeters(encounter, currentLocation)
+                            val distanceMeters = distanceByEncounterKey[
+                                "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}"
+                            ]
                             Text(
                                 "Distance: ${distanceMeters?.let(::formatDistanceFeetMiles) ?: "n/a"}"
                             )
