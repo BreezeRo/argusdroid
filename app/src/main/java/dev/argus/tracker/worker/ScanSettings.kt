@@ -63,7 +63,7 @@ object ScanSettings {
     private const val SOURCE_TIMING_WINDOW_SIZE = 120
     private const val MAX_INTERVAL_CHANGE_EVENTS = 50
     private const val MAX_EVASION_ACTION_LOG_ENTRIES = 80
-    const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L * 60L
+    const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L
     const val MIN_PERIODIC_INTERVAL_SECONDS = 15L * 60L
     const val DEFAULT_CHAIN_SYNC_WINDOW_MINUTES = 120L
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
@@ -138,10 +138,12 @@ object ScanSettings {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val configuredSeconds = if (prefs.contains(KEY_SCAN_INTERVAL_SECONDS)) {
             prefs.getLong(KEY_SCAN_INTERVAL_SECONDS, DEFAULT_SCAN_INTERVAL_SECONDS)
-        } else {
-            // Migrate previous minute-based setting if present.
+        } else if (prefs.contains(LEGACY_KEY_SCAN_INTERVAL_MINUTES)) {
+            // Migrate previous minute-based setting only when the legacy key exists.
             val legacyMinutes = prefs.getLong(LEGACY_KEY_SCAN_INTERVAL_MINUTES, 15L)
             legacyMinutes * 60L
+        } else {
+            DEFAULT_SCAN_INTERVAL_SECONDS
         }
         return configuredSeconds.takeIf { it in ALLOWED_INTERVALS_SECONDS }
             ?: DEFAULT_SCAN_INTERVAL_SECONDS

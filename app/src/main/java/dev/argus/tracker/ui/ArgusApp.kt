@@ -2728,17 +2728,17 @@ private fun AppSettingsPage(
             Text("Settings", style = MaterialTheme.typography.headlineMedium)
         }
         item {
-            Text("Scan interval")
+            Text("Worker Cadence (Global Scheduler)", fontWeight = FontWeight.Bold)
         }
         item {
             Text(
-                "Current: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
+                "Current worker cadence: every ${ScanSettings.formatInterval(scanIntervalSeconds)}",
                 fontWeight = FontWeight.Medium
             )
         }
         item {
             Button(onClick = { expanded = true }) {
-                Text("Change interval")
+                Text("Change worker cadence")
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 ScanSettings.ALLOWED_INTERVALS_SECONDS.forEach { seconds ->
@@ -2751,6 +2751,12 @@ private fun AppSettingsPage(
                     )
                 }
             }
+        }
+        item {
+            Text("Worker cadence controls how often scan batches wake up.")
+        }
+        item {
+            Text("Per-source intervals are minimum per-source spacing; effective source cadence cannot exceed worker cadence.")
         }
         item {
             Text("Note: Under 15 min uses chained one-time work; 15+ min uses periodic work.")
