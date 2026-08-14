@@ -68,6 +68,7 @@ import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
@@ -83,6 +84,7 @@ import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
@@ -187,6 +189,7 @@ private const val MAP_CAMERA_BOUNDS_SAMPLE_LIMIT = 220
 private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
 private const val MAP_RENDER_PIN_LIMIT_FAR = 260
 private const val MAP_RENDER_PIN_LIMIT_MID = 420
+private const val DETECTION_TAB_MESH_INDEX = 4
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
 private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
@@ -195,6 +198,39 @@ private const val FOREIGN_RISK_MAX_ENCOUNTERS = 4000
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
 private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
+private const val GOOGLE_MAP_DARK_STYLE_JSON = """
+[
+    {"elementType":"geometry","stylers":[{"color":"#212121"}]},
+    {"elementType":"labels.icon","stylers":[{"visibility":"off"}]},
+    {"elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
+    {"elementType":"labels.text.stroke","stylers":[{"color":"#212121"}]},
+    {"featureType":"administrative","elementType":"geometry","stylers":[{"color":"#757575"}]},
+    {"featureType":"administrative.country","elementType":"labels.text.fill","stylers":[{"color":"#9e9e9e"}]},
+    {"featureType":"administrative.land_parcel","stylers":[{"visibility":"off"}]},
+    {"featureType":"administrative.locality","elementType":"labels.text.fill","stylers":[{"color":"#bdbdbd"}]},
+    {"featureType":"poi","elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
+    {"featureType":"poi.park","elementType":"geometry","stylers":[{"color":"#181818"}]},
+    {"featureType":"poi.park","elementType":"labels.text.fill","stylers":[{"color":"#616161"}]},
+    {"featureType":"poi.park","elementType":"labels.text.stroke","stylers":[{"color":"#1b1b1b"}]},
+    {"featureType":"road","elementType":"geometry.fill","stylers":[{"color":"#2c2c2c"}]},
+    {"featureType":"road","elementType":"labels.text.fill","stylers":[{"color":"#8a8a8a"}]},
+    {"featureType":"road.arterial","elementType":"geometry","stylers":[{"color":"#373737"}]},
+    {"featureType":"road.highway","elementType":"geometry","stylers":[{"color":"#3c3c3c"}]},
+    {"featureType":"road.highway.controlled_access","elementType":"geometry","stylers":[{"color":"#4e4e4e"}]},
+    {"featureType":"road.local","elementType":"labels.text.fill","stylers":[{"color":"#616161"}]},
+    {"featureType":"transit","elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
+    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#000000"}]},
+    {"featureType":"water","elementType":"labels.text.fill","stylers":[{"color":"#3d3d3d"}]}
+]
+"""
+
+@Composable
+private fun rememberMapStyleOptionsForTheme(): MapStyleOptions? {
+        val useDarkMapStyle = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        return remember(useDarkMapStyle) {
+                if (useDarkMapStyle) MapStyleOptions(GOOGLE_MAP_DARK_STYLE_JSON) else null
+        }
+}
 
 private enum class AlertLogType {
     APPROACH,
@@ -598,6 +634,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
     var lastWearStatusPublishEpochMs by remember { mutableStateOf(0L) }
     var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
+    var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
 
     val recent by viewModel.recentEncounters.collectAsState()
     val recent100 by viewModel.recent100Encounters.collectAsState()
@@ -1088,11 +1125,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 }
             }
         ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
             NavHost(
                 navController = navController,
                 startDestination = HOME_ROUTE,
                 modifier = Modifier
-                    .padding(padding)
+                    .fillMaxSize()
                     .padding(16.dp)
             ) {
             composable(HOME_ROUTE) {
@@ -1459,6 +1501,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
             composable(DETECTION_ROUTE) {
                 DetectionPage(
+                    initialTabRequest = detectionInitialTabRequest,
+                    onInitialTabRequestHandled = { detectionInitialTabRequest = null },
                     readinessItems = readinessItems,
                     encounters = recent,
                     meshInsightEncounters = allEncounters,
@@ -1796,6 +1840,45 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 )
             }
             }
+
+            if (chainLinkEnabled) {
+                val hasConnectedPeer = chainMesh.peers.any { it.state == ChainPeerState.CONNECTED }
+                val isConnecting = !hasConnectedPeer && chainMesh.peers.any {
+                    it.state == ChainPeerState.DISCOVERED || it.state == ChainPeerState.REQUESTED
+                }
+                val statusColor = when {
+                    hasConnectedPeer -> Color(0xFF2E7D32)
+                    isConnecting -> Color(0xFFE65100)
+                    else -> Color(0xFFB3261E)
+                }
+                val statusLabel = when {
+                    hasConnectedPeer -> "Connected"
+                    isConnecting -> "Connecting"
+                    else -> "Disconnected"
+                }
+
+                Card(
+                    modifier = Modifier
+                        .align(androidx.compose.ui.Alignment.BottomStart)
+                        .padding(12.dp)
+                        .clickable {
+                            detectionInitialTabRequest = DETECTION_TAB_MESH_INDEX
+                            navController.navigate(DETECTION_ROUTE) {
+                                launchSingleTop = true
+                            }
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("●", color = statusColor, fontWeight = FontWeight.Bold)
+                        Text("Mesh", fontWeight = FontWeight.Medium)
+                        Text(statusLabel, color = statusColor, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+            }
         }
     }
 }
@@ -1812,6 +1895,7 @@ private fun ApproachAlertMapPage(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
     }
@@ -1981,6 +2065,7 @@ private fun ApproachAlertMapPage(
                 .fillMaxWidth()
                 .weight(1f),
             cameraPositionState = cameraPositionState,
+            properties = MapProperties(mapStyleOptions = mapStyleOptions),
             uiSettings = MapUiSettings(zoomControlsEnabled = true)
         ) {
             observerLocation
@@ -3043,6 +3128,7 @@ private fun ChainMeshVisualizer(
     sharePreciseLocationEnabled: Boolean
 ) {
     val context = LocalContext.current
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
     var localLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
     val hasLocalLocation = remember(localLocation) {
@@ -3133,6 +3219,7 @@ private fun ChainMeshVisualizer(
                     GoogleMap(
                         modifier = Modifier.fillMaxSize(),
                         cameraPositionState = cameraPositionState,
+                        properties = MapProperties(mapStyleOptions = mapStyleOptions),
                         uiSettings = MapUiSettings(
                             zoomControlsEnabled = true,
                             zoomGesturesEnabled = true,
@@ -3186,6 +3273,8 @@ private fun ChainMeshVisualizer(
 
 @Composable
 private fun DetectionPage(
+    initialTabRequest: Int?,
+    onInitialTabRequestHandled: () -> Unit,
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     meshInsightEncounters: List<Encounter>,
@@ -3232,6 +3321,13 @@ private fun DetectionPage(
     val deviceMapLiveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
     val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
     val tabs = listOf("Status", "Devices", "Signal", "Map", "Mesh")
+
+    LaunchedEffect(initialTabRequest) {
+        val requestedTab = initialTabRequest ?: return@LaunchedEffect
+        selectedTab = requestedTab.coerceIn(0, tabs.lastIndex)
+        onInitialTabRequestHandled()
+    }
+
     val isDeviceLocationTabActive = selectedTab == 3
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
@@ -4697,8 +4793,12 @@ private fun DetectionMapPage(
         }
     }
     val scrollState = if (useScrollableLayout) rememberScrollState() else null
-    val mapProperties = remember(hasLocationPermission) {
-        MapProperties(isMyLocationEnabled = hasLocationPermission)
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
+    val mapProperties = remember(hasLocationPermission, mapStyleOptions) {
+        MapProperties(
+            isMyLocationEnabled = hasLocationPermission,
+            mapStyleOptions = mapStyleOptions
+        )
     }
 
     val currentLocation by LocationSnapshotProvider.observe(
@@ -5474,6 +5574,7 @@ private fun MovingDevicePathMapPage(
     onOpenDeviceDetails: (String, String) -> Unit,
     onBack: () -> Unit
 ) {
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
     }
@@ -5545,6 +5646,7 @@ private fun MovingDevicePathMapPage(
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraPositionState,
+                properties = MapProperties(mapStyleOptions = mapStyleOptions),
                 uiSettings = MapUiSettings(
                     zoomControlsEnabled = true,
                     zoomGesturesEnabled = true,
@@ -6575,7 +6677,12 @@ private fun readCellTowerFields(rawPayloadJson: String): List<Pair<String, Strin
         }
 
         "NR" -> {
-            addIfPresent("NR Cell ID (NCI)", "nci")
+            val nciRaw = payload.optString("nciRaw", "").trim()
+            if (nciRaw.isNotBlank()) {
+                fields += "NR Cell ID (NCI)" to nciRaw
+            } else {
+                addIfPresent("NR Cell ID (NCI)", "nci")
+            }
             addIfPresent("Tracking Area Code (TAC)", "tac")
             addIfPresent("Physical Cell ID (PCI)", "pci")
             addIfPresent("NRARFCN", "nrarfcn")
@@ -8870,6 +8977,7 @@ private fun EncounterDetailMapSection(
     encounter: Encounter,
     currentLocation: DetectionLocation?
 ) {
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
     var zoomControlsEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(true) }
     var compassEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(true) }
     var mapToolbarEnabled by rememberSaveable(encounter.source.name, encounter.primaryId) { mutableStateOf(false) }
@@ -8990,6 +9098,7 @@ private fun EncounterDetailMapSection(
                         .fillMaxWidth()
                         .height(220.dp),
                     cameraPositionState = cameraPositionState,
+                    properties = MapProperties(mapStyleOptions = mapStyleOptions),
                     uiSettings = MapUiSettings(
                         zoomControlsEnabled = zoomControlsEnabled,
                         compassEnabled = compassEnabled,
@@ -9064,6 +9173,7 @@ private fun DeviceDetailMapSection(
     realtimeEnabled: Boolean,
     onRealtimeEnabledChanged: (Boolean) -> Unit
 ) {
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
     var zoomControlsEnabled by rememberSaveable(source, primaryId) { mutableStateOf(true) }
     var compassEnabled by rememberSaveable(source, primaryId) { mutableStateOf(true) }
     var mapToolbarEnabled by rememberSaveable(source, primaryId) { mutableStateOf(false) }
@@ -9203,6 +9313,7 @@ private fun DeviceDetailMapSection(
                         .fillMaxWidth()
                         .height(220.dp),
                     cameraPositionState = cameraPositionState,
+                    properties = MapProperties(mapStyleOptions = mapStyleOptions),
                     uiSettings = MapUiSettings(
                         zoomControlsEnabled = zoomControlsEnabled,
                         compassEnabled = compassEnabled,

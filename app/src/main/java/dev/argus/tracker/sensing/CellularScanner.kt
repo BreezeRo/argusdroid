@@ -17,6 +17,7 @@ import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
 import dev.argus.tracker.worker.ScanSettings
+import java.math.BigInteger
 import org.json.JSONObject
 
 class CellularScanner(
@@ -102,9 +103,7 @@ class CellularScanner(
 
             is CellInfoNr -> {
                 val id = cellIdentity as? CellIdentityNr ?: return null
-                val nci = runCatching { id.nci }.getOrNull()
-                    ?: runCatching { id.javaClass.getMethod("getNci").invoke(id) as Long }.getOrNull()
-                    ?: Long.MAX_VALUE
+                val nciIdentity = extractNrNciIdentity(id)
                 val pci = runCatching { id.pci }.getOrNull()
                     ?: runCatching { id.javaClass.getMethod("getPci").invoke(id) as Int }.getOrNull()
                     ?: Int.MAX_VALUE
@@ -147,7 +146,8 @@ class CellularScanner(
                 }
                 payload
                     .put("radio", "NR")
-                    .put("nci", nci)
+                    .put("nci", nciIdentity.nci ?: JSONObject.NULL)
+                    .put("nciRaw", nciIdentity.rawValue ?: JSONObject.NULL)
                     .put("pci", if (pci == Int.MAX_VALUE) JSONObject.NULL else pci)
                     .put("tac", if (tac == Int.MAX_VALUE) JSONObject.NULL else tac)
                     .put("nrarfcn", if (nrarfcn == Int.MAX_VALUE) JSONObject.NULL else nrarfcn)
@@ -161,7 +161,7 @@ class CellularScanner(
                 Encounter(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
-                    primaryId = "nr:${if (nci == Long.MAX_VALUE) "unknown" else nci}:${if (pci == Int.MAX_VALUE) "unknown" else pci}:${if (tac == Int.MAX_VALUE) "unknown" else tac}",
+                    primaryId = "nr:${nciIdentity.displayValue ?: "unknown"}:${if (pci == Int.MAX_VALUE) "unknown" else pci}:${if (tac == Int.MAX_VALUE) "unknown" else tac}",
                     secondaryId = "NR",
                     rssiDbm = if (dbm == Int.MIN_VALUE) null else dbm,
                     frequencyMhz = null,
@@ -248,6 +248,58 @@ class CellularScanner(
 
             else -> null
         }
+    }
+
+    private data class NrNciIdentity(
+        val nci: Long?,
+        val rawValue: String?,
+        val displayValue: String?
+    )
+
+    private fun extractNrNciIdentity(id: CellIdentityNr): NrNciIdentity {
+        val raw = runCatching<Any?> { id.nci }.getOrNull()
+            ?: runCatching<Any?> { id.javaClass.getMethod("getNci").invoke(id) }.getOrNull()
+        if (raw == null) {
+            return NrNciIdentity(nci = null, rawValue = null, displayValue = null)
+        }
+
+        val rawString = raw.toString().trim().takeIf { it.isNotEmpty() }
+        val parsedBigInt = rawString?.let { runCatching { BigInteger(it) }.getOrNull() }
+
+        if (parsedBigInt != null) {
+            if (parsedBigInt.signum() < 0) {
+                return NrNciIdentity(nci = null, rawValue = null, displayValue = null)
+            }
+            return if (parsedBigInt <= BigInteger.valueOf(Long.MAX_VALUE)) {
+                val safeNci = parsedBigInt.toLong()
+                if (safeNci == Long.MAX_VALUE) {
+                    NrNciIdentity(nci = null, rawValue = null, displayValue = null)
+                } else {
+                    NrNciIdentity(
+                        nci = safeNci,
+                        rawValue = parsedBigInt.toString(),
+                        displayValue = parsedBigInt.toString()
+                    )
+                }
+            } else {
+                NrNciIdentity(
+                    nci = null,
+                    rawValue = parsedBigInt.toString(),
+                    displayValue = parsedBigInt.toString()
+                )
+            }
+        }
+
+        val numericLong = (raw as? Number)?.toLong()
+        if (numericLong != null && numericLong >= 0L && numericLong != Long.MAX_VALUE) {
+            return NrNciIdentity(
+                nci = numericLong,
+                rawValue = numericLong.toString(),
+                displayValue = numericLong.toString()
+            )
+        }
+
+        return NrNciIdentity(nci = null, rawValue = rawString, displayValue = rawString)
     }
 
     private companion object {
