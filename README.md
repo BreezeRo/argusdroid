@@ -37,6 +37,23 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Settings now include two explicit reset actions:
 	- Soft Reset: clears local encounters/devices and operational logs.
 	- Hard Reset: runs Soft Reset and also clears mesh network settings.
+- Settings page is organized into tabbed sections for:
+	- Appearance
+	- Scheduling
+	- Detection
+	- Notifications
+	- Data
+- Appearance settings include app theme mode selection:
+	- System
+	- Light
+	- Dark
+- Notifications settings include explicit per-type toggles for:
+	- Approach notifications
+	- Tracker suspicion alerts
+	- Foreign signal alerts
+	- Magnetic disturbance alerts
+	- Mesh peer connectivity alerts
+	- Mesh wipe lifecycle alerts
 - Settings includes app-wide backup/restore actions:
 	- Export Backup / Import Latest Backup for plain JSON snapshots.
 	- Export Encrypted Backup / Import Latest Encrypted for passphrase-protected snapshots.
@@ -127,6 +144,13 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 	- Dual-pin rendering for local observer vs foreign device/encounter when both positions exist.
 	- Small automatic pin separation (about 2.5 ft) when positions overlap so both markers remain visible.
 
+### Wear OS companion
+
+- Dedicated Wear module (`wear/`) for direct watch deployment.
+- Watch status page receives mesh/alert/device map payloads from phone over Wear Data Layer.
+- Watch Device Map now uses native Google Maps markers (newest marker highlighted).
+- Watch map input points are generated from per-device resolved locations (including inferred Wi-Fi/BLE and Remote ID broadcast coordinates).
+
 ### Evasion posture controls
 
 - Evasion tab provides posture profiles (Quiet, Balanced, Watch) that control in-app sensor gates and cadence behavior.
@@ -205,7 +229,7 @@ Option B: environment variable
 
 - Set MAPS_API_KEY in your shell/session before launching Gradle/Android Studio.
 
-The app manifest consumes MAPS_API_KEY via Gradle manifest placeholders.
+Both phone and wear manifests consume MAPS_API_KEY via Gradle manifest placeholders.
 
 ## Runtime permissions
 
@@ -281,6 +305,7 @@ If a sensor is disabled from Home, that scanner is skipped in both scheduled and
 ## Repository layout
 
 - app: Android application module
+- wear: Wear OS companion application module
 - dashboard: static view-only web dashboard (map + operational summaries)
 - docs/architecture.md: architecture and data flow
 - docs/capabilities-and-limits.md: practical platform constraints
