@@ -138,6 +138,8 @@ import dev.argus.tracker.wear.WearDevicePoint
 import dev.argus.tracker.wear.WearStatusBridgePublisher
 import dev.argus.tracker.worker.ScanSettings
 import dev.argus.tracker.worker.WorkScheduler
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -2623,13 +2625,25 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         }
                     },
                     onWipeMeshData = {
-                        val wipe = app.container.chainLinkCoordinator.wipeMeshDataAcrossPeers()
-                        viewModel.refreshSummary()
-                        when {
-                            !wipe.enabled -> "Local soft reset applied (encounters/devices/logs). Chain link is disabled, so no remote peers were targeted."
-                            !wipe.authConfigured -> "Local soft reset applied (encounters/devices/logs). Configure a shared chain passphrase to wipe linked peers."
-                            wipe.failures > 0 -> "Soft reset incomplete across mesh: local cleared, peers reset ${wipe.peersWiped}/${wipe.peersTargeted}, failures ${wipe.failures}. Scan gate remains active until all targeted peers complete reset."
-                            else -> "Soft reset completed across mesh: local + peers reset ${wipe.peersWiped}/${wipe.peersTargeted}. Scan gate released across mesh."
+                        coroutineScope {
+                            val wipeDeferred = async {
+                                app.container.chainLinkCoordinator.wipeMeshDataAcrossPeers()
+                            }
+
+                            repeat(4) {
+                                delay(250L)
+                                viewModel.refreshSummary()
+                                if (wipeDeferred.isCompleted) return@repeat
+                            }
+
+                            val wipe = wipeDeferred.await()
+                            viewModel.refreshSummary()
+                            when {
+                                !wipe.enabled -> "Local soft reset applied (encounters/devices/logs). Chain link is disabled, so no remote peers were targeted."
+                                !wipe.authConfigured -> "Local soft reset applied (encounters/devices/logs). Configure a shared chain passphrase to wipe linked peers."
+                                wipe.failures > 0 -> "Soft reset incomplete across mesh: local cleared, peers reset ${wipe.peersWiped}/${wipe.peersTargeted}, failures ${wipe.failures}. Scan gate remains active until all targeted peers complete reset."
+                                else -> "Soft reset completed across mesh: local + peers reset ${wipe.peersWiped}/${wipe.peersTargeted}. Scan gate released across mesh."
+                            }
                         }
                     }
                 )
@@ -3827,7 +3841,7 @@ private fun AppSettingsPage(
     var defaultsResetInProgress by remember { mutableStateOf(false) }
     var selectedSettingsTab by rememberSaveable { mutableStateOf(0) }
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
-    val settingsTabs = listOf("Appearance", "Scheduling", "Detection", "Notifications", "Data")
+    val settingsTabs = listOf("Look", "Schedule", "Detection", "Alerts", "Data")
     val intervalSourceTypes = ScanSettings.SOURCE_TYPES.filterNot {
         it == SourceCatalog.KEY_WIFI_DIRECT ||
             it == SourceCatalog.KEY_BT_CLASSIC ||
@@ -3875,7 +3889,7 @@ private fun AppSettingsPage(
                     Tab(
                         selected = selectedSettingsTab == index,
                         onClick = { selectedSettingsTab = index },
-                        text = { Text(label) }
+                        text = { Text(label, fontSize = 12.sp) }
                     )
                 }
             }
@@ -5139,6 +5153,20 @@ private fun DetectionPage(
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
     val tabs = listOf("Status", "Device", "Flock", "Signal", "Map", "Mesh")
+    var mapLiveNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    val mapLiveTickerEnabled = selectedTab == 4 && (
+        (selectedMapSubTab == 0 && liveOnlyOnDeviceMap) ||
+            (selectedMapSubTab == 2 && liveOnlyOnBluetoothMap)
+        )
+
+    LaunchedEffect(mapLiveTickerEnabled, liveMapUpdateIntervalSeconds) {
+        if (!mapLiveTickerEnabled) return@LaunchedEffect
+        val tickMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
+        tickerFlow(periodMs = tickMs).collect { now ->
+            mapLiveNowEpochMs = now
+        }
+    }
 
     LaunchedEffect(initialTabRequest) {
         val requestedTab = initialTabRequest ?: return@LaunchedEffect
@@ -5147,6 +5175,20 @@ private fun DetectionPage(
     }
 
     val isDeviceLocationTabActive = selectedTab == 4 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)
+    val isDeviceMapActive = selectedTab == 4 && selectedMapSubTab == 0
+    val isBluetoothMapActive = selectedTab == 4 && selectedMapSubTab == 2
+    val useFullHistoryForActiveDeviceLocationMap =
+        (isDeviceMapActive && !liveOnlyOnDeviceMap && !movingOnlyOnDeviceMap && !sinceSnapshotOnlyOnDeviceMap) ||
+            (isBluetoothMapActive && !liveOnlyOnBluetoothMap && !movingOnlyOnBluetoothMap && !sinceSnapshotOnlyOnBluetoothMap)
+    val scopedMapSources: Set<EncounterSource>? = if (isBluetoothMapActive) {
+        setOf(
+            EncounterSource.BLUETOOTH_LE,
+            EncounterSource.BLUETOOTH_CLASSIC,
+            EncounterSource.BLUETOOTH_LE_SWEEP
+        )
+    } else {
+        null
+    }
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
@@ -5171,6 +5213,8 @@ private fun DetectionPage(
 
     LaunchedEffect(
         isDeviceLocationTabActive,
+        useFullHistoryForActiveDeviceLocationMap,
+        scopedMapSources,
         meshInsightEncounters,
         approachDetectionEnabled,
         ownedDeviceKeys,
@@ -5191,23 +5235,37 @@ private fun DetectionPage(
         val trackerHomePoint = ScanSettings.getHomePoint(context)
 
         allDeviceCandidates = withContext(Dispatchers.Default) {
-            val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { encounter ->
+            val sourceScopedEncounters = scopedMapSources?.let { allowed ->
+                meshInsightEncounters.filter { encounter -> encounter.source in allowed }
+            } ?: meshInsightEncounters
+
+            val latestSnapshotEpochMs = sourceScopedEncounters.maxOfOrNull { encounter ->
                 encounterFreshnessEpochMs(encounter)
             }
             val latestSnapshot = latestSnapshotEpochMs ?: Long.MIN_VALUE
-            val recentSnapshotEncounters = meshInsightEncounters.filter { encounter ->
-                val sourceType = scanTypeKeyForSourceName(encounter.source.name)
-                val recentWindowMs = mapRecentWindowMsForSource(
-                    sourceType = sourceType,
-                    sourceScanIntervals = sourceScanIntervals,
-                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                )
-                encounterFreshnessEpochMs(encounter) >= latestSnapshot - recentWindowMs
+            val candidateEncounters = if (useFullHistoryForActiveDeviceLocationMap) {
+                sourceScopedEncounters
+            } else {
+                sourceScopedEncounters.filter { encounter ->
+                    val sourceType = scanTypeKeyForSourceName(encounter.source.name)
+                    val recentWindowMs = mapRecentWindowMsForSource(
+                        sourceType = sourceType,
+                        sourceScanIntervals = sourceScanIntervals,
+                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                    )
+                    encounterFreshnessEpochMs(encounter) >= latestSnapshot - recentWindowMs
+                }
             }
 
-            val groupedByDevice = recentSnapshotEncounters
+            val groupedByDevice = candidateEncounters
                 .asSequence()
                 .groupBy { "${it.source.name}|${it.primaryId}" }
+
+            val candidateTakeLimit = if (useFullHistoryForActiveDeviceLocationMap) {
+                maxDeviceCandidatesToResolve.coerceAtLeast(2_000).coerceAtMost(10_000)
+            } else {
+                maxDeviceCandidatesToResolve
+            }
 
             groupedByDevice
                 .values
@@ -5230,12 +5288,12 @@ private fun DetectionPage(
                     latest to deviceEncounters
                 }
                 .sortedByDescending { (latest, _) -> encounterFreshnessEpochMs(latest) }
-                .take(maxDeviceCandidatesToResolve)
+                .take(candidateTakeLimit)
                 .map { (latest, deviceEncounters) ->
                     val preferredSecondaryId = bestSecondaryId(deviceEncounters)
                     val isCameraSource = latest.source == EncounterSource.CAMERA
                     val owned = OwnedDeviceRegistry.keyFor(latest.source.name, latest.primaryId) in ownedDeviceKeys
-                    val approachSignal = if (approachDetectionEnabled && !isCameraSource) {
+                    val approachSignal = if (approachDetectionEnabled && isApproachEligibleSource(latest.source)) {
                         analyzeApproachSignal(deviceEncounters)
                     } else {
                         null
@@ -5539,8 +5597,7 @@ private fun DetectionPage(
             }
         }
 
-        val latestResolvedEpochMs = resolvedCandidates.maxOfOrNull { it.latestTimestampEpochMs }
-        val latestResolved = latestResolvedEpochMs ?: Long.MIN_VALUE
+        val nowEpochMs = System.currentTimeMillis()
 
         val resolvedPins = resolvedCandidates.mapNotNull { candidate ->
             val location = candidate.approximateLocation ?: return@mapNotNull null
@@ -5564,7 +5621,7 @@ private fun DetectionPage(
                 sourceScanIntervals = sourceScanIntervals,
                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
             )
-            val liveCutoffForSource = latestResolved - liveWindowMs
+            val liveCutoffForSource = nowEpochMs - liveWindowMs
             val isLive = candidate.latestTimestampEpochMs >= liveCutoffForSource
 
             val rangeSnippet = candidate.approximateRangeMeters
@@ -5709,7 +5766,7 @@ private fun DetectionPage(
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
-                    text = { Text(title, fontSize = 13.sp) }
+                    text = { Text(title, fontSize = 12.sp) }
                 )
             }
         }
@@ -5881,11 +5938,13 @@ private fun DetectionPage(
                         deviceMapCurrentLocation,
                         deviceMapAircraftRadiusMeters,
                         liveOnlyOnDeviceMap,
+                        mapLiveNowEpochMs,
                         movingOnlyOnDeviceMap,
                         sinceSnapshotOnlyOnDeviceMap,
                         deviceMapSnapshotEpochMs
                     ) {
                         value = withContext(Dispatchers.Default) {
+                            val nowEpochMs = mapLiveNowEpochMs
                             estimatedDeviceLocationPins
                                 .asSequence()
                                 .filter { pin ->
@@ -5903,7 +5962,16 @@ private fun DetectionPage(
                                     }
                                 }
                                 .filter { pin ->
-                                    if (!liveOnlyOnDeviceMap) true else pin.isLive
+                                    if (!liveOnlyOnDeviceMap) {
+                                        true
+                                    } else {
+                                        isMapPinLiveNow(
+                                            pin = pin,
+                                            nowEpochMs = nowEpochMs,
+                                            sourceScanIntervals = sourceScanIntervals,
+                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                                        )
+                                    }
                                 }
                                 .filter { pin ->
                                     if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
@@ -6110,19 +6178,31 @@ private fun DetectionPage(
                         estimatedDeviceLocationPins,
                         bluetoothMapPinLimit,
                         liveOnlyOnBluetoothMap,
+                        mapLiveNowEpochMs,
                         movingOnlyOnBluetoothMap,
                         sinceSnapshotOnlyOnBluetoothMap,
                         bluetoothMapSnapshotEpochMs
                     ) {
                         value = withContext(Dispatchers.Default) {
+                            val nowEpochMs = mapLiveNowEpochMs
                             estimatedDeviceLocationPins
                                 .asSequence()
                                 .filter { pin ->
                                     pin.source == EncounterSource.BLUETOOTH_LE.name ||
-                                        pin.source == EncounterSource.BLUETOOTH_CLASSIC.name
+                                        pin.source == EncounterSource.BLUETOOTH_CLASSIC.name ||
+                                        pin.source == EncounterSource.BLUETOOTH_LE_SWEEP.name
                                 }
                                 .filter { pin ->
-                                    if (!liveOnlyOnBluetoothMap) true else pin.isLive
+                                    if (!liveOnlyOnBluetoothMap) {
+                                        true
+                                    } else {
+                                        isMapPinLiveNow(
+                                            pin = pin,
+                                            nowEpochMs = nowEpochMs,
+                                            sourceScanIntervals = sourceScanIntervals,
+                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                                        )
+                                    }
                                 }
                                 .filter { pin ->
                                     if (!movingOnlyOnBluetoothMap) true else pin.motionBadge == "MOVING"
@@ -6132,7 +6212,7 @@ private fun DetectionPage(
                                         true
                                     } else {
                                         val snapshotEpoch = bluetoothMapSnapshotEpochMs
-                                        snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                                        snapshotEpoch == null || pin.timestampEpochMs >= snapshotEpoch
                                     }
                                 }
                                 .toList()
@@ -7679,13 +7759,25 @@ private fun DetectionMapPage(
             }
         }
     }
+    val showAllHistoryVisualMode =
+        showLiveOnlyControl &&
+            !liveOnlyEnabled &&
+            (!showMovingOnlyControl || !movingOnlyEnabled) &&
+            (!showSinceSnapshotControl || !sinceSnapshotEnabled)
+
     var displayFilteredPins by remember { mutableStateOf<List<MapPin>>(filteredVisiblePins) }
-    LaunchedEffect(filteredVisiblePins, identityModeEnabled) {
+    LaunchedEffect(filteredVisiblePins, identityModeEnabled, showAllHistoryVisualMode) {
         displayFilteredPins = withContext(Dispatchers.Default) {
-            if (!identityModeEnabled) {
-                filteredVisiblePins
+            val basePins = if (showAllHistoryVisualMode) {
+                filteredVisiblePins.map { pin -> pin.copy(isLive = true) }
             } else {
-                filteredVisiblePins.map { pin ->
+                filteredVisiblePins
+            }
+
+            if (!identityModeEnabled) {
+                basePins
+            } else {
+                basePins.map { pin ->
                     val identityName = pin.secondaryId
                         ?.trim()
                         ?.takeIf { value -> value.isNotBlank() }
@@ -10384,6 +10476,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
     suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): List<MapPin> {
     if (encounters.isEmpty()) return emptyList()
+    val nowEpochMs = System.currentTimeMillis()
 
     val latestSnapshotEpochMs = encounters.maxOfOrNull { encounter ->
         encounterFreshnessEpochMs(encounter)
@@ -10437,7 +10530,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
 
         val isCameraSource = sourceEnum == EncounterSource.CAMERA
         val motionSignal = if (isCameraSource) null else analyzeMotionSignal(deviceEncounters)
-        val approachSignal = if (approachDetectionEnabled && !isCameraSource) {
+        val approachSignal = if (approachDetectionEnabled && isApproachEligibleSource(sourceEnum)) {
             analyzeApproachSignal(deviceEncounters)
         } else {
             null
@@ -10449,7 +10542,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
         )
         val latestFreshnessEpochMs = encounterFreshnessEpochMs(latest)
-        val isLive = latestFreshnessEpochMs >= (latestSnapshotEpochMs - liveWindowMs)
+        val isLive = latestFreshnessEpochMs >= (nowEpochMs - liveWindowMs)
         val motionBadge = if (isCameraSource) {
             null
         } else {
@@ -11413,7 +11506,12 @@ private fun mapLiveWindowMsForSource(
 ): Long {
     val intervalMs = mapSourceIntervalSeconds(sourceType, sourceScanIntervals).coerceAtLeast(1L) * 1000L
     val mapTickMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
-    val minimumMs = if (sourceType == SourceCatalog.KEY_AIRCRAFT) 300_000L else 15_000L
+    val minimumMs = when (sourceType) {
+        SourceCatalog.KEY_AIRCRAFT -> 300_000L
+        // NFC is event-driven and does not scan continuously, so keep a longer live grace window.
+        SourceCatalog.KEY_NFC -> 300_000L
+        else -> 15_000L
+    }
     return maxOf(minimumMs, intervalMs * 2L, mapTickMs * 2L)
 }
 
@@ -11425,6 +11523,21 @@ private fun mapRecentWindowMsForSource(
     val liveWindowMs = mapLiveWindowMsForSource(sourceType, sourceScanIntervals, liveMapUpdateIntervalSeconds)
     val minimumRecentMs = if (sourceType == SourceCatalog.KEY_AIRCRAFT) 600_000L else 120_000L
     return maxOf(minimumRecentMs, liveWindowMs * 2L)
+}
+
+private fun isMapPinLiveNow(
+    pin: MapPin,
+    nowEpochMs: Long,
+    sourceScanIntervals: Map<String, Long>,
+    liveMapUpdateIntervalSeconds: Long
+): Boolean {
+    val sourceType = scanTypeKeyForSourceName(pin.source)
+    val liveWindowMs = mapLiveWindowMsForSource(
+        sourceType = sourceType,
+        sourceScanIntervals = sourceScanIntervals,
+        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+    )
+    return pin.timestampEpochMs >= (nowEpochMs - liveWindowMs)
 }
 
 private fun suggestSafeIntervalSeconds(referenceDurationMs: Long): Long {
@@ -12552,6 +12665,18 @@ private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? 
         confidence = confidence,
         deltaMeters = deltaMeters
     )
+}
+
+private fun isApproachEligibleSource(source: EncounterSource): Boolean {
+    return source != EncounterSource.CAMERA &&
+        source != EncounterSource.WIFI_SWEEP &&
+    source != EncounterSource.BLUETOOTH_LE_SWEEP
+}
+
+private fun isApproachEligibleSource(source: String): Boolean {
+    return source != EncounterSource.CAMERA.name &&
+        source != EncounterSource.WIFI_SWEEP.name &&
+    source != EncounterSource.BLUETOOTH_LE_SWEEP.name
 }
 
 private fun analyzeMotionSignal(encounters: List<Encounter>): MotionSignal? {
@@ -14759,7 +14884,7 @@ private fun buildDeviceItemForGroup(
     }
     val owned = OwnedDeviceRegistry.keyFor(source, primaryId) in ownedDeviceKeys
     val isCameraSource = source == EncounterSource.CAMERA.name
-    val approachSignal = if (approachDetectionEnabled && !isCameraSource) {
+    val approachSignal = if (approachDetectionEnabled && isApproachEligibleSource(source)) {
         analyzeApproachSignal(groupedEncounters)
     } else {
         null
