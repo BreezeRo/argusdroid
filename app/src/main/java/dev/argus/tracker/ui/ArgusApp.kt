@@ -5081,7 +5081,7 @@ private fun DetectionPage(
                     Tab(
                         selected = selectedMapSubTab == 1,
                         onClick = { selectedMapSubTab = 1 },
-                        text = { Text("Flight Map") }
+                        text = { Text("Aircraft Map") }
                     )
                 }
 
@@ -5203,7 +5203,7 @@ private fun DetectionPage(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Enable ADS-B (Aviation) or Public Flight Radar under Status > Sensors to view Flight Map."
+                                    text = "Enable ADS-B (Aviation) or Public Flight Radar under Status > Sensors to view Aircraft Map."
                                 )
                                 Button(onClick = { selectedTab = 0 }) {
                                     Text("Open Status > Sensors")
@@ -5250,7 +5250,7 @@ private fun DetectionPage(
                             }
                         }
                         DetectionMapPage(
-                            mapTitle = "Flight Map",
+                            mapTitle = "Aircraft Map",
                             mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
                             currentLocationOverride = flightMapCurrentLocation,
                             noFlyZones = noFlyZoneOverlays,
@@ -7638,7 +7638,7 @@ private fun DetectionMapPage(
                                     fontWeight = FontWeight.Medium
                                 )
                             }
-                            if (mapTitle == "Flight Map") {
+                            if (mapTitle == "Aircraft Map") {
                                 val perf = aviationPerfSnapshot
                                 if (perf != null) {
                                     Text("Aviation perf:", fontWeight = FontWeight.Bold)
