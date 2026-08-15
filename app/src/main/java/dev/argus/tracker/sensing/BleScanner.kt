@@ -59,9 +59,10 @@ class BleScanner(
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
                     observedEvents += 1
                     val encounter = result.toEncounter(location)
-                    val existing = captured[encounter.primaryId]
+                    val encounterKey = "${encounter.source.name}|${encounter.primaryId}"
+                    val existing = captured[encounterKey]
                     if (existing == null || (encounter.rssiDbm ?: Int.MIN_VALUE) > (existing.rssiDbm ?: Int.MIN_VALUE)) {
-                        captured[encounter.primaryId] = encounter
+                        captured[encounterKey] = encounter
                     }
                 }
 
@@ -273,7 +274,22 @@ class BleScanner(
         location: DetectionLocation?,
         aggregateOnly: Boolean
     ): List<Encounter> {
-        if (encounters.isEmpty()) return emptyList()
+        if (encounters.isEmpty()) {
+            return if (observedEvents > 0) {
+                listOf(
+                    buildBleSweepEncounter(
+                        bleEncounters = emptyList(),
+                        observedEvents = observedEvents,
+                        location = location,
+                        remoteIdCount = 0,
+                        retainedBleCount = 0,
+                        aggregateOnly = aggregateOnly
+                    )
+                )
+            } else {
+                emptyList()
+            }
+        }
 
         val remoteIdEncounters = encounters.filter { it.source == EncounterSource.REMOTE_ID }
         val bleEncounters = encounters.filter { it.source == EncounterSource.BLUETOOTH_LE }
