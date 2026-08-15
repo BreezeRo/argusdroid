@@ -79,29 +79,31 @@ class AcousticRealtimeForegroundService : Service() {
 
             while (isActive && AcousticRealtimeForegroundServiceController.shouldRun(applicationContext)) {
                 val startedAt = System.currentTimeMillis()
-                val window = captureAudioWindow()
                 var hadRealtimeCapture = false
+                runCatching {
+                    val window = captureAudioWindow()
 
-                if (window != null) {
-                    hadRealtimeCapture = true
-                    val nowEpochMs = System.currentTimeMillis()
-                    val encountersToInsert = mutableListOf<Encounter>()
+                    if (window != null) {
+                        hadRealtimeCapture = true
+                        val nowEpochMs = System.currentTimeMillis()
+                        val encountersToInsert = mutableListOf<Encounter>()
 
-                    if ((nowEpochMs - lastTelemetryPublishEpochMs) >= TELEMETRY_MIN_PUBLISH_INTERVAL_MS) {
-                        buildRealtimeTelemetryEncounter(window, locationProviderContext, nowEpochMs)?.let { telemetry ->
-                            encountersToInsert += telemetry
-                            lastTelemetryPublishEpochMs = nowEpochMs
+                        if ((nowEpochMs - lastTelemetryPublishEpochMs) >= TELEMETRY_MIN_PUBLISH_INTERVAL_MS) {
+                            buildRealtimeTelemetryEncounter(window, locationProviderContext, nowEpochMs)?.let { telemetry ->
+                                encountersToInsert += telemetry
+                                lastTelemetryPublishEpochMs = nowEpochMs
+                            }
                         }
-                    }
 
-                    if (ScanSettings.isForeignDirectAcousticGunshotEnabled(applicationContext)) {
-                        detectExperimentalGunshot(window, locationProviderContext)?.let { gunshotCandidate ->
-                            encountersToInsert += gunshotCandidate
+                        if (ScanSettings.isForeignDirectAcousticGunshotEnabled(applicationContext)) {
+                            detectExperimentalGunshot(window, locationProviderContext)?.let { gunshotCandidate ->
+                                encountersToInsert += gunshotCandidate
+                            }
                         }
-                    }
 
-                    if (encountersToInsert.isNotEmpty()) {
-                        runCatching { repository.insertBatch(encountersToInsert) }
+                        if (encountersToInsert.isNotEmpty()) {
+                            runCatching { repository.insertBatch(encountersToInsert) }
+                        }
                     }
                 }
 
@@ -181,34 +183,46 @@ class AcousticRealtimeForegroundService : Service() {
 
         val readSamples = 2_048
         val bufferSize = (minBuffer * 2).coerceAtLeast(readSamples * 2)
-        val recorder = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRateHz,
-            channelConfig,
-            encoding,
-            bufferSize
-        )
-
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            return null
+        val audioSources = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                add(MediaRecorder.AudioSource.UNPROCESSED)
+            }
+            add(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            add(MediaRecorder.AudioSource.MIC)
+            add(MediaRecorder.AudioSource.CAMCORDER)
+            add(MediaRecorder.AudioSource.DEFAULT)
         }
 
-        val samples = ShortArray(readSamples)
-        val capturedCount = runCatching {
-            recorder.startRecording()
-            recorder.read(samples, 0, samples.size)
-        }.getOrDefault(0)
+        audioSources.forEach { source ->
+            val recorder = runCatching {
+                AudioRecord(source, sampleRateHz, channelConfig, encoding, bufferSize)
+            }.getOrNull() ?: return@forEach
 
-        runCatching {
-            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                recorder.stop()
+            try {
+                if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                    return@forEach
+                }
+
+                val samples = ShortArray(readSamples)
+                val capturedCount = runCatching {
+                    recorder.startRecording()
+                    recorder.read(samples, 0, samples.size)
+                }.getOrDefault(0)
+
+                if (capturedCount > 0) {
+                    return AudioWindow(samples.copyOf(capturedCount), sampleRateHz)
+                }
+            } finally {
+                runCatching {
+                    if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                        recorder.stop()
+                    }
+                }
+                recorder.release()
             }
         }
-        recorder.release()
 
-        if (capturedCount <= 0) return null
-        return AudioWindow(samples.copyOf(capturedCount), sampleRateHz)
+        return null
     }
 
     private fun detectExperimentalGunshot(window: AudioWindow, context: Context): Encounter? {
