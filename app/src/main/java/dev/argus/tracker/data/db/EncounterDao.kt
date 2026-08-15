@@ -57,6 +57,18 @@ interface EncounterDao {
 
     @Query(
         """
+        SELECT COUNT(DISTINCT primaryId)
+        FROM encounters
+        WHERE source = :source
+            AND timestampEpochMs >= :sinceEpochMs
+            AND primaryId != ''
+            AND NOT (source = 'REMOTE_ID' AND primaryId = 'remote-id-unavailable')
+        """
+    )
+    suspend fun countDistinctPrimaryIdsSince(source: String, sinceEpochMs: Long): Int
+
+    @Query(
+        """
         SELECT *
         FROM encounters
         WHERE timestampEpochMs >= :sinceEpochMs

@@ -37,7 +37,26 @@ class ArgusViewModel(
     fun refreshSummary(windowHours: Long = 24) {
         viewModelScope.launch {
             val since = System.currentTimeMillis() - (windowHours * 60 * 60 * 1000)
-            val sourceCounts = repository.sourceSummarySince(since)
+            val sourceCounts = repository
+                .sourceSummarySince(since)
+                .toMutableMap()
+                .apply {
+                    // Sweep aggregates use a stable synthetic ID and should surface as one summary event.
+                    val wifiSweepCount = this[EncounterSource.WIFI_SWEEP.name] ?: 0
+                    if (wifiSweepCount > 0) {
+                        this[EncounterSource.WIFI_SWEEP.name] = 1
+                    }
+                    val bluetoothLeSweepCount = this[EncounterSource.BLUETOOTH_LE_SWEEP.name] ?: 0
+                    if (bluetoothLeSweepCount > 0) {
+                        this[EncounterSource.BLUETOOTH_LE_SWEEP.name] = 1
+                    }
+
+                    // Camera detections are typically fixed infrastructure, so summarize by unique camera IDs.
+                    this[EncounterSource.CAMERA.name] = repository.distinctPrimaryCountSince(
+                        source = EncounterSource.CAMERA.name,
+                        sinceEpochMs = since
+                    )
+                }
             val knownSourceOrder = EncounterSource.entries.toList()
 
             val knownSources = knownSourceOrder.map { source ->

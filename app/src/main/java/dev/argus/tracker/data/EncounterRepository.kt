@@ -10,6 +10,7 @@ interface EncounterRepository {
     suspend fun listAll(limit: Int): List<Encounter>
     suspend fun listSince(sinceEpochMs: Long, limit: Int): List<Encounter>
     suspend fun sourceSummarySince(sinceEpochMs: Long): Map<String, Int>
+    suspend fun distinctPrimaryCountSince(source: String, sinceEpochMs: Long): Int
     suspend fun clearEncounters()
     suspend fun clearDevices()
 }

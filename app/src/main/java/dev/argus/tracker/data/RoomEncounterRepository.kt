@@ -29,6 +29,9 @@ class RoomEncounterRepository(
     override suspend fun sourceSummarySince(sinceEpochMs: Long): Map<String, Int> =
         dao.aggregateBySourceSince(sinceEpochMs).associate { it.source to it.count }
 
+    override suspend fun distinctPrimaryCountSince(source: String, sinceEpochMs: Long): Int =
+        dao.countDistinctPrimaryIdsSince(source = source, sinceEpochMs = sinceEpochMs)
+
     override suspend fun clearEncounters() {
         dao.clearAllEncounters()
     }
