@@ -6868,10 +6868,10 @@ private fun DetectionMapPage(
                                 Text("No-fly zones: ${noFlyZones.size} (${if (noFlyZonesVisible) "visible" else "hidden"})")
                             }
                             if (showCoverageRadiusCircle && stableCoverageRadiusMeters > 10.0) {
-                                Text("Coverage radius: ${formatDistanceFeetMiles(stableCoverageRadiusMeters)}")
+                                Text("Proximity coverage radius (orange): ${formatDistanceFeetMiles(stableCoverageRadiusMeters)}")
                             }
                             if (showCoverageRadiusCircle && stableAircraftCoverageRadiusMeters > 10.0) {
-                                Text("Aircraft coverage radius: ${formatDistanceFeetMiles(stableAircraftCoverageRadiusMeters)}")
+                                Text("Aircraft coverage radius (blue): ${formatDistanceFeetMiles(stableAircraftCoverageRadiusMeters)}")
                             }
                             Text(
                                 text = if (currentLocationSnapshot != null) {
@@ -6984,8 +6984,8 @@ private fun DetectionMapPage(
                             center = coverageCenter,
                             radius = stableCoverageRadiusMeters,
                             strokeWidth = 2f,
-                            strokeColor = Color(0xFF1565C0),
-                            fillColor = Color(0x1A1565C0)
+                            strokeColor = Color(0xFFE65100),
+                            fillColor = Color(0x1AE65100)
                         )
                         if (mapScannerSweepAnimationEnabled) {
                             val sweepRadiusMeters = containedSweepRadiusMeters(stableCoverageRadiusMeters)
@@ -6997,8 +6997,8 @@ private fun DetectionMapPage(
                                     halfWidthDegrees = 22f,
                                     arcStepDegrees = 6f
                                 ),
-                                fillColor = Color(0x3D4FC3F7),
-                                strokeColor = Color(0x704FC3F7),
+                                fillColor = Color(0x33FFB74D),
+                                strokeColor = Color(0x70FFB74D),
                                 strokeWidth = 1.5f
                             )
                         }
@@ -7010,8 +7010,8 @@ private fun DetectionMapPage(
                             center = coverageCenter,
                             radius = stableAircraftCoverageRadiusMeters,
                             strokeWidth = 2f,
-                            strokeColor = Color(0xFFE65100),
-                            fillColor = Color(0x1AE65100)
+                            strokeColor = Color(0xFF1565C0),
+                            fillColor = Color(0x1A1565C0)
                         )
                         if (mapScannerSweepAnimationEnabled) {
                             val sweepRadiusMeters = containedSweepRadiusMeters(stableAircraftCoverageRadiusMeters)
@@ -7023,8 +7023,8 @@ private fun DetectionMapPage(
                                     halfWidthDegrees = 18f,
                                     arcStepDegrees = 6f
                                 ),
-                                fillColor = Color(0x33FFB74D),
-                                strokeColor = Color(0x70FFB74D),
+                                fillColor = Color(0x3D4FC3F7),
+                                strokeColor = Color(0x704FC3F7),
                                 strokeWidth = 1.5f
                             )
                         }
@@ -7572,10 +7572,10 @@ private fun buildRadarSweepSectorPoints(
 private fun containedSweepRadiusMeters(containerRadiusMeters: Double): Double {
     val clampedRadius = containerRadiusMeters.coerceAtLeast(0.0)
     if (clampedRadius <= 0.0) return 0.0
-    val proportionalInset = clampedRadius * 0.015
-    val fixedInset = 10.0
+    val proportionalInset = clampedRadius * 0.03
+    val fixedInset = 20.0
     val insetMeters = maxOf(proportionalInset, fixedInset)
-    return (clampedRadius - insetMeters).coerceAtLeast(clampedRadius * 0.85)
+    return (clampedRadius - insetMeters).coerceAtLeast(0.0)
 }
 
 private fun centroidOfDetectionPolygon(points: List<DetectionLocation>): DetectionLocation? {
