@@ -5973,13 +5973,15 @@ private fun DetectionMapPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
     val currentLocation = currentLocationOverride ?: observedCurrentLocation
-    val nonAircraftBoundingPins = remember(filteredVisiblePins) {
-        filteredVisiblePins.filter { pin ->
-            pin.source != SourceCatalog.SOURCE_AIRCRAFT && pin.source != SourceCatalog.SOURCE_REMOTE_ID
+    val nonAircraftCoveragePins = remember(pins) {
+        pins.filter { pin ->
+            pin.source != SourceCatalog.SOURCE_AIRCRAFT &&
+                pin.source != SourceCatalog.SOURCE_REMOTE_ID &&
+                pin.source != SourceCatalog.SOURCE_CAMERA
         }
     }
-    val aircraftBoundingPins = remember(filteredVisiblePins) {
-        filteredVisiblePins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
+    val aircraftCoveragePins = remember(pins) {
+        pins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
     }
     val nearbyVisiblePins by produceState(
         initialValue = filteredVisiblePins,
@@ -5994,17 +5996,17 @@ private fun DetectionMapPage(
             )
         }
     }
-    val coverageCircleRadiusMeters by produceState(
-        initialValue = 0.0,
-        key1 = nonAircraftBoundingPins,
+    val nonAircraftCoverageSnapshot by produceState<Pair<DetectionLocation, Double>?>(
+        initialValue = null,
+        key1 = nonAircraftCoveragePins,
         key2 = currentLocation,
         key3 = showCoverageRadiusCircle
     ) {
         value = withContext(Dispatchers.Default) {
-            if (!showCoverageRadiusCircle || currentLocation == null || nonAircraftBoundingPins.isEmpty()) {
-                0.0
+            if (!showCoverageRadiusCircle || currentLocation == null || nonAircraftCoveragePins.isEmpty()) {
+                null
             } else {
-                nonAircraftBoundingPins.maxOfOrNull { pin ->
+                val radiusMeters = nonAircraftCoveragePins.maxOfOrNull { pin ->
                     distanceFromLocationMeters(
                         fromLat = currentLocation.lat,
                         fromLon = currentLocation.lon,
@@ -6012,20 +6014,21 @@ private fun DetectionMapPage(
                         toLon = pin.position.longitude
                     ) ?: 0.0
                 } ?: 0.0
+                currentLocation to normalizeCoverageRadiusMeters(radiusMeters)
             }
         }
     }
-    val aircraftCoverageCircleRadiusMeters by produceState(
-        initialValue = 0.0,
-        key1 = aircraftBoundingPins,
+    val aircraftCoverageSnapshot by produceState<Pair<DetectionLocation, Double>?>(
+        initialValue = null,
+        key1 = aircraftCoveragePins,
         key2 = currentLocation,
         key3 = showCoverageRadiusCircle
     ) {
         value = withContext(Dispatchers.Default) {
-            if (!showCoverageRadiusCircle || currentLocation == null || aircraftBoundingPins.isEmpty()) {
-                0.0
+            if (!showCoverageRadiusCircle || currentLocation == null || aircraftCoveragePins.isEmpty()) {
+                null
             } else {
-                aircraftBoundingPins.maxOfOrNull { pin ->
+                val radiusMeters = aircraftCoveragePins.maxOfOrNull { pin ->
                     distanceFromLocationMeters(
                         fromLat = currentLocation.lat,
                         fromLon = currentLocation.lon,
@@ -6033,6 +6036,7 @@ private fun DetectionMapPage(
                         toLon = pin.position.longitude
                     ) ?: 0.0
                 } ?: 0.0
+                currentLocation to normalizeCoverageRadiusMeters(radiusMeters)
             }
         }
     }
@@ -6040,76 +6044,86 @@ private fun DetectionMapPage(
     var stableCoverageRadiusMeters by remember { mutableStateOf(0.0) }
     var stableAircraftCoverageCenter by remember { mutableStateOf<DetectionLocation?>(null) }
     var stableAircraftCoverageRadiusMeters by remember { mutableStateOf(0.0) }
-    LaunchedEffect(showCoverageRadiusCircle, currentLocation, coverageCircleRadiusMeters, nonAircraftBoundingPins.size) {
-        if (!showCoverageRadiusCircle || currentLocation == null || nonAircraftBoundingPins.isEmpty()) {
-            stableCoverageCenter = currentLocation
+    LaunchedEffect(showCoverageRadiusCircle, nonAircraftCoverageSnapshot, nonAircraftCoveragePins.size) {
+        val latest = nonAircraftCoverageSnapshot
+        if (!showCoverageRadiusCircle || latest == null || nonAircraftCoveragePins.isEmpty()) {
+            stableCoverageCenter = null
             stableCoverageRadiusMeters = 0.0
             return@LaunchedEffect
         }
+
+        val targetCenter = latest.first
+        val targetRadius = latest.second
 
         val previousCenter = stableCoverageCenter
         val previousRadius = stableCoverageRadiusMeters
 
         if (previousCenter == null) {
-            stableCoverageCenter = currentLocation
-            stableCoverageRadiusMeters = coverageCircleRadiusMeters
+            stableCoverageCenter = targetCenter
+            stableCoverageRadiusMeters = targetRadius
             return@LaunchedEffect
         }
 
         val centerShiftMeters = distanceFromLocationMeters(
             fromLat = previousCenter.lat,
             fromLon = previousCenter.lon,
-            toLat = currentLocation.lat,
-            toLon = currentLocation.lon
+            toLat = targetCenter.lat,
+            toLon = targetCenter.lon
         ) ?: 0.0
         val centerShouldUpdate = centerShiftMeters >= MAP_COVERAGE_CENTER_JITTER_METERS
         if (centerShouldUpdate) {
-            stableCoverageCenter = currentLocation
+            stableCoverageCenter = targetCenter
         }
 
-        val radiusDeltaMeters = abs(coverageCircleRadiusMeters - previousRadius)
+        val radiusDeltaMeters = abs(targetRadius - previousRadius)
         val radiusDeadband = maxOf(
             MAP_COVERAGE_RADIUS_JITTER_METERS,
-            previousRadius * 0.03
+            previousRadius * 0.05,
+            targetRadius * 0.03
         )
         val radiusShouldUpdate = radiusDeltaMeters >= radiusDeadband
         if (radiusShouldUpdate) {
-            stableCoverageRadiusMeters = coverageCircleRadiusMeters
+            stableCoverageRadiusMeters = targetRadius
         }
     }
-    LaunchedEffect(showCoverageRadiusCircle, currentLocation, aircraftCoverageCircleRadiusMeters, aircraftBoundingPins.size) {
-        if (!showCoverageRadiusCircle || currentLocation == null || aircraftBoundingPins.isEmpty()) {
-            stableAircraftCoverageCenter = currentLocation
+    LaunchedEffect(showCoverageRadiusCircle, aircraftCoverageSnapshot, aircraftCoveragePins.size) {
+        val latest = aircraftCoverageSnapshot
+        if (!showCoverageRadiusCircle || latest == null || aircraftCoveragePins.isEmpty()) {
+            stableAircraftCoverageCenter = null
             stableAircraftCoverageRadiusMeters = 0.0
             return@LaunchedEffect
         }
+
+        val targetCenter = latest.first
+        val targetRadius = latest.second
 
         val previousCenter = stableAircraftCoverageCenter
         val previousRadius = stableAircraftCoverageRadiusMeters
 
         if (previousCenter == null) {
-            stableAircraftCoverageCenter = currentLocation
-            stableAircraftCoverageRadiusMeters = aircraftCoverageCircleRadiusMeters
+            stableAircraftCoverageCenter = targetCenter
+            stableAircraftCoverageRadiusMeters = targetRadius
             return@LaunchedEffect
         }
 
         val centerShiftMeters = distanceFromLocationMeters(
             fromLat = previousCenter.lat,
             fromLon = previousCenter.lon,
-            toLat = currentLocation.lat,
-            toLon = currentLocation.lon
+            toLat = targetCenter.lat,
+            toLon = targetCenter.lon
         ) ?: 0.0
         if (centerShiftMeters >= MAP_COVERAGE_CENTER_JITTER_METERS) {
-            stableAircraftCoverageCenter = currentLocation
+            stableAircraftCoverageCenter = targetCenter
         }
 
-        val radiusDeltaMeters = abs(aircraftCoverageCircleRadiusMeters - previousRadius)
+        val radiusDeltaMeters = abs(targetRadius - previousRadius)
         val radiusDeadband = maxOf(
             MAP_COVERAGE_RADIUS_JITTER_METERS,
-            previousRadius * 0.03
+            previousRadius * 0.05,
+            targetRadius * 0.03
         )
         if (radiusDeltaMeters >= radiusDeadband) {
-            stableAircraftCoverageRadiusMeters = aircraftCoverageCircleRadiusMeters
+            stableAircraftCoverageRadiusMeters = targetRadius
         }
     }
     val cameraFocusPins by produceState(
@@ -7567,6 +7581,12 @@ private fun buildRadarSweepSectorPoints(
 
     points.add(offsetLatLng(center, radiusMeters, end.toDouble()))
     return points
+}
+
+private fun normalizeCoverageRadiusMeters(radiusMeters: Double): Double {
+    if (!radiusMeters.isFinite() || radiusMeters <= 0.0) return 0.0
+    val stepMeters = 25.0
+    return (radiusMeters / stepMeters).roundToInt() * stepMeters
 }
 
 private fun containedSweepRadiusMeters(containerRadiusMeters: Double): Double {
