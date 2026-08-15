@@ -30,6 +30,7 @@ object ScanSettings {
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
+    private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
@@ -59,6 +60,7 @@ object ScanSettings {
     private const val KEY_MAP_CLUSTERING_ENABLED = "map_clustering_enabled"
     private const val KEY_MAP_CLUSTER_RANGE_LEVEL = "map_cluster_range_level"
     private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
+    private const val KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL = "map_no_fly_render_quality_level"
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
     private const val KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "wifi_randomized_one_off_suppression_enabled"
     private const val KEY_WIFI_AGGREGATE_ONLY_ENABLED = "wifi_aggregate_only_enabled"
@@ -88,6 +90,7 @@ object ScanSettings {
     const val DEFAULT_MAP_CLUSTERING_ENABLED = false
     const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
     const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = false
+    const val DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL = 2
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
     const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED = true
@@ -109,6 +112,7 @@ object ScanSettings {
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
     val ALLOWED_MAP_CLUSTER_RANGE_LEVELS = (1..5).toList()
+    val ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS = (1..3).toList()
     val ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS = listOf("HIGH", "CRITICAL")
     val ALLOWED_APP_THEME_MODES = listOf("SYSTEM", "LIGHT", "DARK")
     val SOURCE_TYPES = SourceCatalog.SCAN_SOURCE_KEYS
@@ -375,6 +379,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isNoFlyPassThroughNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, true)
+
+    fun setNoFlyPassThroughNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
@@ -770,6 +785,22 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_MAP_NO_FLY_ZONES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getMapNoFlyRenderQualityLevel(context: Context): Int {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL, DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL)
+        return raw.takeIf { it in ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS }
+            ?: DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
+    }
+
+    fun setMapNoFlyRenderQualityLevel(context: Context, level: Int) {
+        val safe = level.takeIf { it in ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS }
+            ?: DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL, safe)
             .apply()
     }
 
