@@ -5,6 +5,7 @@ import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.domain.SignalScanner
 import android.os.SystemClock
 import android.content.Context
+import dev.argus.tracker.data.OwnedSignalRegistry
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.CancellationException
@@ -65,12 +66,34 @@ class ArgusSensingService(
             ScanSettings.setSourceLastScanEpochMs(context, sourceType, nowEpochMs)
         }
 
+        markLocalSweepAggregatesAsOwned(allEncounters)
+
         val totalDuration = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
         return ScanBatchResult(
             encounters = allEncounters,
             sourceDurationsMs = sourceDurations,
             totalDurationMs = totalDuration
         )
+    }
+
+    private fun markLocalSweepAggregatesAsOwned(encounters: List<Encounter>) {
+        if (encounters.isEmpty()) return
+
+        encounters.forEach { encounter ->
+            when (encounter.source) {
+                dev.argus.tracker.domain.EncounterSource.WIFI_SWEEP,
+                dev.argus.tracker.domain.EncounterSource.BLUETOOTH_LE_SWEEP -> {
+                    OwnedSignalRegistry.setOwned(
+                        context = context,
+                        source = encounter.source.name,
+                        primaryId = encounter.primaryId,
+                        owned = true
+                    )
+                }
+
+                else -> Unit
+            }
+        }
     }
 
     private fun scannerSourceType(scanner: SignalScanner): String = when (scanner) {

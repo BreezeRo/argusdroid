@@ -104,6 +104,7 @@ import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.MainActivity
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.AppBackupManager
+import dev.argus.tracker.data.OwnedSignalRegistry
 import dev.argus.tracker.data.OperationalErrorLogEntry
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.data.chain.ChainMeshSnapshot
@@ -459,28 +460,12 @@ private data class MeshCoverageNodeInsight(
 )
 
 private object OwnedDeviceRegistry {
-    private const val PREFS_NAME = "argus_settings"
-    private const val KEY_OWNED_DEVICE_KEYS = "owned_device_keys"
+    fun keyFor(source: String, primaryId: String): String = OwnedSignalRegistry.keyFor(source, primaryId)
 
-    fun keyFor(source: String, primaryId: String): String = "$source|$primaryId"
-
-    fun read(context: android.content.Context): Set<String> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-        return prefs.getStringSet(KEY_OWNED_DEVICE_KEYS, emptySet())?.toSet() ?: emptySet()
-    }
+    fun read(context: android.content.Context): Set<String> = OwnedSignalRegistry.read(context)
 
     fun setOwned(context: android.content.Context, source: String, primaryId: String, owned: Boolean) {
-        val current = read(context).toMutableSet()
-        val key = keyFor(source, primaryId)
-        if (owned) {
-            current += key
-        } else {
-            current -= key
-        }
-        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(KEY_OWNED_DEVICE_KEYS, current)
-            .apply()
+        OwnedSignalRegistry.setOwned(context, source, primaryId, owned)
     }
 }
 
@@ -723,6 +708,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var startupRuntimeGateReleased by remember { mutableStateOf(false) }
     var startupPrewarmedDevicePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     var startupPrewarmedNoFlyZones by remember { mutableStateOf<List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>(emptyList()) }
+    var mapResetGeneration by remember { mutableStateOf(0L) }
     var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
     val backStack by navController.currentBackStackEntryAsState()
@@ -1760,6 +1746,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         app.container.repository.clearEncounters()
                         app.container.repository.clearDevices()
                         ScanSettings.clearOperationalLogs(context)
+                        startupPrewarmedDevicePins = emptyList()
+                        startupPrewarmedNoFlyZones = emptyList()
+                        mapResetGeneration += 1L
                         alertLogs = emptyList()
                         errorLogs = emptyList()
                         scanIntervalChangeEvents = emptyList()
@@ -1771,6 +1760,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         app.container.repository.clearDevices()
                         ScanSettings.clearOperationalLogs(context)
                         ScanSettings.resetMeshNetworkSettings(context)
+                        startupPrewarmedDevicePins = emptyList()
+                        startupPrewarmedNoFlyZones = emptyList()
+                        mapResetGeneration += 1L
                         app.container.chainLinkCoordinator.stopServer()
                         MeshForegroundServiceController.ensureState(context)
                         alertLogs = emptyList()
@@ -1833,6 +1825,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     startupPrewarmedDevicePins = startupPrewarmedDevicePins,
                     startupPrewarmedNoFlyZones = startupPrewarmedNoFlyZones,
+                    mapResetGeneration = mapResetGeneration,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
                     bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
@@ -1854,7 +1847,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             lon?.let { add("lon=${Uri.encode(it.toString())}") }
                             timestampEpochMs?.let { add("ts=$it") }
                         }
-                        val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}" 
+                        val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}"
                         navController.navigate(
                             "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}$query"
                         )
@@ -4062,6 +4055,7 @@ private fun DetectionPage(
     liveMapUpdateIntervalSeconds: Long,
     startupPrewarmedDevicePins: List<MapPin>,
     startupPrewarmedNoFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>,
+    mapResetGeneration: Long,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
     bleRandomizedOneOffSuppressionEnabled: Boolean,
     mapNoFlyZonesEnabled: Boolean,
@@ -4282,6 +4276,20 @@ private fun DetectionPage(
         mutableStateOf(if (mapNoFlyZonesEnabled) startupPrewarmedNoFlyZones else emptyList())
     }
     var allTrackedAircraftPins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
+
+    LaunchedEffect(mapResetGeneration) {
+        deviceMapSnapshotEpochMs = null
+        flightMapSnapshotEpochMs = null
+        sinceSnapshotOnlyOnDeviceMap = false
+        sinceSnapshotOnlyOnFlightMap = false
+        allDeviceCandidates = emptyList()
+        deviceCandidatesPrepared = false
+        resolvedLocationCache.clear()
+        estimatedDeviceLocationPins = emptyList()
+        noFlyZoneOverlayCache.clear()
+        noFlyZoneOverlays = emptyList()
+        allTrackedAircraftPins = emptyList()
+    }
 
     LaunchedEffect(selectedTab, selectedMapSubTab, noFlyOverlayLocationKey, mapNoFlyZonesEnabled) {
         if (selectedTab != 3) {
