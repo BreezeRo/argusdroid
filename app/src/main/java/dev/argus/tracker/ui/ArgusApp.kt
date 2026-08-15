@@ -202,6 +202,8 @@ private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
+private const val NFC_ALERT_COOLDOWN_MS = 30 * 1000L
 private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
 private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
@@ -288,6 +290,7 @@ private fun rememberMapStyleOptionsForTheme(): MapStyleOptions? {
 private enum class AlertLogType {
     APPROACH,
     TRACKER,
+    NFC,
     FOREIGN_SIGNAL
 }
 
@@ -334,6 +337,7 @@ private data class ForeignSignalRiskSignal(
     val wifiAnomalyScore: Double,
     val bleAnomalyScore: Double,
     val gnssInterferenceScore: Double,
+    val nfcActivityScore: Double,
     val uwbActivityScore: Double,
     val rfTextureScore: Double,
     val acousticProxyScore: Double,
@@ -398,6 +402,7 @@ private data class SensorGateSettings(
     val wifiEnabled: Boolean,
     val bluetoothLeEnabled: Boolean,
     val cellularEnabled: Boolean,
+    val nfcEnabled: Boolean,
     val aviationAdsbEnabled: Boolean,
     val aviationPublicEnabled: Boolean,
     val uwbEnabled: Boolean,
@@ -613,6 +618,7 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
         bluetoothLeEnabled = ScanSettings.isBleSensorEnabled(context),
         cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
+        nfcEnabled = ScanSettings.isNfcSensorEnabled(context),
         aviationAdsbEnabled = ScanSettings.isAviationAdsbSensorEnabled(context),
         aviationPublicEnabled = ScanSettings.isAviationPublicSensorEnabled(context),
         uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
@@ -662,6 +668,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var nfcNotificationsEnabled by remember { mutableStateOf(ScanSettings.isNfcNotificationsEnabled(context)) }
     var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
     var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
     var meshWipeNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshWipeNotificationsEnabled(context)) }
@@ -700,6 +707,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
+    var lastNfcAlertEpochMs by remember { mutableStateOf(0L) }
+    var lastNfcObservedEncounterEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
@@ -717,7 +726,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         ScanSettings.SOURCE_TYPES.filterNot {
             it == SourceCatalog.KEY_WIFI_DIRECT ||
                 it == SourceCatalog.KEY_BT_CLASSIC ||
-                it == SourceCatalog.KEY_REMOTE_ID
+                it == SourceCatalog.KEY_REMOTE_ID ||
+                it == SourceCatalog.KEY_NFC
         }
     }
     var mapResetGeneration by remember { mutableStateOf(0L) }
@@ -1292,6 +1302,30 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         lastMagneticObservedSampleEpochMs = current.first
     }
 
+    LaunchedEffect(operationalAnalysisWindow, nfcNotificationsEnabled) {
+        val latestNfc = operationalAnalysisWindow
+            .asSequence()
+            .filter { encounter -> encounter.source == EncounterSource.NFC }
+            .maxByOrNull { encounter -> encounter.timestampEpochMs }
+            ?: return@LaunchedEffect
+
+        if (latestNfc.timestampEpochMs <= lastNfcObservedEncounterEpochMs) {
+            return@LaunchedEffect
+        }
+
+        val now = System.currentTimeMillis()
+        if (nfcNotificationsEnabled &&
+            hasPostNotificationsPermission(context) &&
+            now - lastNfcAlertEpochMs >= NFC_ALERT_COOLDOWN_MS
+        ) {
+            ensureNfcNotificationChannel(context)
+            sendNfcNotification(context, latestNfc)
+            lastNfcAlertEpochMs = now
+        }
+
+        lastNfcObservedEncounterEpochMs = latestNfc.timestampEpochMs
+    }
+
     LaunchedEffect(
         operationalAnalysisWindow,
         ownedDeviceKeys,
@@ -1433,6 +1467,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "wifi" -> ScanSettings.setWifiSensorEnabled(context, enabled)
                                 "bluetooth_le" -> ScanSettings.setBleSensorEnabled(context, enabled)
                                 "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
+                                "nfc" -> ScanSettings.setNfcSensorEnabled(context, enabled)
                                 "aviation_adsb" -> ScanSettings.setAviationAdsbSensorEnabled(context, enabled)
                                 "aviation_public" -> ScanSettings.setAviationPublicSensorEnabled(context, enabled)
                                 "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
@@ -1496,6 +1531,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    nfcNotificationsEnabled = nfcNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
                     meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
                     meshWipeNotificationsEnabled = meshWipeNotificationsEnabled,
@@ -1567,6 +1603,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onTrackerNotificationsChanged = { enabled ->
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
+                    },
+                    onNfcNotificationsChanged = { enabled ->
+                        nfcNotificationsEnabled = enabled
+                        ScanSettings.setNfcNotificationsEnabled(context, enabled)
                     },
                     onMagneticIncreaseNotificationsChanged = { enabled ->
                         magneticIncreaseNotificationsEnabled = enabled
@@ -1692,6 +1732,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -1741,6 +1782,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -1792,6 +1834,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setApproachDetectionEnabled(context, true)
                         ScanSettings.setApproachNotificationsEnabled(context, true)
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
+                        ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
                         ScanSettings.setMeshConnectivityNotificationsEnabled(context, true)
                         ScanSettings.setMeshWipeNotificationsEnabled(context, true)
@@ -1828,6 +1871,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachDetectionEnabled = true
                         approachNotificationsEnabled = true
                         trackerNotificationsEnabled = true
+                        nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
                         meshConnectivityNotificationsEnabled = true
                         meshWipeNotificationsEnabled = true
@@ -1884,6 +1928,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -2924,7 +2969,7 @@ private fun HomePage(
                                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                                             ) {
                                                 Text(
-                                                    text = sourceSummary.source,
+                                                    text = listSourceLabel(sourceSummary.source, null),
                                                     style = MaterialTheme.typography.labelLarge,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -2985,6 +3030,13 @@ private fun HomePage(
                             "Cell and network telemetry",
                             sensorGateSettings.cellularEnabled,
                             sensorStatusByName["Cellular"]
+                        ),
+                        HomeSensorToggle(
+                            "nfc",
+                            "NFC",
+                            "Nearby field tag and transponder interactions",
+                            sensorGateSettings.nfcEnabled,
+                            sensorStatusByName["NFC"]
                         ),
                         HomeSensorToggle(
                             "aviation_adsb",
@@ -3133,6 +3185,7 @@ private fun AppSettingsPage(
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    nfcNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
     meshConnectivityNotificationsEnabled: Boolean,
     meshWipeNotificationsEnabled: Boolean,
@@ -3147,6 +3200,7 @@ private fun AppSettingsPage(
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onNfcNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
     onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
     onMeshWipeNotificationsChanged: (Boolean) -> Unit,
@@ -3194,7 +3248,8 @@ private fun AppSettingsPage(
     val intervalSourceTypes = ScanSettings.SOURCE_TYPES.filterNot {
         it == SourceCatalog.KEY_WIFI_DIRECT ||
             it == SourceCatalog.KEY_BT_CLASSIC ||
-            it == SourceCatalog.KEY_REMOTE_ID
+        it == SourceCatalog.KEY_REMOTE_ID ||
+        it == SourceCatalog.KEY_NFC
     }
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
 
@@ -3451,12 +3506,13 @@ private fun AppSettingsPage(
                 val timing = timingBySource[sourceType]
                 val lastScanEpochMs = sourceLastScanEpochs[sourceType] ?: 0L
                 val lastRawObservationEpochMs = sourceLastRawObservationEpochs[sourceType] ?: 0L
+                val sourceLabel = formatSourceTypeLabel(sourceType)
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.SemiBold)
+                        Text(sourceLabel, fontWeight = FontWeight.SemiBold)
                         if (timing == null || timing.sampleCount <= 0L) {
                             Text("Samples: 0")
                             Text("No timing samples yet. Start tracking or run live scans.")
@@ -3467,25 +3523,28 @@ private fun AppSettingsPage(
                             Text("p50: ${formatScanDuration(timing.p50DurationMs)} | p95: ${formatScanDuration(timing.p95DurationMs)} | Max: ${formatScanDuration(timing.maxDurationMs)}")
                             Text("Suggested safe interval: ${ScanSettings.formatInterval(suggestedInterval)}")
                         }
-                        if (sourceType == SourceCatalog.KEY_BT_CLASSIC) {
-                            val lastScanLabel = if (lastScanEpochMs > 0L) {
-                                "${formatEpoch(lastScanEpochMs)} (${formatMapPinAge(lastScanEpochMs)} ago)"
+                        val lastScanLabel = if (lastScanEpochMs > 0L) {
+                            "${formatEpoch(lastScanEpochMs)} (${formatMapPinAge(lastScanEpochMs)} ago)"
+                        } else {
+                            "Never"
+                        }
+                        val rawSightingLabel = if (lastRawObservationEpochMs > 0L) {
+                            "${formatEpoch(lastRawObservationEpochMs)} (${formatMapPinAge(lastRawObservationEpochMs)} ago)"
+                        } else {
+                            "Never"
+                        }
+                        Text("Last scan attempt: $lastScanLabel")
+                        Text("Last raw observation (pre-pipeline): $rawSightingLabel")
+                        if (lastScanEpochMs > 0L && lastRawObservationEpochMs <= 0L) {
+                            val warningText = if (sourceType == SourceCatalog.KEY_BT_CLASSIC) {
+                                "No ACTION_FOUND frames observed yet. Check Bluetooth scanning/location settings and test near discoverable Classic hardware."
                             } else {
-                                "Never"
+                                "No raw observations observed yet for $sourceLabel. Verify this source is enabled and producing scan data."
                             }
-                            val rawSightingLabel = if (lastRawObservationEpochMs > 0L) {
-                                "${formatEpoch(lastRawObservationEpochMs)} (${formatMapPinAge(lastRawObservationEpochMs)} ago)"
-                            } else {
-                                "Never"
-                            }
-                            Text("Classic scan attempt: $lastScanLabel")
-                            Text("Raw classic sighting (pre-pipeline): $rawSightingLabel")
-                            if (lastScanEpochMs > 0L && lastRawObservationEpochMs <= 0L) {
-                                Text(
-                                    "No ACTION_FOUND frames observed yet. Check Bluetooth scanning/location settings and test near discoverable Classic hardware.",
-                                    color = Color(0xFFE65100)
-                                )
-                            }
+                            Text(
+                                warningText,
+                                color = Color(0xFFE65100)
+                            )
                         }
                     }
                 }
@@ -3747,6 +3806,16 @@ private fun AppSettingsPage(
                                 checked = trackerNotificationsEnabled,
                                 onCheckedChange = onTrackerNotificationsChanged,
                                 enabled = approachDetectionEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("NFC tap alerts")
+                            Switch(
+                                checked = nfcNotificationsEnabled,
+                                onCheckedChange = onNfcNotificationsChanged
                             )
                         }
                         Row(
@@ -4901,6 +4970,7 @@ private fun DetectionPage(
                                 )
                                 Text(
                                     "GNSS ${formatRiskScorePct(foreignSignalRisk.gnssInterferenceScore)} | " +
+                                        "NFC ${formatRiskScorePct(foreignSignalRisk.nfcActivityScore)} | " +
                                         "UWB ${formatRiskScorePct(foreignSignalRisk.uwbActivityScore)} | " +
                                         "RF Texture ${formatRiskScorePct(foreignSignalRisk.rfTextureScore)}"
                                 )
@@ -5087,96 +5157,118 @@ private fun DetectionPage(
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
                 } else {
-                    val flightMapPins by produceState(
-                        allTrackedAircraftPins,
-                        allTrackedAircraftPins,
-                        liveOnlyOnFlightMap,
-                        flightMapCurrentLocation,
-                        flightDisplayRadiusMeters,
-                        sinceSnapshotOnlyOnFlightMap,
-                        flightMapSnapshotEpochMs
-                    ) {
-                        value = withContext(Dispatchers.Default) {
-                            allTrackedAircraftPins
-                                .asSequence()
-                                .filter { pin ->
-                                    if (!liveOnlyOnFlightMap) {
-                                        true
-                                    } else {
-                                        val withinRadius = flightMapCurrentLocation?.let { loc ->
-                                            distanceFromLocationMeters(
-                                                fromLat = loc.lat,
-                                                fromLon = loc.lon,
-                                                toLat = pin.position.latitude,
-                                                toLon = pin.position.longitude
-                                            )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
-                                        } ?: true
-                                        pin.isLive && withinRadius
-                                    }
+                    val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
+                        ScanSettings.isAviationPublicSensorEnabled(context)
+                    if (!flightSensorsEnabled) {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Flight sensors are disabled.",
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Enable ADS-B (Aviation) or Public Flight Radar under Status > Sensors to view Flight Map."
+                                )
+                                Button(onClick = { selectedTab = 0 }) {
+                                    Text("Open Status > Sensors")
                                 }
-                                .filter { pin ->
-                                    if (!sinceSnapshotOnlyOnFlightMap) {
-                                        true
-                                    } else {
-                                        val snapshotEpoch = flightMapSnapshotEpochMs
-                                        snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
-                                    }
-                                }
-                                .toList()
-                        }
-                    }
-                    DetectionMapPage(
-                        mapTitle = "Flight Map",
-                        mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
-                        currentLocationOverride = flightMapCurrentLocation,
-                        noFlyZones = noFlyZoneOverlays,
-                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
-                        pins = flightMapPins,
-                        pinLimit = flightMapPinLimit,
-                        onPinLimitChange = { flightMapPinLimit = it },
-                        mapClusteringEnabled = mapClusteringEnabled,
-                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
-                        mapClusterRangeLevel = mapClusterRangeLevel,
-                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
-                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
-                        onPinDetailsClick = { pin ->
-                            onDeviceMapPinClick(
-                                pin.source,
-                                pin.primaryId,
-                                pin.position.latitude,
-                                pin.position.longitude,
-                                pin.timestampEpochMs
-                            )
-                        },
-                        liveUpdatesAllowed = true,
-                        useSourceOnlyPinColors = true,
-                        enableVerticalScroll = true,
-                        showLiveOnlyControl = true,
-                        liveOnlyEnabled = liveOnlyOnFlightMap,
-                        onLiveOnlyEnabledChange = { liveOnlyOnFlightMap = it },
-                        showRadiusControl = true,
-                        radiusMiles = flightMapRadiusMiles,
-                        onRadiusMilesChange = { miles ->
-                            flightMapRadiusMiles = miles.coerceIn(10, 1000)
-                        },
-                        radiusControlLabel = "Radius (mi)",
-                        radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
-                        showMovingOnlyControl = false,
-                        showSinceSnapshotControl = true,
-                        sinceSnapshotEnabled = sinceSnapshotOnlyOnFlightMap,
-                        snapshotEpochMs = flightMapSnapshotEpochMs,
-                        onSinceSnapshotEnabledChange = { enabled ->
-                            sinceSnapshotOnlyOnFlightMap = enabled
-                            if (enabled && flightMapSnapshotEpochMs == null) {
-                                flightMapSnapshotEpochMs = System.currentTimeMillis()
                             }
-                        },
-                        onCaptureSnapshot = {
-                            flightMapSnapshotEpochMs = System.currentTimeMillis()
-                        },
-                        onLiveCollect = onLiveCollect,
-                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                    )
+                        }
+                    } else {
+                        val flightMapPins by produceState(
+                            allTrackedAircraftPins,
+                            allTrackedAircraftPins,
+                            liveOnlyOnFlightMap,
+                            flightMapCurrentLocation,
+                            flightDisplayRadiusMeters,
+                            sinceSnapshotOnlyOnFlightMap,
+                            flightMapSnapshotEpochMs
+                        ) {
+                            value = withContext(Dispatchers.Default) {
+                                allTrackedAircraftPins
+                                    .asSequence()
+                                    .filter { pin ->
+                                        if (!liveOnlyOnFlightMap) {
+                                            true
+                                        } else {
+                                            val withinRadius = flightMapCurrentLocation?.let { loc ->
+                                                distanceFromLocationMeters(
+                                                    fromLat = loc.lat,
+                                                    fromLon = loc.lon,
+                                                    toLat = pin.position.latitude,
+                                                    toLon = pin.position.longitude
+                                                )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
+                                            } ?: true
+                                            pin.isLive && withinRadius
+                                        }
+                                    }
+                                    .filter { pin ->
+                                        if (!sinceSnapshotOnlyOnFlightMap) {
+                                            true
+                                        } else {
+                                            val snapshotEpoch = flightMapSnapshotEpochMs
+                                            snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                                        }
+                                    }
+                                    .toList()
+                            }
+                        }
+                        DetectionMapPage(
+                            mapTitle = "Flight Map",
+                            mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
+                            currentLocationOverride = flightMapCurrentLocation,
+                            noFlyZones = noFlyZoneOverlays,
+                            showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                            pins = flightMapPins,
+                            pinLimit = flightMapPinLimit,
+                            onPinLimitChange = { flightMapPinLimit = it },
+                            mapClusteringEnabled = mapClusteringEnabled,
+                            onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                            mapClusterRangeLevel = mapClusterRangeLevel,
+                            onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                            mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                            onPinDetailsClick = { pin ->
+                                onDeviceMapPinClick(
+                                    pin.source,
+                                    pin.primaryId,
+                                    pin.position.latitude,
+                                    pin.position.longitude,
+                                    pin.timestampEpochMs
+                                )
+                            },
+                            liveUpdatesAllowed = true,
+                            useSourceOnlyPinColors = true,
+                            enableVerticalScroll = true,
+                            showLiveOnlyControl = true,
+                            liveOnlyEnabled = liveOnlyOnFlightMap,
+                            onLiveOnlyEnabledChange = { liveOnlyOnFlightMap = it },
+                            showRadiusControl = true,
+                            radiusMiles = flightMapRadiusMiles,
+                            onRadiusMilesChange = { miles ->
+                                flightMapRadiusMiles = miles.coerceIn(10, 1000)
+                            },
+                            radiusControlLabel = "Radius (mi)",
+                            radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
+                            showMovingOnlyControl = false,
+                            showSinceSnapshotControl = true,
+                            sinceSnapshotEnabled = sinceSnapshotOnlyOnFlightMap,
+                            snapshotEpochMs = flightMapSnapshotEpochMs,
+                            onSinceSnapshotEnabledChange = { enabled ->
+                                sinceSnapshotOnlyOnFlightMap = enabled
+                                if (enabled && flightMapSnapshotEpochMs == null) {
+                                    flightMapSnapshotEpochMs = System.currentTimeMillis()
+                                }
+                            },
+                            onCaptureSnapshot = {
+                                flightMapSnapshotEpochMs = System.currentTimeMillis()
+                            },
+                            onLiveCollect = onLiveCollect,
+                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                        )
+                    }
                 }
             }
         } else {
@@ -5211,6 +5303,9 @@ private fun DetectionPage(
 
 private data class SignalIntelSnapshot(
     val encounterWindowCount: Int,
+    val nfcEncounterCount: Int,
+    val nfcUniqueTagCount: Int,
+    val lastNfcEpochMs: Long?,
     val uwbEncounterCount: Int,
     val uwbUniqueDeviceCount: Int,
     val lastUwbEpochMs: Long?,
@@ -5238,6 +5333,9 @@ private fun buildSignalIntelSnapshot(
         windowMs = SIGNAL_INTEL_WINDOW_MS,
         maxEncounters = SIGNAL_INTEL_MAX_ENCOUNTERS
     )
+
+    val nfcEncounters = window.filter { it.source == EncounterSource.NFC }
+    val lastNfcEpochMs = nfcEncounters.maxOfOrNull { it.timestampEpochMs }
 
     val uwbEncounters = window.filter { it.source == EncounterSource.UWB }
     val lastUwbEpochMs = uwbEncounters.maxOfOrNull { it.timestampEpochMs }
@@ -5276,6 +5374,9 @@ private fun buildSignalIntelSnapshot(
         if (uwbEncounters.isEmpty()) {
             add("No UWB encounters in recent window. Verify UWB source toggle or ingest feed.")
         }
+        if (nfcEncounters.isEmpty()) {
+            add("No NFC encounters in recent window. NFC is event-driven and appears after Android tag intents are received.")
+        }
         if (gnssLocations < 4) {
             add("Insufficient location samples for reliable GNSS interference inference.")
         }
@@ -5296,6 +5397,9 @@ private fun buildSignalIntelSnapshot(
 
     return SignalIntelSnapshot(
         encounterWindowCount = window.size,
+        nfcEncounterCount = nfcEncounters.size,
+        nfcUniqueTagCount = nfcEncounters.map { it.primaryId }.toSet().size,
+        lastNfcEpochMs = lastNfcEpochMs,
         uwbEncounterCount = uwbEncounters.size,
         uwbUniqueDeviceCount = uwbEncounters.map { it.primaryId }.toSet().size,
         lastUwbEpochMs = lastUwbEpochMs,
@@ -5333,6 +5437,19 @@ private fun DetectionSignalIntelPage(
                 Text("Signal Intel", style = MaterialTheme.typography.headlineSmall)
                 Button(onClick = onRefresh) {
                     Text("Refresh")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("NFC", fontWeight = FontWeight.Bold)
+                    Text("Encounters: ${intel.nfcEncounterCount}")
+                    Text("Unique tags/devices: ${intel.nfcUniqueTagCount}")
+                    Text("Last seen: ${intel.lastNfcEpochMs?.let(::formatEpoch) ?: "n/a"}")
                 }
             }
         }
@@ -5587,11 +5704,13 @@ private fun DetectionLogsPage(
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
+                AlertLogType.NFC -> Color(0xFF2E7D32)
                 AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
             }
             val typeLabel = when (entry.type) {
                 AlertLogType.APPROACH -> "Approach"
                 AlertLogType.TRACKER -> "Tracker"
+                AlertLogType.NFC -> "NFC"
                 AlertLogType.FOREIGN_SIGNAL -> "Foreign Signal"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
@@ -6865,16 +6984,68 @@ private fun DetectionMapPage(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
         ) {
-            Text(mapTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            AssistChip(
-                onClick = { legendPanelVisible = !legendPanelVisible },
-                label = {
-                    Text(
-                        if (legendPanelVisible) "Hide Legend" else "Show Legend",
-                        style = MaterialTheme.typography.labelSmall
+            Box(
+                modifier = Modifier.weight(1f),
+                contentAlignment = androidx.compose.ui.Alignment.CenterEnd
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AssistChip(
+                        onClick = { controlsVisible = !controlsVisible },
+                        label = {
+                            Text(
+                                text = if (controlsVisible) "Panels: On" else "Panels: Off",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                    AssistChip(
+                        onClick = {
+                            val location = currentLocation
+                            if (location == null) {
+                                mapError = "Current location unavailable. Wait for GPS fix and try again."
+                                return@AssistChip
+                            }
+                            mapError = null
+                            scope.launch {
+                                runCatching {
+                                    cameraPositionState.animate(
+                                        CameraUpdateFactory.newLatLngZoom(
+                                            LatLng(location.lat, location.lon),
+                                            17f
+                                        ),
+                                        650
+                                    )
+                                }.onFailure {
+                                    mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+                                }
+                            }
+                        },
+                        enabled = currentLocation != null,
+                        label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    AssistChip(
+                        onClick = { preciseDotsEnabled = !preciseDotsEnabled },
+                        label = {
+                            Text(
+                                text = if (preciseDotsEnabled) "Dots: On" else "Dots: Off",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                    AssistChip(
+                        onClick = { legendPanelVisible = !legendPanelVisible },
+                        label = {
+                            Text(
+                                if (legendPanelVisible) "Hide Legend" else "Legend",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                     )
                 }
-            )
+            }
         }
         if (!legendPanelVisible && legendItems.isNotEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -6948,53 +7119,6 @@ private fun DetectionMapPage(
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
                         Text("Pin Color Legend", fontWeight = FontWeight.Bold)
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            AssistChip(
-                                onClick = { controlsVisible = !controlsVisible },
-                                label = {
-                                    Text(
-                                        text = if (controlsVisible) "Panels: On" else "Panels: Off",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
-                            AssistChip(
-                                onClick = {
-                                    val location = currentLocation
-                                    if (location == null) {
-                                        mapError = "Current location unavailable. Wait for GPS fix and try again."
-                                        return@AssistChip
-                                    }
-                                    mapError = null
-                                    scope.launch {
-                                        runCatching {
-                                            cameraPositionState.animate(
-                                                CameraUpdateFactory.newLatLngZoom(
-                                                    LatLng(location.lat, location.lon),
-                                                    17f
-                                                ),
-                                                650
-                                            )
-                                        }.onFailure {
-                                            mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
-                                        }
-                                    }
-                                },
-                                enabled = currentLocation != null,
-                                label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
-                            )
-                            AssistChip(
-                                onClick = { preciseDotsEnabled = !preciseDotsEnabled },
-                                label = {
-                                    Text(
-                                        text = if (preciseDotsEnabled) "Precise Dots: On" else "Precise Dots: Off",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
-                        }
                     }
 
                     Text(mapDescription, style = MaterialTheme.typography.bodySmall)
@@ -8801,6 +8925,18 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
         secondaryIdLabel = "Device Name"
     ),
     SourceTypeUiMeta(
+        source = SourceCatalog.SOURCE_NFC,
+        scanType = SourceCatalog.KEY_NFC,
+        settingsLabel = "NFC",
+        legendLabel = "NFC",
+        listLabel = "NFC",
+        glyph = "NFC",
+        hue = BitmapDescriptorFactory.HUE_RED,
+        color = Color(0xFFEF5350),
+        supportsSecondaryId = true,
+        secondaryIdLabel = "Tech"
+    ),
+    SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_REMOTE_ID,
         scanType = SourceCatalog.KEY_REMOTE_ID,
         settingsLabel = "Remote ID",
@@ -10015,6 +10151,7 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_LE_SWEEP -> "Bluetooth LE Sweep Aggregate Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_CLASSIC -> "Bluetooth Classic Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
+        EncounterSource.NFC -> "NFC Tag Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.CELL -> "Cell Tower Details" to readCellTowerFields(encounter.rawPayloadJson)
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readRemoteIdFields(encounter.rawPayloadJson)
         EncounterSource.CAMERA -> "Road Camera Details" to readCameraFields(encounter.rawPayloadJson)
@@ -10677,6 +10814,7 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
     val wifiScore = computeWifiAnomalyScore(ordered)
     val bleScore = computeBleAnomalyScore(ordered)
     val gnssScore = computeGnssInterferenceScore(ordered)
+    val nfcScore = computeNfcActivityScore(ordered, windowMinutes)
     val uwbScore = computeUwbActivityScore(ordered, windowMinutes)
     val rfTextureScore = computeRfTextureScore(ordered)
 
@@ -10701,15 +10839,16 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
     val sourceDiversityScore = ((distinctSources - 1).toDouble() / 6.0).coerceIn(0.0, 1.0)
 
     val weightedScore = (
-        0.18 * cellularScore +
-            0.14 * wifiScore +
-            0.14 * bleScore +
-            0.14 * gnssScore +
-            0.08 * uwbScore +
-            0.18 * rfTextureScore +
-            0.07 * acousticProxyScore +
-            0.07 * magneticProxyScore +
-            0.10 * sourceDiversityScore
+        0.16 * cellularScore +
+            0.13 * wifiScore +
+            0.13 * bleScore +
+            0.13 * gnssScore +
+            0.07 * nfcScore +
+            0.07 * uwbScore +
+            0.14 * rfTextureScore +
+            0.06 * acousticProxyScore +
+            0.06 * magneticProxyScore +
+            0.05 * sourceDiversityScore
         ).coerceIn(0.0, 1.0)
 
     val score = (weightedScore * 100.0).roundToInt().coerceIn(0, 100)
@@ -10726,6 +10865,7 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
         wifiScore,
         bleScore,
         gnssScore,
+        nfcScore,
         uwbScore,
         rfTextureScore
     ).count { it > 0.0 }
@@ -10733,12 +10873,15 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
     val confidence = (
         0.50 * (ordered.size.toDouble() / 180.0).coerceIn(0.0, 1.0) +
             0.25 * (windowMinutes / 30.0).coerceIn(0.0, 1.0) +
-            0.25 * (activeSignalFamilies.toDouble() / 6.0).coerceIn(0.0, 1.0)
+            0.25 * (activeSignalFamilies.toDouble() / 7.0).coerceIn(0.0, 1.0)
         ).coerceIn(0.0, 1.0)
 
     val unavailable = buildList {
         if (ordered.none { it.source == EncounterSource.UWB }) {
             add("UWB (no recent encounters)")
+        }
+        if (ordered.none { it.source == EncounterSource.NFC }) {
+            add("NFC (no recent encounters)")
         }
         if (!directAcousticObserved) add("Direct acoustic signature channel")
         if (!directMagneticObserved) add("Direct magnetometer disturbance channel")
@@ -10762,6 +10905,7 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
         wifiAnomalyScore = wifiScore,
         bleAnomalyScore = bleScore,
         gnssInterferenceScore = gnssScore,
+        nfcActivityScore = nfcScore,
         uwbActivityScore = uwbScore,
         rfTextureScore = rfTextureScore,
         acousticProxyScore = acousticProxyScore,
@@ -10770,6 +10914,25 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
         directMagneticObserved = directMagneticObserved,
         unavailableSignals = unavailable
     )
+}
+
+private fun computeNfcActivityScore(encounters: List<Encounter>, windowMinutes: Double): Double {
+    val nfcEncounters = encounters.filter { it.source == EncounterSource.NFC }
+    if (nfcEncounters.isEmpty()) return 0.0
+
+    val safeWindow = windowMinutes.coerceAtLeast(1.0)
+    val encounterDensityPerMinute = nfcEncounters.size.toDouble() / safeWindow
+    val densityScore = (encounterDensityPerMinute / 3.0).coerceIn(0.0, 1.0)
+    val uniqueTagScore = (nfcEncounters.map { it.primaryId }.toSet().size.toDouble() / nfcEncounters.size.toDouble())
+        .coerceIn(0.0, 1.0)
+    val latestEpoch = nfcEncounters.maxOfOrNull { it.timestampEpochMs } ?: 0L
+    val recencyScore = if ((System.currentTimeMillis() - latestEpoch) <= 120_000L) 1.0 else 0.4
+
+    return (
+        0.65 * densityScore +
+            0.25 * uniqueTagScore +
+            0.10 * recencyScore
+        ).coerceIn(0.0, 1.0)
 }
 
 private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolean {
@@ -11301,6 +11464,22 @@ private fun ensureTrackerNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureNfcNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(NFC_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        NFC_ALERT_CHANNEL_ID,
+        "NFC Tap Alerts",
+        NotificationManager.IMPORTANCE_DEFAULT
+    ).apply {
+        description = "Alerts when NFC tags/devices are tapped and ingested"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun ensureForeignSignalNotificationChannel(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -11393,6 +11572,24 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
         .build()
 
     val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun sendNfcNotification(context: android.content.Context, encounter: Encounter) {
+    val title = "NFC tag detected"
+    val sourceLabel = listSourceLabel(encounter.source.name, encounter.secondaryId)
+    val content = "$sourceLabel ${encounter.primaryId} • ${formatEpoch(encounter.timestampEpochMs)}"
+
+    val notification = NotificationCompat.Builder(context, NFC_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_more)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("nfc:${encounter.primaryId}:${encounter.timestampEpochMs}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 

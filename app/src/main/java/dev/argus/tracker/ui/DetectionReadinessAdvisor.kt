@@ -9,12 +9,15 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.nfc.NfcAdapter
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.hardware.Sensor
 import android.hardware.SensorManager
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.domain.SourceCatalog
+import dev.argus.tracker.worker.ScanSettings
 
 data class DetectionReadinessItem(
     val id: String,
@@ -129,6 +132,16 @@ object DetectionReadinessAdvisor {
         }.getOrDefault(false)
 
         val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
+        val nfcAdapter = runCatching { NfcAdapter.getDefaultAdapter(context) }.getOrNull()
+        val nfcHardwareAvailable = nfcAdapter != null
+        val nfcEnabled = nfcAdapter?.isEnabled == true
+        val lastNfcObservationEpochMs = ScanSettings.getSourceLastRawObservationEpochMs(context, SourceCatalog.KEY_NFC)
+        val nowEpochMs = System.currentTimeMillis()
+        val nfcLastSeenCurrentValue = when {
+            !nfcHardwareAvailable -> "Not supported"
+            lastNfcObservationEpochMs > 0L -> "${formatAgeShort(nowEpochMs - lastNfcObservationEpochMs)} ago"
+            else -> "No events observed yet"
+        }
         val ingestDir = context.filesDir.resolve("ingest")
         val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
@@ -281,6 +294,37 @@ object DetectionReadinessAdvisor {
                 settingsIntent = Intent(Settings.ACTION_SETTINGS)
             ),
             DetectionReadinessItem(
+                id = "source_nfc_hardware",
+                title = "NFC Hardware Availability",
+                recommendedValue = "Available",
+                currentValue = if (nfcHardwareAvailable) "Available" else "Not available",
+                isMissing = !nfcHardwareAvailable,
+                openSettingsLabel = "Open System Settings",
+                settingsIntent = Intent(Settings.ACTION_SETTINGS)
+            ),
+            DetectionReadinessItem(
+                id = "setting_nfc_enabled",
+                title = "NFC Radio",
+                recommendedValue = "Enabled",
+                currentValue = when {
+                    !nfcHardwareAvailable -> "Not supported"
+                    nfcEnabled -> "Enabled"
+                    else -> "Disabled"
+                },
+                isMissing = nfcHardwareAvailable && !nfcEnabled,
+                openSettingsLabel = "Open NFC Settings",
+                settingsIntent = Intent(Settings.ACTION_NFC_SETTINGS)
+            ),
+            DetectionReadinessItem(
+                id = "source_nfc_recent_event",
+                title = "NFC Last Event Age",
+                recommendedValue = "Seen recently",
+                currentValue = nfcLastSeenCurrentValue,
+                isMissing = nfcHardwareAvailable && nfcEnabled && lastNfcObservationEpochMs <= 0L,
+                openSettingsLabel = "Open NFC Settings",
+                settingsIntent = Intent(Settings.ACTION_NFC_SETTINGS)
+            ),
+            DetectionReadinessItem(
                 id = "source_sdr",
                 title = "SDR Ingest Feed",
                 recommendedValue = "SDR ingest feed configured",
@@ -310,5 +354,17 @@ object DetectionReadinessAdvisor {
                 settingsIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS)
             )
         )
+    }
+
+    private fun formatAgeShort(ageMs: Long): String {
+        val safeAgeMs = ageMs.coerceAtLeast(0L)
+        val seconds = safeAgeMs / 1000L
+        val days = seconds / 86_400L
+        if (days > 0L) return "${days}d"
+        val hours = seconds / 3_600L
+        if (hours > 0L) return "${hours}h"
+        val minutes = seconds / 60L
+        if (minutes > 0L) return "${minutes}m"
+        return "${seconds}s"
     }
 }
