@@ -74,6 +74,7 @@ object ScanSettings {
     private const val KEY_SOURCE_TIMING_WINDOW_SUFFIX = "_scan_timing_window"
     private const val KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX = "_scan_interval_seconds"
     private const val KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX = "_last_scan_epoch_ms"
+    private const val KEY_SOURCE_LAST_RAW_OBSERVATION_EPOCH_MS_SUFFIX = "_last_raw_observation_epoch_ms"
     private const val SOURCE_TIMING_WINDOW_SIZE = 120
     private const val MAX_INTERVAL_CHANGE_EVENTS = 50
     const val DEFAULT_SCAN_INTERVAL_SECONDS = 15L
@@ -141,6 +142,7 @@ object ScanSettings {
         val sourceScanTimings: List<SourceScanTiming>,
         val sourceScanIntervals: Map<String, Long>,
         val sourceLastScanEpochs: Map<String, Long>,
+        val sourceLastRawObservationEpochs: Map<String, Long>,
         val scanIntervalChangeEvents: List<IntervalChangeEvent>
     )
 
@@ -149,6 +151,7 @@ object ScanSettings {
         sourceScanTimings = getSourceScanTimings(context),
         sourceScanIntervals = getAllSourceScanIntervalSeconds(context),
         sourceLastScanEpochs = getAllSourceLastScanEpochMs(context),
+        sourceLastRawObservationEpochs = getAllSourceLastRawObservationEpochMs(context),
         scanIntervalChangeEvents = getScanIntervalChangeEvents(context, 10)
     )
 
@@ -219,15 +222,18 @@ object ScanSettings {
 
     fun setBleSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_BLE_ENABLED, enabled)
+        // Keep legacy Classic key in sync now that Bluetooth is a unified sensor gate.
+        setSensorEnabled(context, KEY_SENSOR_BT_CLASSIC_ENABLED, enabled)
+        // Keep Remote ID gate synchronized with Bluetooth sensor collection toggle.
+        setSensorEnabled(context, KEY_SENSOR_REMOTE_ID_ENABLED, enabled)
     }
 
     fun isBluetoothClassicSensorEnabled(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SENSOR_BT_CLASSIC_ENABLED, true)
+        return isBleSensorEnabled(context)
     }
 
     fun setBluetoothClassicSensorEnabled(context: Context, enabled: Boolean) {
-        setSensorEnabled(context, KEY_SENSOR_BT_CLASSIC_ENABLED, enabled)
+        setBleSensorEnabled(context, enabled)
     }
 
     fun isCellularSensorEnabled(context: Context): Boolean =
@@ -239,11 +245,10 @@ object ScanSettings {
     }
 
     fun isRemoteIdSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SENSOR_REMOTE_ID_ENABLED, true)
+        isBleSensorEnabled(context)
 
     fun setRemoteIdSensorEnabled(context: Context, enabled: Boolean) {
-        setSensorEnabled(context, KEY_SENSOR_REMOTE_ID_ENABLED, enabled)
+        setBleSensorEnabled(context, enabled)
     }
 
     fun isUwbSensorEnabled(context: Context): Boolean =
@@ -944,6 +949,29 @@ object ScanSettings {
 
     fun getAllSourceLastScanEpochMs(context: Context): Map<String, Long> =
         SOURCE_TYPES.associateWith { type -> getSourceLastScanEpochMs(context, type) }
+
+    fun getSourceLastRawObservationEpochMs(context: Context, sourceType: String): Long {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return 0L
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_RAW_OBSERVATION_EPOCH_MS_SUFFIX)
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(key, 0L)
+            .coerceAtLeast(0L)
+    }
+
+    fun setSourceLastRawObservationEpochMs(context: Context, sourceType: String, epochMs: Long) {
+        val normalizedType = sourceType.trim().lowercase()
+        if (normalizedType !in SOURCE_TYPES) return
+        val safeValue = epochMs.coerceAtLeast(0L)
+        val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_RAW_OBSERVATION_EPOCH_MS_SUFFIX)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(key, safeValue)
+            .apply()
+    }
+
+    fun getAllSourceLastRawObservationEpochMs(context: Context): Map<String, Long> =
+        SOURCE_TYPES.associateWith { type -> getSourceLastRawObservationEpochMs(context, type) }
 
     fun recordSourceScanDurationMs(context: Context, sourceType: String, durationMs: Long) {
         val normalizedType = sourceType.trim().lowercase()

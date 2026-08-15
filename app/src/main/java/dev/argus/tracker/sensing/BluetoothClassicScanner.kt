@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
+import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.domain.SignalScanner
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -40,7 +41,7 @@ class BluetoothClassicScanner(
 
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isBluetoothClassicSensorEnabled(context)) {
-            logSkipped("Bluetooth Classic sensor disabled in settings")
+            logSkipped("Bluetooth sensor disabled in settings")
             return emptyList()
         }
         if (!hasScanPermission()) {
@@ -112,6 +113,11 @@ class BluetoothClassicScanner(
                                     discoveredRssi = rssi
                                 )
                                 discoveredCount += 1
+                                ScanSettings.setSourceLastRawObservationEpochMs(
+                                    context = context,
+                                    sourceType = SourceCatalog.KEY_BT_CLASSIC,
+                                    epochMs = System.currentTimeMillis()
+                                )
                                 val existing = captured[key]
                                 if (existing == null || (encounter.rssiDbm ?: Int.MIN_VALUE) > (existing.rssiDbm ?: Int.MIN_VALUE)) {
                                     captured[key] = encounter
@@ -315,13 +321,33 @@ class BluetoothClassicScanner(
             discoveredCount == 0 -> "No discoverable Classic devices observed during inquiry"
             else -> "Classic candidates were observed but filtered to zero unique encounters"
         }
+        val lastRawObservationEpochMs = ScanSettings.getSourceLastRawObservationEpochMs(
+            context = context,
+            sourceType = SourceCatalog.KEY_BT_CLASSIC
+        )
+        val lastRawLabel = if (lastRawObservationEpochMs > 0L) {
+            " Last raw inquiry sighting: ${formatElapsedSince(lastRawObservationEpochMs, now)} ago."
+        } else {
+            " Last raw inquiry sighting: never."
+        }
 
         OperationalErrorLogStore.append(
             context = context,
             category = "SCAN_SOURCE_DIAGNOSTIC",
             source = "bt_classic",
             severity = "WARNING",
-            message = "Bluetooth Classic empty scan x$consecutiveEmptyScans (started=$discoveryStarted, bonded=$bondedCount, found=$discoveredCount). $hint"
+            message = "Bluetooth Classic empty scan x$consecutiveEmptyScans (started=$discoveryStarted, bonded=$bondedCount, found=$discoveredCount). $hint.$lastRawLabel"
         )
+    }
+
+    private fun formatElapsedSince(referenceEpochMs: Long, nowEpochMs: Long): String {
+        val elapsedMs = (nowEpochMs - referenceEpochMs).coerceAtLeast(0L)
+        val elapsedSeconds = elapsedMs / 1000L
+        return when {
+            elapsedSeconds < 60L -> "${elapsedSeconds}s"
+            elapsedSeconds < 3600L -> "${elapsedSeconds / 60L}m"
+            elapsedSeconds < 86_400L -> "${elapsedSeconds / 3600L}h"
+            else -> "${elapsedSeconds / 86_400L}d"
+        }
     }
 }

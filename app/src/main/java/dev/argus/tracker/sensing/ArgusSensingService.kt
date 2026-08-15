@@ -139,7 +139,7 @@ class ArgusSensingService(
                         category = "SCAN_SOURCE_DIAGNOSTIC",
                         source = sourceType,
                         severity = "WARNING",
-                        message = "Dropped ${encounters.size} Bluetooth Classic scanner encounter(s) because Classic source is disabled"
+                        message = "Dropped ${encounters.size} Bluetooth Classic scanner encounter(s) because Bluetooth source is disabled"
                     )
                     emptyList()
                 }
