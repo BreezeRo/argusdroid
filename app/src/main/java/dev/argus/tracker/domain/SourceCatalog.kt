@@ -36,6 +36,7 @@ object SourceCatalog {
     val SOURCE_AIRCRAFT: String = EncounterSource.AIRCRAFT.name
     val SOURCE_UWB: String = EncounterSource.UWB.name
     val SOURCE_SDR: String = EncounterSource.SDR.name
+    val SOURCE_ARGUS_MESH: String = EncounterSource.ARGUS_MESH.name
     val SOURCE_UNKNOWN_RF: String = EncounterSource.UNKNOWN_RF.name
 
     val SCAN_SOURCES: List<ScanSourceDefinition> = listOf(

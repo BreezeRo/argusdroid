@@ -124,6 +124,7 @@ import dev.argus.tracker.sensing.CellTowerLookupService
 import dev.argus.tracker.sensing.DetectionLocation
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.NoFlyZoneOverlayProvider
+import dev.argus.tracker.sensing.AcousticRealtimeForegroundServiceController
 import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
@@ -417,6 +418,7 @@ private data class SensorGateSettings(
     val uwbEnabled: Boolean,
     val sdrEnabled: Boolean,
     val directAcousticEnabled: Boolean,
+    val directAcousticRealtimeEnabled: Boolean,
     val directMagneticEnabled: Boolean
 )
 
@@ -644,6 +646,7 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
         sdrEnabled = ScanSettings.isSdrSensorEnabled(context),
         directAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context),
+        directAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context),
         directMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
     )
 
@@ -702,6 +705,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var foreignSignalAlertsEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalAlertsEnabled(context)) }
     var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
     var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
+    var foreignDirectAcousticRealtimeEnabled by remember {
+        mutableStateOf(ScanSettings.isForeignDirectAcousticRealtimeEnabled(context))
+    }
+    var foreignDirectAcousticGunshotEnabled by remember {
+        mutableStateOf(ScanSettings.isForeignDirectAcousticGunshotEnabled(context))
+    }
     var foreignDirectMagneticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectMagneticEnabled(context)) }
     var chainLinkEnabled by remember { mutableStateOf(ScanSettings.isChainLinkEnabled(context)) }
     var chainNodeId by remember { mutableStateOf(ScanSettings.getChainNodeId(context)) }
@@ -790,6 +799,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
     val summary by viewModel.summary.collectAsState()
     val chainMesh by app.container.chainLinkCoordinator.observeMesh().collectAsState()
+    val meshPeerEncounters = remember(chainMesh) {
+        buildMeshPeerEncounters(chainMesh)
+    }
+    val recentPipelineEncounters = remember(recent, meshPeerEncounters) {
+        mergePipelineEncounters(recent, meshPeerEncounters)
+    }
+    val recent100PipelineEncounters = remember(recent100, meshPeerEncounters) {
+        mergePipelineEncounters(recent100, meshPeerEncounters)
+    }
+    val allPipelineEncounters = remember(allEncounters, meshPeerEncounters) {
+        mergePipelineEncounters(allEncounters, meshPeerEncounters)
+    }
     val hasMapsApiKey by remember(context) { mutableStateOf(hasGoogleMapsApiKey(context)) }
     var mapPrewarmReady by remember { mutableStateOf(!hasMapsApiKey) }
     val appStartupReady = startupConfigLoaded && trackingObserverInitialized && operationalObserverInitialized
@@ -842,7 +863,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(chainMesh, alertLogs, recent100) {
+    LaunchedEffect(chainMesh, alertLogs, recent100PipelineEncounters) {
         delay(750)
         val peersTotal = chainMesh.peers.size
         val peersConnected = chainMesh.peers.count { it.state == ChainPeerState.CONNECTED }
@@ -856,7 +877,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             }
             .firstOrNull()
         val recentDevicePoints = withContext(Dispatchers.Default) {
-            buildWearDevicePoints(recent100)
+            buildWearDevicePoints(recent100PipelineEncounters)
         }
         val latestAlert = alertLogs.maxByOrNull { it.timestampEpochMs }
         val alertMessage = latestAlert?.message?.takeIf { it.isNotBlank() } ?: "No recent alerts"
@@ -1015,6 +1036,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
+        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -1027,6 +1050,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             ScanSettings.setChainPersistentChannelEnabled(context, true)
         }
         MeshForegroundServiceController.ensureState(context)
+        AcousticRealtimeForegroundServiceController.ensureState(context)
         startupConfigLoaded = true
     }
 
@@ -1664,11 +1688,14 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
                                 "sdr" -> ScanSettings.setSdrSensorEnabled(context, enabled)
                                 "direct_acoustic" -> ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
+                                "direct_acoustic_realtime" -> ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, enabled)
                                 "direct_magnetic" -> ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
                             }
                             RemoteIdForegroundServiceController.ensureState(context)
+                            AcousticRealtimeForegroundServiceController.ensureState(context)
                             sensorGateSettings = readSensorGateSettings(context)
                             foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                            foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
                             foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-sensor-gate")
@@ -1732,6 +1759,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     foreignSignalAlertsEnabled = foreignSignalAlertsEnabled,
                     foreignSignalAlertThreshold = foreignSignalAlertThreshold,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
+                    foreignDirectAcousticRealtimeEnabled = foreignDirectAcousticRealtimeEnabled,
+                    foreignDirectAcousticGunshotEnabled = foreignDirectAcousticGunshotEnabled,
                     foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
                     onSourceScanIntervalSelected = { sourceType, seconds ->
                         val previous = sourceScanIntervals[sourceType]
@@ -1832,10 +1861,22 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onForeignDirectAcousticEnabledChanged = { enabled ->
                         foreignDirectAcousticEnabled = enabled
                         ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         sensorGateSettings = readSensorGateSettings(context)
                         scope.launch {
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-acoustic")
                         }
+                    },
+                    onForeignDirectAcousticRealtimeEnabledChanged = { enabled ->
+                        foreignDirectAcousticRealtimeEnabled = enabled
+                        ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, enabled)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
+                        sensorGateSettings = readSensorGateSettings(context)
+                        sensorStatuses = SensorStatusProvider.read(context)
+                    },
+                    onForeignDirectAcousticGunshotEnabledChanged = { enabled ->
+                        foreignDirectAcousticGunshotEnabled = enabled
+                        ScanSettings.setForeignDirectAcousticGunshotEnabled(context, enabled)
                     },
                     onForeignDirectMagneticEnabledChanged = { enabled ->
                         foreignDirectMagneticEnabled = enabled
@@ -1943,6 +1984,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
+                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -1950,6 +1993,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
                         MeshForegroundServiceController.ensureState(context)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Backup imported from $fileName"
                     },
@@ -1995,6 +2039,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
+                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -2002,6 +2048,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
                         MeshForegroundServiceController.ensureState(context)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Encrypted backup imported from $fileName"
                     },
@@ -2052,6 +2099,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         )
                         ScanSettings.setForeignDirectAcousticEnabled(context, false)
+                        ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, false)
+                        ScanSettings.setForeignDirectAcousticGunshotEnabled(context, false)
                         ScanSettings.setForeignDirectMagneticEnabled(context, false)
 
                         intervalManagedSourceTypes.forEach { sourceType ->
@@ -2088,9 +2137,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = true
                         foreignSignalAlertThreshold = ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         foreignDirectAcousticEnabled = false
+                        foreignDirectAcousticRealtimeEnabled = false
+                        foreignDirectAcousticGunshotEnabled = false
                         foreignDirectMagneticEnabled = false
                         sensorGateSettings = readSensorGateSettings(context)
                         sensorStatuses = SensorStatusProvider.read(context)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
 
                         scope.launch {
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-defaults-reset")
@@ -2146,6 +2198,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
+                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
+                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
@@ -2156,6 +2210,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
                         bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
                         bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
+                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Hard reset completed: local data/logs cleared and mesh settings reset."
                     }
@@ -2167,8 +2222,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     initialTabRequest = detectionInitialTabRequest,
                     onInitialTabRequestHandled = { detectionInitialTabRequest = null },
                     readinessItems = readinessItems,
-                    encounters = recent,
-                    meshInsightEncounters = allEncounters,
+                    encounters = recentPipelineEncounters,
+                    meshInsightEncounters = allPipelineEncounters,
                     foreignSignalRiskEnabled = foreignSignalRiskEnabled,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
@@ -2382,8 +2437,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100,
-                    allEncounters = allEncounters,
+                    recentEncounters = recent100PipelineEncounters,
+                    allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 0,
                     onClearLogs = {
@@ -2413,8 +2468,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100,
-                    allEncounters = allEncounters,
+                    recentEncounters = recent100PipelineEncounters,
+                    allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 2,
                     onClearLogs = {
@@ -2444,8 +2499,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100,
-                    allEncounters = allEncounters,
+                    recentEncounters = recent100PipelineEncounters,
+                    allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 2,
                     onClearLogs = {
@@ -2477,8 +2532,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 val selectedPinLat = entry.arguments?.getString("lat")?.toDoubleOrNull()
                 val selectedPinLon = entry.arguments?.getString("lon")?.toDoubleOrNull()
                 val selectedPinTs = entry.arguments?.getString("ts")?.toLongOrNull()
-                val deviceEncounters = remember(allEncounters, source, primaryId) {
-                    allEncounters.filter { it.source.name == source && it.primaryId == primaryId }
+                val deviceEncounters = remember(allPipelineEncounters, source, primaryId) {
+                    allPipelineEncounters.filter { it.source.name == source && it.primaryId == primaryId }
                 }
                 val item = remember(
                     deviceEncounters,
@@ -2517,7 +2572,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 val source = Uri.decode(entry.arguments?.getString("source") ?: "")
                 val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
                 val timestamp = entry.arguments?.getString("timestamp")?.toLongOrNull() ?: -1L
-                val encounter = recent.firstOrNull {
+                val encounter = allPipelineEncounters.firstOrNull {
                     it.source.name == source &&
                         it.primaryId == primaryId &&
                         it.timestampEpochMs == timestamp
@@ -2533,7 +2588,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     source = source,
                     primaryId = primaryId,
                     isOwnedTarget = isOwnedTarget,
-                    encounters = allEncounters,
+                    encounters = allPipelineEncounters,
                     nowEpochMs = appNowEpochMs,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
@@ -2551,7 +2606,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 MovingDevicePathMapPage(
                     source = source,
                     primaryId = primaryId,
-                    encounters = allEncounters,
+                    encounters = allPipelineEncounters,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
@@ -3286,6 +3341,13 @@ private fun HomePage(
                             sensorStatusByName["Acoustic (Direct)"]
                         ),
                         HomeSensorToggle(
+                            "direct_acoustic_realtime",
+                            "Acoustic (Real-time)",
+                            "Continuous on-device listening",
+                            sensorGateSettings.directAcousticRealtimeEnabled,
+                            sensorStatusByName["Acoustic (Real-time)"]
+                        ),
+                        HomeSensorToggle(
                             "direct_magnetic",
                             "Magnetometer (Direct)",
                             "On-device magnetic proxy",
@@ -3407,6 +3469,8 @@ private fun AppSettingsPage(
     foreignSignalAlertsEnabled: Boolean,
     foreignSignalAlertThreshold: String,
     foreignDirectAcousticEnabled: Boolean,
+    foreignDirectAcousticRealtimeEnabled: Boolean,
+    foreignDirectAcousticGunshotEnabled: Boolean,
     foreignDirectMagneticEnabled: Boolean,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
     onAllSourceScanIntervalsSelected: (Long) -> Unit,
@@ -3423,6 +3487,8 @@ private fun AppSettingsPage(
     onForeignSignalAlertsEnabledChanged: (Boolean) -> Unit,
     onForeignSignalAlertThresholdChanged: (String) -> Unit,
     onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
+    onForeignDirectAcousticRealtimeEnabledChanged: (Boolean) -> Unit,
+    onForeignDirectAcousticGunshotEnabledChanged: (Boolean) -> Unit,
     onForeignDirectMagneticEnabledChanged: (Boolean) -> Unit,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
@@ -4036,13 +4102,35 @@ private fun AppSettingsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            Text("Real-time acoustic channel")
+                            Switch(
+                                checked = foreignDirectAcousticRealtimeEnabled,
+                                onCheckedChange = onForeignDirectAcousticRealtimeEnabledChanged,
+                                enabled = foreignDirectAcousticEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Experimental gunshot detection")
+                            Switch(
+                                checked = foreignDirectAcousticGunshotEnabled,
+                                onCheckedChange = onForeignDirectAcousticGunshotEnabledChanged,
+                                enabled = foreignDirectAcousticEnabled && foreignDirectAcousticRealtimeEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text("Direct magnetometer channel")
                             Switch(
                                 checked = foreignDirectMagneticEnabled,
                                 onCheckedChange = onForeignDirectMagneticEnabledChanged
                             )
                         }
-                        Text("Direct acoustic and magnetometer channels ingest live samples when enabled.")
+                        Text("Real-time acoustic runs continuously while tracking. Gunshot detection is experimental and may produce false positives.")
                     }
                 }
             }
@@ -4639,12 +4727,14 @@ private fun DetectionPage(
     var selectedTab by rememberSaveable { mutableStateOf(0) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(true) }
+    var identityModeOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     var selectedMapSubTab by rememberSaveable { mutableStateOf(0) }
     var flightMapPinLimit by rememberSaveable { mutableStateOf(1000) }
     var liveOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
+    var identityModeOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     var deviceMapAircraftRadiusMiles by rememberSaveable { mutableStateOf(50) }
@@ -4703,7 +4793,9 @@ private fun DetectionPage(
         deviceCandidatesPrepared = false
 
         allDeviceCandidates = withContext(Dispatchers.Default) {
-            val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { it.timestampEpochMs }
+            val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { encounter ->
+                encounterFreshnessEpochMs(encounter)
+            }
             val latestSnapshot = latestSnapshotEpochMs ?: Long.MIN_VALUE
             val recentSnapshotEncounters = meshInsightEncounters.filter { encounter ->
                 val sourceType = scanTypeKeyForSourceName(encounter.source.name)
@@ -4712,7 +4804,7 @@ private fun DetectionPage(
                     sourceScanIntervals = sourceScanIntervals,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                 )
-                encounter.timestampEpochMs >= latestSnapshot - recentWindowMs
+                encounterFreshnessEpochMs(encounter) >= latestSnapshot - recentWindowMs
             }
 
             val groupedByDevice = recentSnapshotEncounters
@@ -4723,7 +4815,9 @@ private fun DetectionPage(
                 .values
                 .asSequence()
                 .mapNotNull { deviceEncounters ->
-                    val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+                    val latest = deviceEncounters.maxByOrNull { encounter ->
+                        encounterFreshnessEpochMs(encounter)
+                    } ?: return@mapNotNull null
                     if (
                         shouldSuppressLikelyRandomizedWifiNoise(
                             source = latest.source,
@@ -4737,7 +4831,7 @@ private fun DetectionPage(
                     }
                     latest to deviceEncounters
                 }
-                .sortedByDescending { (latest, _) -> latest.timestampEpochMs }
+                .sortedByDescending { (latest, _) -> encounterFreshnessEpochMs(latest) }
                 .take(maxDeviceCandidatesToResolve)
                 .map { (latest, deviceEncounters) ->
                     val isCameraSource = latest.source == EncounterSource.CAMERA
@@ -4752,7 +4846,7 @@ private fun DetectionPage(
                         source = latest.source.name,
                         primaryId = latest.primaryId,
                         secondaryId = latest.secondaryId,
-                        latestTimestampEpochMs = latest.timestampEpochMs,
+                        latestTimestampEpochMs = encounterFreshnessEpochMs(latest),
                         seenCount = deviceEncounters.size,
                         encounters = deviceEncounters,
                         latestEncounter = latest,
@@ -4904,8 +4998,9 @@ private fun DetectionPage(
                     }
                 }
 
-                if (latestAircraftEpochMs == null || encounter.timestampEpochMs > latestAircraftEpochMs!!) {
-                    latestAircraftEpochMs = encounter.timestampEpochMs
+                val freshnessEpochMs = encounterFreshnessEpochMs(encounter)
+                if (latestAircraftEpochMs == null || freshnessEpochMs > latestAircraftEpochMs!!) {
+                    latestAircraftEpochMs = freshnessEpochMs
                 }
             }
 
@@ -4921,7 +5016,8 @@ private fun DetectionPage(
                 latestByAircraft.values
                     .map { acc ->
                         val latest = acc.latest
-                        val isLive = latest.timestampEpochMs >= aircraftLiveCutoffEpochMs
+                        val latestFreshnessEpochMs = encounterFreshnessEpochMs(latest)
+                        val isLive = latestFreshnessEpochMs >= aircraftLiveCutoffEpochMs
                         val sourceLabel = listSourceLabel(latest.source.name, latest.secondaryId)
                         val pinTitle = buildPinTitle(
                             sourceLabel = sourceLabel,
@@ -4930,12 +5026,12 @@ private fun DetectionPage(
                             motionBadge = null
                         )
                         val freshnessSnippet = if (isLive) {
-                            "Live • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
+                            "Live • Seen ${formatMapPinAge(latestFreshnessEpochMs)} ago"
                         } else {
-                            "Recent • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
+                            "Recent • Seen ${formatMapPinAge(latestFreshnessEpochMs)} ago"
                         }
                         val line1 = "Seen ${acc.seenCount}x"
-                        val line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}"
+                        val line2 = "$freshnessSnippet • Last ${formatEpoch(latestFreshnessEpochMs)}"
                         val line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
                         val pinSnippet = buildThreeLineSnippet(
                             line1 = line1,
@@ -4964,7 +5060,7 @@ private fun DetectionPage(
                                     acc.previous?.rawPayloadJson
                                 )
                             ),
-                            timestampEpochMs = latest.timestampEpochMs,
+                            timestampEpochMs = latestFreshnessEpochMs,
                             source = latest.source.name,
                             primaryId = latest.primaryId,
                             secondaryId = latest.secondaryId,
@@ -5154,7 +5250,7 @@ private fun DetectionPage(
                 source = candidate.source,
                 primaryId = candidate.primaryId,
                 secondaryId = candidate.secondaryId,
-                encounterTimestampEpochMs = null,
+                encounterTimestampEpochMs = candidate.latestEncounter.timestampEpochMs,
                 aircraftIconType = aircraftVisualHints?.iconType,
                 headingDegrees = resolvedAircraftHeading,
                 motionBadge = motionBadge,
@@ -5404,7 +5500,7 @@ private fun DetectionPage(
                                     pin.primaryId,
                                     pin.position.latitude,
                                     pin.position.longitude,
-                                    pin.timestampEpochMs
+                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
                                 )
                             }
                         },
@@ -5414,6 +5510,8 @@ private fun DetectionPage(
                         showLiveOnlyControl = true,
                         liveOnlyEnabled = liveOnlyOnDeviceMap,
                         onLiveOnlyEnabledChange = { liveOnlyOnDeviceMap = it },
+                        identityModeEnabled = identityModeOnDeviceMap,
+                        onIdentityModeEnabledChange = { identityModeOnDeviceMap = it },
                         showRadiusControl = true,
                         radiusMiles = deviceMapAircraftRadiusMiles,
                         onRadiusMilesChange = { miles ->
@@ -5520,7 +5618,7 @@ private fun DetectionPage(
                                     pin.primaryId,
                                     pin.position.latitude,
                                     pin.position.longitude,
-                                    pin.timestampEpochMs
+                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
                                 )
                             },
                             liveUpdatesAllowed = true,
@@ -5529,6 +5627,8 @@ private fun DetectionPage(
                             showLiveOnlyControl = true,
                             liveOnlyEnabled = liveOnlyOnFlightMap,
                             onLiveOnlyEnabledChange = { liveOnlyOnFlightMap = it },
+                            identityModeEnabled = identityModeOnFlightMap,
+                            onIdentityModeEnabledChange = { identityModeOnFlightMap = it },
                             showRadiusControl = true,
                             radiusMiles = flightMapRadiusMiles,
                             onRadiusMilesChange = { miles ->
@@ -6738,6 +6838,8 @@ private fun DetectionMapPage(
     showLiveOnlyControl: Boolean = false,
     liveOnlyEnabled: Boolean = false,
     onLiveOnlyEnabledChange: (Boolean) -> Unit = {},
+    identityModeEnabled: Boolean = false,
+    onIdentityModeEnabledChange: (Boolean) -> Unit = {},
     showRadiusControl: Boolean = false,
     radiusMiles: Int = 100,
     onRadiusMilesChange: (Int) -> Unit = {},
@@ -6803,6 +6905,29 @@ private fun DetectionMapPage(
             }
         }
     }
+    val displayFilteredPins = remember(filteredVisiblePins, identityModeEnabled) {
+        if (!identityModeEnabled) {
+            filteredVisiblePins
+        } else {
+            filteredVisiblePins.map { pin ->
+                val identityName = pin.secondaryId
+                    ?.trim()
+                    ?.takeIf { value -> value.isNotBlank() }
+                if (identityName == null) {
+                    pin
+                } else {
+                    pin.copy(
+                        title = buildPinTitle(
+                            sourceLabel = identityName,
+                            primaryId = pin.primaryId,
+                            secondaryId = null,
+                            motionBadge = pin.motionBadge
+                        )
+                    )
+                }
+            }
+        }
+    }
     val scrollState = if (useScrollableLayout) rememberScrollState() else null
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val mapProperties = remember(hasLocationPermission, mapStyleOptions) {
@@ -6848,24 +6973,24 @@ private fun DetectionMapPage(
             coverageAnchorUpdatedEpochMs = now
         }
     }
-    val nonAircraftCoveragePins = remember(filteredVisiblePins) {
-        filteredVisiblePins.filter { pin ->
+    val nonAircraftCoveragePins = remember(displayFilteredPins) {
+        displayFilteredPins.filter { pin ->
             pin.source != SourceCatalog.SOURCE_AIRCRAFT &&
                 pin.source != SourceCatalog.SOURCE_REMOTE_ID &&
                 pin.source != SourceCatalog.SOURCE_CAMERA
         }
     }
-    val aircraftCoveragePins = remember(filteredVisiblePins) {
-        filteredVisiblePins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
+    val aircraftCoveragePins = remember(displayFilteredPins) {
+        displayFilteredPins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
     }
     val nearbyVisiblePins by produceState(
-        initialValue = filteredVisiblePins,
-        key1 = filteredVisiblePins,
+        initialValue = displayFilteredPins,
+        key1 = displayFilteredPins,
         key2 = currentLocation
     ) {
         value = withContext(Dispatchers.Default) {
             filterPinsNearCurrentLocation(
-                pins = filteredVisiblePins,
+                pins = displayFilteredPins,
                 currentLocation = currentLocation,
                 maxDistanceMeters = MAP_AUTO_FOCUS_MAX_DISTANCE_METERS
             )
@@ -7587,6 +7712,17 @@ private fun DetectionMapPage(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                                     ) {
+                                        Text("Identity Mode")
+                                        Switch(
+                                            checked = identityModeEnabled,
+                                            onCheckedChange = onIdentityModeEnabledChange
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                    ) {
                                         Text("Clustering")
                                         Switch(
                                             checked = mapClusteringEnabled,
@@ -7761,6 +7897,17 @@ private fun DetectionMapPage(
                                                 onCheckedChange = onLiveOnlyEnabledChange
                                             )
                                         }
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                    ) {
+                                        Text("Identity Mode")
+                                        Switch(
+                                            checked = identityModeEnabled,
+                                            onCheckedChange = onIdentityModeEnabledChange
+                                        )
                                     }
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -8351,6 +8498,17 @@ private fun DetectionMapPage(
                                     )
                                 }
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Identity Mode")
+                                Switch(
+                                    checked = identityModeEnabled,
+                                    onCheckedChange = onIdentityModeEnabledChange
+                                )
+                            }
                             if (showRadiusControl) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -8622,6 +8780,12 @@ private data class MapPin(
     val motionSpeedMps: Double? = null,
     val isLive: Boolean = true
 )
+
+private fun encounterFreshnessEpochMs(encounter: Encounter): Long {
+    val observedEpochMs = encounter.timestampEpochMs
+    val receivedEpochMs = encounter.provenanceReceivedAtEpochMs ?: 0L
+    return maxOf(observedEpochMs, receivedEpochMs)
+}
 
 private data class PinLegendItem(
     val source: String,
@@ -9051,7 +9215,9 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
 ): List<MapPin> {
     if (encounters.isEmpty()) return emptyList()
 
-    val latestSnapshotEpochMs = encounters.maxOfOrNull { it.timestampEpochMs } ?: return emptyList()
+    val latestSnapshotEpochMs = encounters.maxOfOrNull { encounter ->
+        encounterFreshnessEpochMs(encounter)
+    } ?: return emptyList()
     val recentSnapshotEncounters = encounters.filter { encounter ->
         val sourceType = scanTypeKeyForSourceName(encounter.source.name)
         val recentWindowMs = mapRecentWindowMsForSource(
@@ -9059,7 +9225,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             sourceScanIntervals = sourceScanIntervals,
             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
         )
-        encounter.timestampEpochMs >= latestSnapshotEpochMs - recentWindowMs
+        encounterFreshnessEpochMs(encounter) >= latestSnapshotEpochMs - recentWindowMs
     }
 
     if (recentSnapshotEncounters.isEmpty()) return emptyList()
@@ -9072,7 +9238,9 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
         .values
         .asSequence()
         .mapNotNull { deviceEncounters ->
-            val latest = deviceEncounters.maxByOrNull { it.timestampEpochMs } ?: return@mapNotNull null
+            val latest = deviceEncounters.maxByOrNull { encounter ->
+                encounterFreshnessEpochMs(encounter)
+            } ?: return@mapNotNull null
             if (
                 shouldSuppressLikelyRandomizedWifiNoise(
                     source = latest.source,
@@ -9086,7 +9254,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             }
             latest to deviceEncounters
         }
-        .sortedByDescending { (latest, _) -> latest.timestampEpochMs }
+        .sortedByDescending { (latest, _) -> encounterFreshnessEpochMs(latest) }
         .take(maxDeviceCandidates.coerceAtLeast(100))
 
     val pins = mutableListOf<MapPin>()
@@ -9109,7 +9277,8 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             sourceScanIntervals = sourceScanIntervals,
             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
         )
-        val isLive = latest.timestampEpochMs >= (latestSnapshotEpochMs - liveWindowMs)
+        val latestFreshnessEpochMs = encounterFreshnessEpochMs(latest)
+        val isLive = latestFreshnessEpochMs >= (latestSnapshotEpochMs - liveWindowMs)
         val motionBadge = if (isCameraSource) {
             null
         } else {
@@ -9125,9 +9294,9 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             ?.let { signal -> " • Approaching (${(signal.confidence * 100.0).toInt()}%)" }
             .orEmpty()
         val freshnessSnippet = if (isLive) {
-            "Live • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
+            "Live • Seen ${formatMapPinAge(latestFreshnessEpochMs)} ago"
         } else {
-            "Recent • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
+            "Recent • Seen ${formatMapPinAge(latestFreshnessEpochMs)} ago"
         }
         val sourceLabel = listSourceLabel(sourceName, latest.secondaryId)
         val pinTitle = buildPinTitle(
@@ -9137,7 +9306,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             motionBadge = motionBadge
         )
         val line1 = "Seen ${deviceEncounters.size}x"
-        val line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}$approachSnippet"
+        val line2 = "$freshnessSnippet • Last ${formatEpoch(latestFreshnessEpochMs)}$approachSnippet"
         val line3 = "Approx range ${resolved.approximateRangeMeters?.let { formatDistanceFeetMiles(it) } ?: "n/a"}$ownershipSnippet"
         val pinSnippet = buildThreeLineSnippet(
             line1 = line1,
@@ -9161,11 +9330,11 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
                     .sortedByDescending { it.timestampEpochMs }
                     .map { it.rawPayloadJson }
             ),
-            timestampEpochMs = latest.timestampEpochMs,
+            timestampEpochMs = latestFreshnessEpochMs,
             source = sourceName,
             primaryId = latest.primaryId,
             secondaryId = latest.secondaryId,
-            encounterTimestampEpochMs = null,
+            encounterTimestampEpochMs = latest.timestampEpochMs,
             aircraftIconType = null,
             headingDegrees = null,
             motionBadge = motionBadge,
@@ -9300,6 +9469,18 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
         color = Color(0xFFD81B60),
         supportsSecondaryId = true,
         secondaryIdLabel = "Camera Label"
+    ),
+    SourceTypeUiMeta(
+        source = SourceCatalog.SOURCE_ARGUS_MESH,
+        scanType = "mesh",
+        settingsLabel = "Argus Mesh",
+        legendLabel = "ARGUS MESH",
+        listLabel = "ARGUS MESH",
+        glyph = "MSH",
+        hue = BitmapDescriptorFactory.HUE_AZURE,
+        color = Color(0xFF1976D2),
+        supportsSecondaryId = true,
+        secondaryIdLabel = "Peer Name"
     ),
     SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_WIFI,
@@ -10637,6 +10818,7 @@ private fun formatCoordinate(value: Double): String =
 
 private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
     when (encounter.source) {
+        EncounterSource.ARGUS_MESH -> "Argus Mesh Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.WIFI -> "Wi-Fi Access Point Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
         EncounterSource.WIFI_SWEEP -> "Wi-Fi Sweep Aggregate Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
         EncounterSource.WIFI_DIRECT -> "Wi-Fi Direct Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
@@ -13037,6 +13219,55 @@ private fun extractWearPointLatLon(encounter: Encounter): Pair<Double, Double>? 
     } else {
         null
     }
+}
+
+private fun buildMeshPeerEncounters(snapshot: ChainMeshSnapshot): List<Encounter> {
+    if (snapshot.peers.isEmpty()) return emptyList()
+    val now = System.currentTimeMillis()
+
+    return snapshot.peers.map { peer ->
+        val lastSeen = peer.lastSeenEpochMs.takeIf { it > 0L } ?: now
+        val payload = JSONObject().apply {
+            put("meshNodeId", peer.nodeId)
+            put("meshDeviceName", peer.deviceName)
+            put("meshHost", peer.host)
+            put("meshState", peer.state.name)
+            put("meshLastSuccessfulSyncEpochMs", peer.lastSuccessfulSyncEpochMs)
+            put("meshLastLinkRequestEpochMs", peer.lastLinkRequestEpochMs)
+            put("meshLastFailure", peer.lastFailure)
+            put("sharedLocationAccuracyMeters", peer.sharedLocationAccuracyMeters)
+            put("sharedLocationTimestampEpochMs", peer.sharedLocationTimestampEpochMs)
+            put("snapshotLocalNodeId", snapshot.localNodeId)
+        }.toString()
+
+        Encounter(
+            timestampEpochMs = lastSeen,
+            source = EncounterSource.ARGUS_MESH,
+            primaryId = peer.nodeId,
+            secondaryId = peer.deviceName?.ifBlank { null } ?: peer.host,
+            rssiDbm = null,
+            frequencyMhz = null,
+            lat = peer.sharedLocationLat,
+            lon = peer.sharedLocationLon,
+            rawPayloadJson = payload,
+            encounterFingerprint = "mesh:${peer.nodeId}:$lastSeen:${peer.state.name}",
+            provenance = EncounterProvenance.CHAIN_LINKED,
+            provenanceNodeId = peer.nodeId,
+            provenanceOriginNodeId = peer.nodeId,
+            provenancePathNodeIds = "${snapshot.localNodeId}->${peer.nodeId}",
+            provenanceReceivedAtEpochMs = lastSeen,
+            provenanceHopCount = 1
+        )
+    }
+}
+
+private fun mergePipelineEncounters(
+    persistedEncounters: List<Encounter>,
+    meshPeerEncounters: List<Encounter>
+): List<Encounter> {
+    if (meshPeerEncounters.isEmpty()) return persistedEncounters
+    return (persistedEncounters + meshPeerEncounters)
+        .sortedByDescending { it.timestampEpochMs }
 }
 
 private fun buildWearDevicePoints(encounters: List<Encounter>): List<WearDevicePoint> {

@@ -1,6 +1,7 @@
 package dev.argus.tracker.domain
 
 enum class EncounterSource {
+    ARGUS_MESH,
     WIFI,
     WIFI_SWEEP,
     WIFI_DIRECT,

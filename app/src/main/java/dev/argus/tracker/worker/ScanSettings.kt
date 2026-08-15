@@ -39,6 +39,8 @@ object ScanSettings {
     private const val KEY_MESH_WIPE_NOTIFICATIONS_ENABLED = "mesh_wipe_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD = "foreign_signal_alert_threshold"
     private const val KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED = "foreign_direct_acoustic_enabled"
+    private const val KEY_FOREIGN_DIRECT_ACOUSTIC_REALTIME_ENABLED = "foreign_direct_acoustic_realtime_enabled"
+    private const val KEY_FOREIGN_DIRECT_ACOUSTIC_GUNSHOT_ENABLED = "foreign_direct_acoustic_gunshot_enabled"
     private const val KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED = "foreign_direct_magnetic_enabled"
     private const val KEY_CHAIN_LINK_ENABLED = "chain_link_enabled"
     private const val KEY_CHAIN_NODE_ID = "chain_node_id"
@@ -475,6 +477,28 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isForeignDirectAcousticRealtimeEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_REALTIME_ENABLED, false)
+
+    fun setForeignDirectAcousticRealtimeEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_REALTIME_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isForeignDirectAcousticGunshotEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_GUNSHOT_ENABLED, false)
+
+    fun setForeignDirectAcousticGunshotEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_GUNSHOT_ENABLED, enabled)
             .apply()
     }
 
