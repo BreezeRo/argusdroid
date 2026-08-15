@@ -83,10 +83,10 @@ object ScanSettings {
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
-    const val DEFAULT_MAP_CLUSTERING_ENABLED = true
+    const val DEFAULT_MAP_CLUSTERING_ENABLED = false
     const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
-    const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
-    const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = false
+    const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = false
+    const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
     const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED = true
     const val DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
@@ -900,18 +900,20 @@ object ScanSettings {
 
     fun getSourceScanIntervalSeconds(context: Context, sourceType: String): Long {
         val normalizedType = sourceType.trim().lowercase()
-        if (normalizedType !in SOURCE_TYPES) return DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+        val canonicalType = canonicalSourceIntervalType(normalizedType)
+        if (canonicalType !in SOURCE_TYPES) return DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val key = sourceTimingKey(normalizedType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
-        val value = prefs.getLong(key, defaultSourceScanIntervalSeconds(normalizedType))
+        val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
+        val value = prefs.getLong(key, defaultSourceScanIntervalSeconds(canonicalType))
         return value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
     }
 
     fun setSourceScanIntervalSeconds(context: Context, sourceType: String, seconds: Long) {
         val normalizedType = sourceType.trim().lowercase()
-        if (normalizedType !in SOURCE_TYPES) return
+        val canonicalType = canonicalSourceIntervalType(normalizedType)
+        if (canonicalType !in SOURCE_TYPES) return
         val safeValue = seconds.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
-        val key = sourceTimingKey(normalizedType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
+        val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(key, safeValue)
@@ -925,6 +927,13 @@ object ScanSettings {
         "aircraft" -> DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
         "camera" -> DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
         else -> DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+    }
+
+    private fun canonicalSourceIntervalType(sourceType: String): String = when (sourceType) {
+        SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
+        SourceCatalog.KEY_BT_CLASSIC,
+        SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
+        else -> sourceType
     }
 
     fun getSourceLastScanEpochMs(context: Context, sourceType: String): Long {

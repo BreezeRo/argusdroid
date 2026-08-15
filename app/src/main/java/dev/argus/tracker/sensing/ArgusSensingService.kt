@@ -34,12 +34,21 @@ class ArgusSensingService(
         val startedAt = SystemClock.elapsedRealtime()
         val allEncounters = mutableListOf<Encounter>()
         val sourceDurations = linkedMapOf<String, Long>()
+        val processedIntervalSources = mutableSetOf<String>()
 
         scanners.forEach { scanner ->
             val sourceType = scannerSourceType(scanner)
+            val intervalGroupType = intervalSourceType(sourceType)
+            if (!processedIntervalSources.add(intervalGroupType)) {
+                return@forEach
+            }
+
+            val groupedScanners = scanners.filter {
+                intervalSourceType(scannerSourceType(it)) == intervalGroupType
+            }
             val nowEpochMs = System.currentTimeMillis()
-            val sourceIntervalSeconds = ScanSettings.getSourceScanIntervalSeconds(context, sourceType)
-            val sourceLastScanEpochMs = ScanSettings.getSourceLastScanEpochMs(context, sourceType)
+            val sourceIntervalSeconds = ScanSettings.getSourceScanIntervalSeconds(context, intervalGroupType)
+            val sourceLastScanEpochMs = ScanSettings.getSourceLastScanEpochMs(context, intervalGroupType)
             val elapsedSinceLast = nowEpochMs - sourceLastScanEpochMs
             val minElapsedMs = sourceIntervalSeconds * 1000L
 
@@ -47,23 +56,30 @@ class ArgusSensingService(
                 return@forEach
             }
 
-            val scanStartedAt = SystemClock.elapsedRealtime()
-            val scannerBatch = runCatching { scanner.scanOnce() }
-                .onFailure { error ->
-                    if (error is CancellationException) throw error
-                    OperationalErrorLogStore.append(
-                        context = context,
-                        category = "SCAN_SOURCE",
-                        source = sourceType,
-                        message = "Source scan failed: ${error.message ?: "unknown error"}"
-                    )
-                }
-                .getOrDefault(emptyList())
-            val gatedBatch = applySourceGate(sourceType, scannerBatch)
-            val durationMs = (SystemClock.elapsedRealtime() - scanStartedAt).coerceAtLeast(0L)
-            sourceDurations[sourceType] = durationMs
-            allEncounters += gatedBatch
-            ScanSettings.setSourceLastScanEpochMs(context, sourceType, nowEpochMs)
+            groupedScanners.forEach { groupedScanner ->
+                val groupedSourceType = scannerSourceType(groupedScanner)
+                val scanStartedAt = SystemClock.elapsedRealtime()
+                val scannerBatch = runCatching { groupedScanner.scanOnce() }
+                    .onFailure { error ->
+                        if (error is CancellationException) throw error
+                        OperationalErrorLogStore.append(
+                            context = context,
+                            category = "SCAN_SOURCE",
+                            source = groupedSourceType,
+                            message = "Source scan failed: ${error.message ?: "unknown error"}"
+                        )
+                    }
+                    .getOrDefault(emptyList())
+                val gatedBatch = applySourceGate(groupedSourceType, scannerBatch)
+                val durationMs = (SystemClock.elapsedRealtime() - scanStartedAt).coerceAtLeast(0L)
+                sourceDurations[groupedSourceType] = durationMs
+                allEncounters += gatedBatch
+                ScanSettings.setSourceLastScanEpochMs(context, groupedSourceType, nowEpochMs)
+            }
+
+            if (intervalGroupType != sourceType) {
+                ScanSettings.setSourceLastScanEpochMs(context, intervalGroupType, nowEpochMs)
+            }
         }
 
         markLocalSweepAggregatesAsOwned(allEncounters)
@@ -109,6 +125,13 @@ class ArgusSensingService(
         is AcousticSignatureScanner -> SourceCatalog.KEY_ACOUSTIC
         is MagnetometerDisturbanceScanner -> SourceCatalog.KEY_MAGNETIC
         else -> scanner::class.java.simpleName.lowercase()
+    }
+
+    private fun intervalSourceType(sourceType: String): String = when (sourceType) {
+        SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
+        SourceCatalog.KEY_BT_CLASSIC,
+        SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
+        else -> sourceType
     }
 
     private fun applySourceGate(sourceType: String, encounters: List<Encounter>): List<Encounter> {
