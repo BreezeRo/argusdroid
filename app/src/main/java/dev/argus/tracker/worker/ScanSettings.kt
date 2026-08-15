@@ -71,11 +71,12 @@ object ScanSettings {
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
-    const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 15L
+    const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
+    const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
     const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 100
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
-    const val DEFAULT_APP_THEME_MODE = "SYSTEM"
+    const val DEFAULT_APP_THEME_MODE = "DARK"
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     private val SHARED_ALLOWED_CADENCE_SECONDS: List<Long> =
@@ -93,6 +94,7 @@ object ScanSettings {
         "bt_classic",
         "cellular",
         "remote_id",
+        "camera",
         "aircraft",
         "uwb",
         "sdr",
@@ -765,7 +767,7 @@ object ScanSettings {
         if (normalizedType !in SOURCE_TYPES) return DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val key = sourceTimingKey(normalizedType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
-        val value = prefs.getLong(key, DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS)
+        val value = prefs.getLong(key, defaultSourceScanIntervalSeconds(normalizedType))
         return value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
     }
 
@@ -782,6 +784,11 @@ object ScanSettings {
 
     fun getAllSourceScanIntervalSeconds(context: Context): Map<String, Long> =
         SOURCE_TYPES.associateWith { type -> getSourceScanIntervalSeconds(context, type) }
+
+    private fun defaultSourceScanIntervalSeconds(sourceType: String): Long = when (sourceType) {
+        "aircraft" -> DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
+        else -> DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+    }
 
     fun getSourceLastScanEpochMs(context: Context, sourceType: String): Long {
         val normalizedType = sourceType.trim().lowercase()

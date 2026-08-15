@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.content.Context
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.worker.ScanSettings
+import kotlinx.coroutines.CancellationException
 
 data class ScanBatchResult(
     val encounters: List<Encounter>,
@@ -47,6 +48,7 @@ class ArgusSensingService(
             val scanStartedAt = SystemClock.elapsedRealtime()
             val scannerBatch = runCatching { scanner.scanOnce() }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
                     OperationalErrorLogStore.append(
                         context = context,
                         category = "SCAN_SOURCE",
@@ -76,6 +78,7 @@ class ArgusSensingService(
         is BluetoothClassicScanner -> "bt_classic"
         is CellularScanner -> "cellular"
         is RemoteIdScanner -> "remote_id"
+        is CameraScanner -> "camera"
         is AviationScanner -> "aircraft"
         is ExternalFeedScanner -> scanner.sourceTypeKey
         is AcousticSignatureScanner -> "acoustic"

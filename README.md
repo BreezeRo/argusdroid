@@ -5,6 +5,7 @@ Argusdroid is an Android app for local-first RF encounter intelligence. It colle
 ## What it does
 
 - Scans Wi-Fi, Wi-Fi Direct, Bluetooth LE, Bluetooth Classic, and Cellular.
+- Detects road enforcement cameras (speed/red-light) by combining SDR camera events with public OSM camera POIs.
 - Supports direct-channel acoustic and magnetometer sampling.
 - Supports ingest feeds for Remote ID, ADS-B aircraft, UWB, and SDR (JSONL-based).
 - Normalizes all detections into one encounter schema and stores history in Room.
@@ -60,6 +61,24 @@ Argusdroid is an Android app for local-first RF encounter intelligence. It colle
 - Public aviation feed: OpenSky-compatible JSON endpoint (location-bounded when available)
 
 See docs/remote-id-ingest.md for payload expectations and companion intent format.
+
+### Road camera detection inputs
+
+- SDR-style camera events are read from ingest/sdr.jsonl when they include camera-like metadata (for example: cameraType, signalClass with speed/red_light hints, or camera evidence type).
+- Public fallback POIs are queried from OpenStreetMap Overpass near current location and cached locally.
+- Camera encounters are surfaced under source CAMERA with payload schema hint argus.camera.v1.
+
+### No-fly zone overlays (airspace/LAANC-style)
+
+- Argus can overlay local no-fly zone polygons on Device Map and Flight Map.
+- Default public fallback sources are official FAA ArcGIS feeds:
+	- FAA UAS Facility Map data
+	- FAA National Security UAS Flight Restrictions (NOTAM FDC 7/7282 map layer)
+- Public overlays are fetched near current map location, cached in app storage, and reused when offline.
+- Drop GeoJSON into app internal files path: ingest/no_fly_zones.geojson
+- Supported geometry types: Polygon and MultiPolygon (FeatureCollection preferred).
+- Typical properties consumed when present: name/title/label, source/provider, regulation/class, altitude floor/ceiling in feet.
+- Use the No-fly zones toggle in map controls to show/hide overlays.
 
 ## Quick start
 

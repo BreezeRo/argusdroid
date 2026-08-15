@@ -10,6 +10,7 @@ import dev.argus.tracker.sensing.AcousticSignatureScanner
 import dev.argus.tracker.sensing.AviationScanner
 import dev.argus.tracker.sensing.BleScanner
 import dev.argus.tracker.sensing.BluetoothClassicScanner
+import dev.argus.tracker.sensing.CameraScanner
 import dev.argus.tracker.sensing.CellularScanner
 import dev.argus.tracker.sensing.ExternalFeedScanner
 import dev.argus.tracker.sensing.MagnetometerDisturbanceScanner
@@ -56,6 +57,7 @@ class DefaultAppContainer(
                 BluetoothClassicScanner(context),
                 CellularScanner(context),
                 RemoteIdScanner(context),
+                CameraScanner(context),
                 AviationScanner(context),
                 ExternalFeedScanner(context, EncounterSource.UWB, "uwb"),
                 ExternalFeedScanner(context, EncounterSource.SDR, "sdr"),

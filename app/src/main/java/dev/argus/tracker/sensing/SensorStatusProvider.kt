@@ -96,6 +96,11 @@ object SensorStatusProvider {
                 factoredByArgus = ScanSettings.isSdrSensorEnabled(context)
             ),
             SensorStatus(
+                name = "Road Cameras",
+                isOn = sdrFeedConfigured || internetAvailable,
+                factoredByArgus = ScanSettings.isSdrSensorEnabled(context)
+            ),
+            SensorStatus(
                 name = "Acoustic (Direct)",
                 isOn = audioPermissionGranted,
                 factoredByArgus = ScanSettings.isForeignDirectAcousticEnabled(context)

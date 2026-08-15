@@ -28,3 +28,11 @@
 - Integrate external SDR hardware over USB OTG for broad RF detection.
 - Add parsers for Remote ID standards (e.g., ASTM F3411) from captured payloads.
 - Implement adaptive scanning policies by battery, charging state, and threat profile.
+
+## Road camera model (speed and red-light)
+
+- Argus uses a combined model for camera awareness:
+	- Live SDR/detector events (best for active enforcement RF cues).
+	- Public POI fallback (OpenStreetMap camera locations) for fixed camera coverage.
+- Many camera systems are passive optical systems and may not emit usable RF continuously.
+- Public POI data improves coverage, while SDR adds real-time context when signals are present.
