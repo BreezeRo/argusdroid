@@ -19,6 +19,7 @@ import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.DefaultAppContainer
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
+import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ class AcousticRealtimeForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var loopJob: Job? = null
+    private var lastTelemetryPublishEpochMs: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -78,20 +80,96 @@ class AcousticRealtimeForegroundService : Service() {
             while (isActive && AcousticRealtimeForegroundServiceController.shouldRun(applicationContext)) {
                 val startedAt = System.currentTimeMillis()
                 val window = captureAudioWindow()
+                var hadRealtimeCapture = false
 
-                if (window != null && ScanSettings.isForeignDirectAcousticGunshotEnabled(applicationContext)) {
-                    val encounter = detectExperimentalGunshot(window, locationProviderContext)
-                    if (encounter != null) {
-                        runCatching { repository.insertBatch(listOf(encounter)) }
+                if (window != null) {
+                    hadRealtimeCapture = true
+                    val nowEpochMs = System.currentTimeMillis()
+                    val encountersToInsert = mutableListOf<Encounter>()
+
+                    if ((nowEpochMs - lastTelemetryPublishEpochMs) >= TELEMETRY_MIN_PUBLISH_INTERVAL_MS) {
+                        buildRealtimeTelemetryEncounter(window, locationProviderContext, nowEpochMs)?.let { telemetry ->
+                            encountersToInsert += telemetry
+                            lastTelemetryPublishEpochMs = nowEpochMs
+                        }
+                    }
+
+                    if (ScanSettings.isForeignDirectAcousticGunshotEnabled(applicationContext)) {
+                        detectExperimentalGunshot(window, locationProviderContext)?.let { gunshotCandidate ->
+                            encountersToInsert += gunshotCandidate
+                        }
+                    }
+
+                    if (encountersToInsert.isNotEmpty()) {
+                        runCatching { repository.insertBatch(encountersToInsert) }
                     }
                 }
 
                 val durationMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-                ScanSettings.recordSourceScanDurationMs(applicationContext, "acoustic", durationMs)
-                ScanSettings.setSourceLastScanEpochMs(applicationContext, "acoustic", System.currentTimeMillis())
+                val nowEpochMs = System.currentTimeMillis()
+                ScanSettings.recordSourceScanDurationMs(applicationContext, SourceCatalog.KEY_ACOUSTIC_REALTIME, durationMs)
+                ScanSettings.setSourceLastScanEpochMs(applicationContext, SourceCatalog.KEY_ACOUSTIC_REALTIME, nowEpochMs)
+                if (hadRealtimeCapture) {
+                    ScanSettings.setSourceLastRawObservationEpochMs(applicationContext, SourceCatalog.KEY_ACOUSTIC_REALTIME, nowEpochMs)
+                }
                 delay(200L)
             }
         }
+    }
+
+    private fun buildRealtimeTelemetryEncounter(
+        window: AudioWindow,
+        context: Context,
+        timestampEpochMs: Long
+    ): Encounter? {
+        val samples = window.samples
+        if (samples.isEmpty()) return null
+
+        val peak = samples.maxOfOrNull { abs(it.toInt()) }?.toDouble() ?: return null
+        if (peak <= 0.0) return null
+
+        val rms = sqrt(samples.map { sample -> sample.toDouble() * sample.toDouble() }.average())
+        if (!rms.isFinite() || rms <= 0.0) return null
+
+        var zeroCrossings = 0
+        for (i in 1 until samples.size) {
+            val previous = samples[i - 1]
+            val current = samples[i]
+            if ((previous >= 0 && current < 0) || (previous < 0 && current >= 0)) {
+                zeroCrossings += 1
+            }
+        }
+
+        val fullScale = 32768.0
+        val rmsDbFs = (20.0 * log10((rms / fullScale).coerceAtLeast(1e-9))).coerceIn(-120.0, 0.0)
+        val peakDbFs = (20.0 * log10((peak / fullScale).coerceAtLeast(1e-9))).coerceIn(-120.0, 0.0)
+        val crestFactor = peak / rms
+        val zeroCrossingRate = zeroCrossings.toDouble() / samples.size.toDouble()
+
+        val location = LocationSnapshotProvider.read(context)
+        val payload = JSONObject()
+            .put("signalChannel", "acoustic")
+            .put("directChannel", true)
+            .put("realtimeChannel", true)
+            .put("eventType", "realtime_sample")
+            .put("sampleRateHz", window.sampleRateHz)
+            .put("sampleCount", samples.size)
+            .put("rmsDbFs", rmsDbFs)
+            .put("peakDbFs", peakDbFs)
+            .put("crestFactor", crestFactor)
+            .put("zeroCrossingRate", zeroCrossingRate)
+
+        return Encounter(
+            timestampEpochMs = timestampEpochMs,
+            source = EncounterSource.UNKNOWN_RF,
+            primaryId = "acoustic:realtime-sample",
+            secondaryId = "direct-acoustic-realtime",
+            rssiDbm = peakDbFs.roundToInt(),
+            frequencyMhz = null,
+            lat = location?.lat,
+            lon = location?.lon,
+            rawPayloadJson = payload.toString()
+        )
     }
 
     private fun captureAudioWindow(): AudioWindow? {
@@ -236,6 +314,7 @@ class AcousticRealtimeForegroundService : Service() {
         private const val CHANNEL_ID = "argus_realtime_acoustic_foreground"
         private const val NOTIFICATION_ID = 22003
         private const val ACTION_STOP = "dev.argus.tracker.acoustic_realtime.STOP"
+        private const val TELEMETRY_MIN_PUBLISH_INTERVAL_MS = 1000L
     }
 }
 

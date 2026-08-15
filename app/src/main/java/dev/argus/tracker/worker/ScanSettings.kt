@@ -32,6 +32,7 @@ object ScanSettings {
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
     private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
+    private const val KEY_GUNSHOT_NOTIFICATIONS_ENABLED = "gunshot_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
     private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
@@ -381,6 +382,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isGunshotNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_GUNSHOT_NOTIFICATIONS_ENABLED, true)
+
+    fun setGunshotNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_GUNSHOT_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
