@@ -36,12 +36,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -139,6 +133,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import java.time.Instant
@@ -217,6 +212,9 @@ private const val MAP_CAMERA_BOUNDS_SAMPLE_LIMIT = 220
 private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
 private const val MAP_RENDER_PIN_LIMIT_FAR = 260
 private const val MAP_RENDER_PIN_LIMIT_MID = 420
+private const val MAP_SWEEP_ANIMATION_STEP_DEGREES = 8f
+private const val MAP_SWEEP_ANIMATION_FRAME_MS = 90L
+private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 650
 private const val DETECTION_TAB_MESH_INDEX = 4
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
@@ -255,6 +253,15 @@ private const val GOOGLE_MAP_DARK_STYLE_JSON = """
     {"featureType":"water","elementType":"labels.text.fill","stylers":[{"color":"#3d3d3d"}]}
 ]
 """
+
+private fun routeNeedsNowTicker(route: String): Boolean {
+    return route == HOME_ROUTE || route.startsWith("approachAlertMap/")
+}
+
+private fun topLevelRouteForSelection(route: String): String = when (route) {
+    LOGS_ENCOUNTERS_ROUTE, DEVICES_ENCOUNTERS_ROUTE -> LOGS_ROUTE
+    else -> route
+}
 
 @Composable
 private fun rememberMapStyleOptionsForTheme(): MapStyleOptions? {
@@ -702,6 +709,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
+    fun navigateTopLevel(route: String) {
+        if (topLevelRouteForSelection(currentRoute) == route) return
+        navController.navigate(route) {
+            launchSingleTop = true
+            restoreState = true
+            popUpTo(navController.graph.findStartDestination().id) {
+                saveState = true
+            }
+        }
+    }
     val requireAllEncounterStream = remember(currentRoute) {
         requiresAllEncountersRoute(currentRoute)
     }
@@ -744,7 +761,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         )
     }
 
-    LaunchedEffect(Unit) {
+    val nowTickerEnabled = remember(currentRoute) { routeNeedsNowTicker(currentRoute) }
+    LaunchedEffect(nowTickerEnabled) {
+        if (!nowTickerEnabled) return@LaunchedEffect
         tickerFlow(periodMs = 1000L).collect { now ->
             appNowEpochMs = now
         }
@@ -1266,13 +1285,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     NavigationBar {
                         NavigationBarItem(
                             selected = currentRoute == HOME_ROUTE,
-                            onClick = { navController.navigate(HOME_ROUTE) },
+                            onClick = { navigateTopLevel(HOME_ROUTE) },
                             icon = { Text("H") },
                             label = { Text("Home") }
                         )
                         NavigationBarItem(
                             selected = currentRoute == DETECTION_ROUTE,
-                            onClick = { navController.navigate(DETECTION_ROUTE) },
+                            onClick = { navigateTopLevel(DETECTION_ROUTE) },
                             icon = { Text("R") },
                             label = { Text("Detection") }
                         )
@@ -1281,13 +1300,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 currentRoute == LOGS_ROUTE ||
                                     currentRoute == LOGS_ENCOUNTERS_ROUTE ||
                                     currentRoute == DEVICES_ENCOUNTERS_ROUTE,
-                            onClick = { navController.navigate(LOGS_ROUTE) },
+                            onClick = { navigateTopLevel(LOGS_ROUTE) },
                             icon = { Text("L") },
                             label = { Text("Logs") }
                         )
                         NavigationBarItem(
                             selected = currentRoute == SETTINGS_ROUTE,
-                            onClick = { navController.navigate(SETTINGS_ROUTE) },
+                            onClick = { navigateTopLevel(SETTINGS_ROUTE) },
                             icon = { Text("S") },
                             label = { Text("Settings") }
                         )
@@ -6166,19 +6185,28 @@ private fun DetectionMapPage(
             }
         }
     }
-    val radarSweepHeadingDeg by if (mapScannerSweepAnimationEnabled) {
-        rememberInfiniteTransition(label = "radarSweep")
-            .animateFloat(
-                initialValue = 0f,
-                targetValue = 360f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 2600, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart
-                ),
-                label = "radarSweepHeadingDeg"
-            )
-    } else {
-        remember { mutableStateOf(0f) }
+    val sweepAnimationActive = remember(
+        mapScannerSweepAnimationEnabled,
+        mapTouchInProgress,
+        renderedPins.size
+    ) {
+        mapScannerSweepAnimationEnabled &&
+            !mapTouchInProgress &&
+            renderedPins.size <= MAP_SWEEP_DISABLE_PIN_THRESHOLD
+    }
+    val radarSweepHeadingDeg by produceState(
+        initialValue = 0f,
+        key1 = sweepAnimationActive
+    ) {
+        if (!sweepAnimationActive) {
+            value = 0f
+            return@produceState
+        }
+        while (true) {
+            delay(MAP_SWEEP_ANIMATION_FRAME_MS)
+            val next = value + MAP_SWEEP_ANIMATION_STEP_DEGREES
+            value = if (next >= 360f) next - 360f else next
+        }
     }
     val renderedPinSnippetCache by produceState(
         initialValue = emptyMap<String, String?>(),
