@@ -4,7 +4,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 
 ## System Scope
 
-- Platform: Android app module plus Wear companion and optional web dashboard bridge.
+- Platform: Android app module plus Wear companion.
 - Storage model: Room-backed encounter timeline with shared schema across sources.
 - Processing model: source scanners plus ingest readers feed a unified encounter pipeline.
 - Sync model: authenticated peer-to-peer Chain Link mesh over LAN with provenance tagging.
@@ -137,22 +137,10 @@ Disabled source gates prevent that source from participating in both scheduled a
 	- Alerts are radius-limited to configured aircraft range from observer location.
 	- Altitude-aware zone checks skip alerts when aircraft is outside zone altitude limits.
 
-## Web Dashboard
-
-- UI path: dashboard/
-- Node bridge: dashboard-server/
-- Launch script: ./scripts/run-dashboard-node.ps1
-- Optional port: ./scripts/run-dashboard-node.ps1 -Port 8090
-- Mesh config: dashboard/config/mesh-config.json
-
-See docs/web-dashboard.md for dashboard behavior and deployment notes.
-
 ## Repository Layout
 
 - app: Android application module
 - wear: Wear OS companion module
-- dashboard: static web dashboard UI
-- dashboard-server: Node bridge for dashboard and mesh relay views
 - docs: architecture and operational documentation
 
 ## Stack
@@ -169,7 +157,6 @@ See docs/web-dashboard.md for dashboard behavior and deployment notes.
 - docs/architecture.md
 - docs/capabilities-and-limits.md
 - docs/remote-id-ingest.md
-- docs/web-dashboard.md
 
 ## License
 

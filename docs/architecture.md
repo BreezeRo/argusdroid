@@ -16,7 +16,7 @@ Argus is designed as an on-device signal encounter pipeline:
 - `data/db/`: Room entities, DAO, and database.
 - `data/`: Repository and dependency container.
 - `worker/`: Background scheduling and periodic collection worker.
-- `ui/`: Compose dashboard and view model.
+- `ui/`: Compose UI and view model.
 
 ## Data Model
 
