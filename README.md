@@ -37,10 +37,13 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 
 - Approach detection with confidence and trend outputs.
 - Tracker suspicion scoring for repeated co-movement behavior.
+- Flock graph analysis for repeated co-travel correlation across trusted moving sources.
+- Background flock alert monitor with persisted signature/cooldown state to avoid alert storms.
 - Foreign signal risk scoring across channel indicators with configurable threshold.
 - Signal Intel includes direct acoustic and direct magnetometer diagnostics.
 - NFC alert surfacing for newly observed NFC encounters.
 - Magnetometer disturbance increase alerts.
+- Application-level uncaught-exception capture into operational error logs.
 - Aircraft no-fly zone pass-through detection:
 	- Detects aircraft transitions from outside to inside no-fly polygons.
 	- Emits dedicated notification channel alerts with cooldown guards.
@@ -69,7 +72,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 ## UI Surfaces
 
 - Home: sensor gates and operational controls.
-- Detection: readiness, devices, signal diagnostics, maps, and mesh operations.
+- Detection: readiness, devices, flocks, signal diagnostics, maps, and mesh operations.
 - Logs: alerts, operational errors, and encounter timeline.
 - Settings: scheduling, detection gates, alert policies, map behavior, and data reset/backup workflows.
 
@@ -113,29 +116,34 @@ Disabled source gates prevent that source from participating in both scheduled a
 
 ## Today’s Delivered Changes (2026-08-15)
 
-- Added end-to-end NFC source integration and surfacing.
-- Expanded detection readiness and alert UX coverage.
-- Hardened map bootstrap, retention, filtering, and diagnostics.
-- Unified source interval families and Bluetooth-family gating behavior.
-- Added no-fly pass-through notification setting.
-- Added aircraft no-fly zone pass-through detection, logging, and dedicated alert channel.
-- Renamed Flight Map UX labeling to Aircraft Map.
-- Set aircraft and camera default source intervals to 15 minutes.
-- Enabled ADS-B and Public Flight Radar by default.
-- Set approach notifications and mesh connectivity notifications off by default.
-- Removed artificial startup loader holds and now release after first startup scan completion.
-- Added startup loader progress bar tied to runtime/bootstrap readiness checkpoints.
-- Added no-fly incident deep-link flow:
-	- No-fly notifications are now clickable and open a dedicated incident map route.
-	- Logs entries now deep-link to relevant pages by alert type.
-- Added no-fly incident map upgrades:
-	- Aircraft marker uses aircraft icon style instead of default Google pin.
-	- Incident map loads only entered no-fly zone polygons for performance.
-	- Polygon simplification/caps added to avoid heavy overlay hangs.
-	- Incident route supports fallback coordinates when historical points are sparse.
-- Hardened no-fly alert qualification:
-	- Alerts are radius-limited to configured aircraft range from observer location.
-	- Altitude-aware zone checks skip alerts when aircraft is outside zone altitude limits.
+- Detection tab topology refactor:
+	- Added a dedicated Flocks tab in Detection and moved flock analytics out of Devices.
+	- Reindexed Detection tab routing (Mesh index shift) to preserve deep-link behavior.
+- Flock intelligence pipeline:
+	- Added a standalone flock analyzer module with connected-component grouping over co-travel links.
+	- Hardened false-positive controls by restricting flock location evidence to trusted moving-source coordinates.
+	- Added per-member movement proof gates before pair linkage and span qualification.
+- Flock alerting and runtime integration:
+	- Added Settings-gated flock notification policy and dedicated notification channel.
+	- Added foreground flock alert emission with signature/cooldown dedup.
+	- Added worker-driven background flock monitoring with throttled analysis cadence and persisted dedup state.
+	- Added worker-side operational error logging for flock monitor failures.
+- Operational fault instrumentation:
+	- Added application-level default uncaught-exception handler to persist crash context in operational error logs.
+- Cellular and BLE telemetry enrichment:
+	- Upgraded cellular secondary labels to operator-aware "<Operator> Cell (<Radio> tower)" identities.
+	- Expanded BLE payload classification with tracker-family heuristics and manufacturer/service UUID evidence.
+	- Hardened BLE scan callback handling for resilient result aggregation.
+- Detection-map runtime performance hardening:
+	- Moved heavy list/map analysis workloads off the main thread.
+	- Isolated radial sweep rendering from heavyweight recomposition paths.
+	- Added additional null-safety and map rendering guardrails in compose pipelines.
+- Startup/interval heuristics:
+	- Added home-point-aware heuristics and conditional startup bootstrap controls.
+	- Maintained source-cadence alignment behavior across worker and UI-scheduler control paths.
+- Repository/platform scope simplification:
+	- Removed dashboard static UI, Node bridge, and dashboard scripts from the repo.
+	- Updated docs and wear bridge payload behavior to remove dashboard URL dependencies.
 
 ## Repository Layout
 

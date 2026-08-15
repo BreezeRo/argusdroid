@@ -246,7 +246,7 @@ private const val NO_FLY_ZONE_RENDER_COUNT_HIGH = 220
 private const val NO_FLY_ZONE_MARKER_COUNT_LOW = 24
 private const val NO_FLY_ZONE_MARKER_COUNT_BALANCED = 48
 private const val NO_FLY_ZONE_MARKER_COUNT_HIGH = 96
-private const val DETECTION_TAB_MESH_INDEX = 4
+private const val DETECTION_TAB_MESH_INDEX = 5
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
 private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
@@ -5138,7 +5138,7 @@ private fun DetectionPage(
     var flightMapRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
-    val tabs = listOf("Status", "Devices", "Signal", "Map", "Mesh")
+    val tabs = listOf("Status", "Device", "Flock", "Signal", "Map", "Mesh")
 
     LaunchedEffect(initialTabRequest) {
         val requestedTab = initialTabRequest ?: return@LaunchedEffect
@@ -5146,16 +5146,16 @@ private fun DetectionPage(
         onInitialTabRequestHandled()
     }
 
-    val isDeviceLocationTabActive = selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)
+    val isDeviceLocationTabActive = selectedTab == 4 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
     val signalIntel = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
-        if (selectedTab == 2) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
+        if (selectedTab == 3) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
     }
     val flightDisplayRadiusMeters = flightMapRadiusMiles.coerceIn(10, 1000) * 1609.344
     val topSpeedRecords = remember(selectedTab, selectedMapSubTab, meshInsightEncounters.size) {
-        if (selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)) {
+        if (selectedTab == 4 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)) {
             DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
         } else {
             emptyMap()
@@ -5286,7 +5286,7 @@ private fun DetectionPage(
         mutableStateOf(startupPrewarmedDevicePins)
     }
 
-    val flightMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 1) {
+    val flightMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 1) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5294,7 +5294,7 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val deviceMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 0) {
+    val deviceMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 0) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5302,7 +5302,7 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val bluetoothMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 2) {
+    val bluetoothMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 2) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5311,7 +5311,7 @@ private fun DetectionPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
 
-    val isFlightMapActive = selectedTab == 3 && selectedMapSubTab == 1
+    val isFlightMapActive = selectedTab == 4 && selectedMapSubTab == 1
     val activeMapLocation = when (selectedMapSubTab) {
         1 -> flightMapCurrentLocation
         2 -> bluetoothMapCurrentLocation
@@ -5349,7 +5349,7 @@ private fun DetectionPage(
     }
 
     LaunchedEffect(selectedTab, selectedMapSubTab, noFlyOverlayLocationKey, mapNoFlyZonesEnabled) {
-        if (selectedTab != 3) {
+        if (selectedTab != 4) {
             return@LaunchedEffect
         }
 
@@ -5696,7 +5696,7 @@ private fun DetectionPage(
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
         ) {
             Text("Detection", style = MaterialTheme.typography.headlineMedium)
-            if (selectedTab == 3) {
+            if (selectedTab == 4) {
                 Text(
                     text = "● LIVE",
                     color = Color(0xFF2E7D32),
@@ -5709,7 +5709,7 @@ private fun DetectionPage(
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
-                    text = { Text(title) }
+                    text = { Text(title, fontSize = 13.sp) }
                 )
             }
         }
@@ -5838,6 +5838,11 @@ private fun DetectionPage(
                 onDeviceClick = onDeviceClick
             )
         } else if (selectedTab == 2) {
+            FlocksPage(
+                recentEncounters = encounters,
+                allEncounters = meshInsightEncounters
+            )
+        } else if (selectedTab == 3) {
             signalIntel?.let {
                 DetectionSignalIntelPage(
                     intel = it,
@@ -5845,7 +5850,7 @@ private fun DetectionPage(
                     onRefresh = onRefresh
                 )
             }
-        } else if (selectedTab == 3) {
+        } else if (selectedTab == 4) {
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -14017,18 +14022,6 @@ private fun DevicesPage(
     val topSpeedByDevice = remember(selectedEncounters) {
         DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
-    var flocks by remember { mutableStateOf<List<DeviceFlock>>(emptyList()) }
-    var flocksComputing by remember { mutableStateOf(false) }
-    LaunchedEffect(allEncounters) {
-        flocksComputing = true
-        flocks = withContext(Dispatchers.Default) {
-            detectDeviceFlocks(
-                encounters = allEncounters,
-                minTravelSpanMeters = 10.0
-            )
-        }
-        flocksComputing = false
-    }
     var filteredDeviceCount by remember { mutableStateOf(0) }
     var displayedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var deviceDisplayComputing by remember { mutableStateOf(false) }
@@ -14091,44 +14084,6 @@ private fun DevicesPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Flocks", style = MaterialTheme.typography.titleMedium)
-                Text("Likely related devices that co-travel together across different places.")
-                if (flocksComputing) {
-                    Text("Analyzing co-travel graph...")
-                } else if (flocks.isEmpty()) {
-                    Text("No flocks detected yet. More repeated sightings across locations are needed.")
-                } else {
-                    flocks.take(8).forEach { flock ->
-                        val membersPreview = flock.members
-                            .take(6)
-                            .joinToString(separator = " • ") { member ->
-                                "${member.source}:${member.primaryId}"
-                            }
-                        val overflowCount = (flock.members.size - 6).coerceAtLeast(0)
-                        val overflowLabel = if (overflowCount > 0) {
-                            " +$overflowCount more"
-                        } else {
-                            ""
-                        }
-                        val timeRange = "${formatEpoch(flock.firstSeenEpochMs)} -> ${formatEpoch(flock.lastSeenEpochMs)}"
-                        Text(
-                            text = "Flock ${flock.id} • ${flock.members.size} devices • ${flock.coTravelEventCount} co-travel events • Span ${formatDistanceFeetMiles(flock.travelSpanMeters)}",
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text("Links: ${flock.pairLinkCount} • $timeRange")
-                        Text("Members: $membersPreview$overflowLabel")
-                    }
-                    if (flocks.size > 8) {
-                        Text("Showing top 8 of ${flocks.size} flocks")
-                    }
-                }
-            }
-        }
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(12.dp),
@@ -14345,6 +14300,160 @@ private fun DevicesPage(
                         Text("Seen ${device.seenCount} times")
                         Text("Last seen ${formatEpoch(device.lastSeenEpochMs)}")
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun FlocksPage(
+    recentEncounters: List<Encounter>,
+    allEncounters: List<Encounter>
+) {
+    var dataScope by remember { mutableStateOf(DataScope.ALL) }
+    val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
+
+    var flocks by remember { mutableStateOf<List<DeviceFlock>>(emptyList()) }
+    var flocksComputing by remember { mutableStateOf(false) }
+    LaunchedEffect(selectedEncounters) {
+        flocksComputing = true
+        flocks = withContext(Dispatchers.Default) {
+            detectDeviceFlocks(
+                encounters = selectedEncounters,
+                minTravelSpanMeters = 10.0
+            )
+        }
+        flocksComputing = false
+    }
+
+    val trustedLocationEncounterCount = remember(selectedEncounters) {
+        selectedEncounters.count { encounter ->
+            when (encounter.source) {
+                EncounterSource.AIRCRAFT -> isValidLatLon(encounter.lat, encounter.lon)
+                EncounterSource.REMOTE_ID -> remoteIdBroadcastLatLon(encounter) != null
+                else -> false
+            }
+        }
+    }
+    val trustedLocationDeviceCount = remember(selectedEncounters) {
+        selectedEncounters
+            .asSequence()
+            .filter { encounter ->
+                when (encounter.source) {
+                    EncounterSource.AIRCRAFT -> isValidLatLon(encounter.lat, encounter.lon)
+                    EncounterSource.REMOTE_ID -> remoteIdBroadcastLatLon(encounter) != null
+                    else -> false
+                }
+            }
+            .map { encounter -> "${encounter.source.name}|${encounter.primaryId}" }
+            .toSet()
+            .size
+    }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
+    ) {
+        item {
+            Text("Flocks", style = MaterialTheme.typography.headlineSmall)
+        }
+        item {
+            Text("Detects likely co-traveling groups and summarizes their repeated movement evidence.")
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Scope", style = MaterialTheme.typography.titleMedium)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ScopeFilterDropdown(
+                            selectedScope = dataScope,
+                            onScopeSelected = { dataScope = it }
+                        )
+                    }
+                    Text("Analyzed encounters: ${selectedEncounters.size}")
+                    Text("Trusted-location encounters: $trustedLocationEncounterCount")
+                    Text("Trusted-location devices: $trustedLocationDeviceCount")
+                    Text("Active flocks: ${flocks.size}")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("How this detector avoids false positives", fontWeight = FontWeight.Bold)
+                    Text("Uses trusted moving-source locations only (Aircraft tracks and Remote ID drone broadcast coordinates).")
+                    Text("Requires repeated co-travel events, movement span, and independent movement evidence per member.")
+                    Text("Fixed or observer-tethered sources are intentionally excluded from flock links.")
+                }
+            }
+        }
+
+        if (flocksComputing) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.height(16.dp).widthIn(min = 16.dp))
+                    Text("Analyzing flock graph...")
+                }
+            }
+        }
+
+        if (!flocksComputing && flocks.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "No flocks detected in this scope yet. More repeated trusted-location co-travel observations are needed.",
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+
+        items(
+            items = flocks,
+            key = { flock -> "flock-${flock.id}-${flock.members.size}-${flock.lastSeenEpochMs}" },
+            contentType = { "flock" }
+        ) { flock ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "Flock ${flock.id} • ${flock.members.size} devices",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "${flock.coTravelEventCount} co-travel events • ${flock.pairLinkCount} pair links • Span ${formatDistanceFeetMiles(flock.travelSpanMeters)}"
+                    )
+                    Text("Window: ${formatEpoch(flock.firstSeenEpochMs)} -> ${formatEpoch(flock.lastSeenEpochMs)}")
+                    val sourceMix = flock.members
+                        .groupingBy { it.source }
+                        .eachCount()
+                        .entries
+                        .sortedByDescending { it.value }
+                        .joinToString(separator = ", ") { entry -> "${entry.key}:${entry.value}" }
+                    Text("Source mix: $sourceMix")
+                    val memberPreview = flock.members
+                        .take(10)
+                        .joinToString(separator = " • ") { member -> "${member.source}:${member.primaryId}" }
+                    val overflow = (flock.members.size - 10).coerceAtLeast(0)
+                    Text("Members: $memberPreview${if (overflow > 0) " +$overflow more" else ""}")
                 }
             }
         }
