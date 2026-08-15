@@ -7222,6 +7222,192 @@ private fun DetectionMapPage(
                 sourceVisible && pinMatchesMetadataQuery(pin, query)
             }
         }
+
+        @Composable
+        private fun NoFlyZoneLayer(
+            renderedNoFlyZones: List<NoFlyZoneRenderShape>,
+            renderedNoFlyZoneMarkers: List<NoFlyZoneRenderShape>,
+            selectedNoFlyZoneId: String?,
+            onSelectZone: (String) -> Unit
+        ) {
+            if (renderedNoFlyZones.isEmpty()) return
+
+            renderedNoFlyZones.forEach { zoneRender ->
+                val zone = zoneRender.zone
+                Polygon(
+                    points = zoneRender.polygonPoints,
+                    fillColor = Color(0x30E53935),
+                    strokeColor = Color(0xFFE53935),
+                    strokeWidth = 2f,
+                    clickable = true,
+                    onClick = { onSelectZone(zone.id) }
+                )
+            }
+
+            renderedNoFlyZoneMarkers.forEach { zoneRender ->
+                val zone = zoneRender.zone
+                val point = zoneRender.centroid ?: return@forEach
+                val markerState = remember(point) { MarkerState(position = point) }
+                Marker(
+                    state = markerState,
+                    title = zone.label,
+                    snippet = noFlyZoneSnippet(zone),
+                    icon = noFlyZoneMarkerIcon(
+                        selected = selectedNoFlyZoneId == zone.id,
+                        compact = true
+                    ),
+                    anchor = Offset(0.5f, 0.5f),
+                    onClick = {
+                        onSelectZone(zone.id)
+                        false
+                    }
+                )
+            }
+        }
+
+        @Composable
+        private fun CoverageSweepLayer(
+            showCoverageRadiusCircle: Boolean,
+            proximityRenderCenter: DetectionLocation?,
+            stableCoverageRadiusMeters: Double,
+            aircraftRenderCenter: DetectionLocation?,
+            stableAircraftCoverageRadiusMeters: Double,
+            mapScannerSweepAnimationEnabled: Boolean,
+            radarSweepHeadingDeg: Float
+        ) {
+            if (!showCoverageRadiusCircle) return
+
+            val proximityCenter = proximityRenderCenter
+            if (proximityCenter != null && stableCoverageRadiusMeters > 10.0) {
+                val coverageCenter = LatLng(proximityCenter.lat, proximityCenter.lon)
+                Circle(
+                    center = coverageCenter,
+                    radius = stableCoverageRadiusMeters,
+                    strokeWidth = 2f,
+                    strokeColor = Color(0xFFE65100),
+                    fillColor = Color(0x1AE65100)
+                )
+                if (mapScannerSweepAnimationEnabled) {
+                    val sweepRadiusMeters = containedSweepRadiusMeters(stableCoverageRadiusMeters)
+                    Polygon(
+                        points = buildRadarSweepSectorPoints(
+                            center = coverageCenter,
+                            radiusMeters = sweepRadiusMeters,
+                            headingDegrees = radarSweepHeadingDeg,
+                            halfWidthDegrees = 22f,
+                            arcStepDegrees = 6f
+                        ),
+                        fillColor = Color(0x33FFB74D),
+                        strokeColor = Color.Transparent,
+                        strokeWidth = 0f
+                    )
+                }
+            }
+
+            val aircraftCenter = aircraftRenderCenter
+            if (aircraftCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
+                val coverageCenter = LatLng(aircraftCenter.lat, aircraftCenter.lon)
+                Circle(
+                    center = coverageCenter,
+                    radius = stableAircraftCoverageRadiusMeters,
+                    strokeWidth = 2f,
+                    strokeColor = Color(0xFF1565C0),
+                    fillColor = Color(0x1A1565C0)
+                )
+                if (mapScannerSweepAnimationEnabled) {
+                    val sweepRadiusMeters = containedSweepRadiusMeters(stableAircraftCoverageRadiusMeters)
+                    Polygon(
+                        points = buildRadarSweepSectorPoints(
+                            center = coverageCenter,
+                            radiusMeters = sweepRadiusMeters,
+                            headingDegrees = (radarSweepHeadingDeg + 120f) % 360f,
+                            halfWidthDegrees = 18f,
+                            arcStepDegrees = 6f
+                        ),
+                        fillColor = Color(0x3D4FC3F7),
+                        strokeColor = Color.Transparent,
+                        strokeWidth = 0f
+                    )
+                }
+            }
+        }
+
+        @Composable
+        private fun MapRenderLayer(
+            mapRenderItems: List<MapRenderItem>,
+            preciseDotsEnabled: Boolean,
+            useDenseDotMarkers: Boolean,
+            useSourceOnlyPinColors: Boolean,
+            renderedPinSnippetCache: Map<String, String?>,
+            selectedMapPin: MapPin?,
+            onSelectMapPin: (MapPin) -> Unit,
+            onPinDetailsClick: (MapPin) -> Unit
+        ) {
+            mapRenderItems.forEach { item ->
+                when (item) {
+                    is MapRenderItem.SinglePin -> {
+                        val pin = item.pin
+                        val markerState = remember(pin.position) { MarkerState(position = pin.position) }
+                        val aircraftHeading = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
+                            pin.headingDegrees?.toFloat()?.let { value ->
+                                ((value % 360f) + 360f) % 360f
+                            } ?: 0f
+                        } else {
+                            0f
+                        }
+                        val showMarkerDetails = !(preciseDotsEnabled || useDenseDotMarkers)
+                        val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                        Marker(
+                            state = markerState,
+                            title = if (showMarkerDetails) pin.title else null,
+                            snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
+                            icon = if (preciseDotsEnabled || useDenseDotMarkers) {
+                                markerDotIconForPin(pin, useSourceOnlyPinColors)
+                            } else {
+                                markerIconForPin(pin, useSourceOnlyPinColors)
+                            },
+                            anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
+                            rotation = aircraftHeading,
+                            flat = pin.source == SourceCatalog.SOURCE_AIRCRAFT,
+                            onClick = {
+                                if (!showMarkerDetails) {
+                                    val selected = selectedMapPin
+                                    val isSameSelection =
+                                        selected != null &&
+                                            selected.source == pin.source &&
+                                            selected.primaryId == pin.primaryId &&
+                                            selected.timestampEpochMs == pin.timestampEpochMs
+
+                                    if (isSameSelection) {
+                                        onPinDetailsClick(pin)
+                                    } else {
+                                        onSelectMapPin(pin)
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                            onInfoWindowClick = {
+                                onPinDetailsClick(pin)
+                            }
+                        )
+                    }
+
+                    is MapRenderItem.Cluster -> {
+                        val markerState = remember(item.position) { MarkerState(position = item.position) }
+                        Marker(
+                            state = markerState,
+                            title = "Cluster (${item.count})",
+                            snippet = item.summary,
+                            icon = clusterMarkerIcon(item),
+                            anchor = Offset(0.5f, 0.5f),
+                            flat = false
+                        )
+                    }
+                }
+            }
+        }
     }
     var displayFilteredPins by remember { mutableStateOf<List<MapPin>>(filteredVisiblePins) }
     LaunchedEffect(filteredVisiblePins, identityModeEnabled) {
@@ -8515,162 +8701,37 @@ private fun DetectionMapPage(
                         myLocationButtonEnabled = hasLocationPermission
                     )
                 ) {
-                    if (renderedNoFlyZones.isNotEmpty()) {
-                        renderedNoFlyZones.forEach { zoneRender ->
-                            val zone = zoneRender.zone
-                            Polygon(
-                                points = zoneRender.polygonPoints,
-                                fillColor = Color(0x30E53935),
-                                strokeColor = Color(0xFFE53935),
-                                strokeWidth = 2f,
-                                clickable = true,
-                                onClick = {
-                                    selectedNoFlyZoneId = zone.id
-                                }
-                            )
+                    NoFlyZoneLayer(
+                        renderedNoFlyZones = renderedNoFlyZones,
+                        renderedNoFlyZoneMarkers = renderedNoFlyZoneMarkers,
+                        selectedNoFlyZoneId = selectedNoFlyZoneId,
+                        onSelectZone = { zoneId -> selectedNoFlyZoneId = zoneId }
+                    )
+                    CoverageSweepLayer(
+                        showCoverageRadiusCircle = showCoverageRadiusCircle,
+                        proximityRenderCenter = proximityRenderCenter,
+                        stableCoverageRadiusMeters = stableCoverageRadiusMeters,
+                        aircraftRenderCenter = aircraftRenderCenter,
+                        stableAircraftCoverageRadiusMeters = stableAircraftCoverageRadiusMeters,
+                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                        radarSweepHeadingDeg = radarSweepHeadingDeg
+                    )
+                    MapRenderLayer(
+                        mapRenderItems = mapRenderItems,
+                        preciseDotsEnabled = preciseDotsEnabled,
+                        useDenseDotMarkers = useDenseDotMarkers,
+                        useSourceOnlyPinColors = useSourceOnlyPinColors,
+                        renderedPinSnippetCache = renderedPinSnippetCache,
+                        selectedMapPin = selectedMapPin,
+                        onSelectMapPin = { pin ->
+                            selectedMapPin = pin
+                            selectedNoFlyZoneId = null
+                        },
+                        onPinDetailsClick = { pin ->
+                            selectedMapPin = null
+                            onPinDetailsClick(pin)
                         }
-                        renderedNoFlyZoneMarkers.forEach { zoneRender ->
-                            val zone = zoneRender.zone
-                            val point = zoneRender.centroid ?: return@forEach
-                            val markerState = remember(point) { MarkerState(position = point) }
-                            Marker(
-                                state = markerState,
-                                title = zone.label,
-                                snippet = noFlyZoneSnippet(zone),
-                                icon = noFlyZoneMarkerIcon(
-                                    selected = selectedNoFlyZoneId == zone.id,
-                                    compact = true
-                                ),
-                                anchor = Offset(0.5f, 0.5f),
-                                onClick = {
-                                    selectedNoFlyZoneId = zone.id
-                                    false
-                                }
-                            )
-                        }
-                    }
-                    if (showCoverageRadiusCircle && stableCoverageRadiusMeters > 10.0) {
-                        val center = proximityRenderCenter
-                        if (center != null) {
-                        val coverageCenter = LatLng(center.lat, center.lon)
-                        Circle(
-                            center = coverageCenter,
-                            radius = stableCoverageRadiusMeters,
-                            strokeWidth = 2f,
-                            strokeColor = Color(0xFFE65100),
-                            fillColor = Color(0x1AE65100)
-                        )
-                        if (mapScannerSweepAnimationEnabled) {
-                            val sweepRadiusMeters = containedSweepRadiusMeters(stableCoverageRadiusMeters)
-                            Polygon(
-                                points = buildRadarSweepSectorPoints(
-                                    center = coverageCenter,
-                                    radiusMeters = sweepRadiusMeters,
-                                    headingDegrees = radarSweepHeadingDeg,
-                                    halfWidthDegrees = 22f,
-                                    arcStepDegrees = 6f
-                                ),
-                                fillColor = Color(0x33FFB74D),
-                                strokeColor = Color.Transparent,
-                                strokeWidth = 0f
-                            )
-                        }
-                        }
-                    }
-                    if (showCoverageRadiusCircle && stableAircraftCoverageRadiusMeters > 10.0) {
-                        val center = aircraftRenderCenter
-                        if (center != null) {
-                        val coverageCenter = LatLng(center.lat, center.lon)
-                        Circle(
-                            center = coverageCenter,
-                            radius = stableAircraftCoverageRadiusMeters,
-                            strokeWidth = 2f,
-                            strokeColor = Color(0xFF1565C0),
-                            fillColor = Color(0x1A1565C0)
-                        )
-                        if (mapScannerSweepAnimationEnabled) {
-                            val sweepRadiusMeters = containedSweepRadiusMeters(stableAircraftCoverageRadiusMeters)
-                            Polygon(
-                                points = buildRadarSweepSectorPoints(
-                                    center = coverageCenter,
-                                    radiusMeters = sweepRadiusMeters,
-                                    headingDegrees = (radarSweepHeadingDeg + 120f) % 360f,
-                                    halfWidthDegrees = 18f,
-                                    arcStepDegrees = 6f
-                                ),
-                                fillColor = Color(0x3D4FC3F7),
-                                strokeColor = Color.Transparent,
-                                strokeWidth = 0f
-                            )
-                        }
-                        }
-                    }
-                    mapRenderItems.forEach { item ->
-                        when (item) {
-                            is MapRenderItem.SinglePin -> {
-                                val pin = item.pin
-                                val markerState = remember(pin.position) { MarkerState(position = pin.position) }
-                                val aircraftHeading = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
-                                    pin.headingDegrees?.toFloat()?.let { value ->
-                                        ((value % 360f) + 360f) % 360f
-                                    } ?: 0f
-                                } else {
-                                    0f
-                                }
-                                val showMarkerDetails = !(preciseDotsEnabled || useDenseDotMarkers)
-                                val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
-                                Marker(
-                                    state = markerState,
-                                    title = if (showMarkerDetails) pin.title else null,
-                                    snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
-                                    icon = if (preciseDotsEnabled || useDenseDotMarkers) {
-                                        markerDotIconForPin(pin, useSourceOnlyPinColors)
-                                    } else {
-                                        markerIconForPin(pin, useSourceOnlyPinColors)
-                                    },
-                                    anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
-                                    rotation = aircraftHeading,
-                                    flat = pin.source == SourceCatalog.SOURCE_AIRCRAFT,
-                                    onClick = {
-                                        if (!showMarkerDetails) {
-                                            val selected = selectedMapPin
-                                            val isSameSelection =
-                                                selected != null &&
-                                                    selected.source == pin.source &&
-                                                    selected.primaryId == pin.primaryId &&
-                                                    selected.timestampEpochMs == pin.timestampEpochMs
-
-                                            if (isSameSelection) {
-                                                onPinDetailsClick(pin)
-                                            } else {
-                                                selectedMapPin = pin
-                                                selectedNoFlyZoneId = null
-                                            }
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    },
-                                    onInfoWindowClick = {
-                                        selectedMapPin = null
-                                        onPinDetailsClick(pin)
-                                    }
-                                )
-                            }
-
-                            is MapRenderItem.Cluster -> {
-                                val markerState = remember(item.position) { MarkerState(position = item.position) }
-                                Marker(
-                                    state = markerState,
-                                    title = "Cluster (${item.count})",
-                                    snippet = item.summary,
-                                    icon = clusterMarkerIcon(item),
-                                    anchor = Offset(0.5f, 0.5f),
-                                    flat = false
-                                )
-                            }
-                        }
-                    }
+                    )
                 }
 
                 if (selectedNoFlyZone != null) {
