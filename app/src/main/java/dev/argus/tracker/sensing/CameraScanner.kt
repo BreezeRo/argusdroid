@@ -62,8 +62,8 @@ class CameraScanner(
         private const val CACHE_TTL_MS = 30L * 60L * 1000L
         private const val FETCH_MIN_INTERVAL_MS = 5L * 60L * 1000L
         private const val MIN_RADIUS_METERS = 1000
-        private const val MAX_RADIUS_METERS = 25000
-        private const val DEFAULT_RADIUS_METERS = 15000
+        private const val MAX_RADIUS_METERS = 30000
+        private const val DEFAULT_RADIUS_METERS = 30000
         private const val MAX_PAYLOAD_BYTES = 3 * 1024 * 1024
         private const val KEY_LAST_FETCH_EPOCH_MS = "camera_public_last_fetch_epoch_ms"
         private const val KEY_LAST_FETCH_LAT = "camera_public_last_fetch_lat"
