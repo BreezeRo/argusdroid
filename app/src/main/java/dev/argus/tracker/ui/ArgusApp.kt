@@ -1989,10 +1989,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onSetHomePointRadiusMeters = { radiusMeters ->
                         val updated = ScanSettings.setHomePointRadiusMeters(context, radiusMeters)
                         homePoint = ScanSettings.getHomePoint(context)
-                        if (!updated || homePoint == null) {
+                        val updatedHomePoint = homePoint
+                        if (!updated || updatedHomePoint == null) {
                             "Home point is not set. Set a Home Point first."
                         } else {
-                            "Home radius set to ${String.format(Locale.US, "%.0f", homePoint!!.radiusMeters)} m"
+                            "Home radius set to ${String.format(Locale.US, "%.0f", updatedHomePoint.radiusMeters)} m"
                         }
                     },
                     onClearHomePoint = {
@@ -13170,7 +13171,9 @@ private fun DevicesPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
-    val devices = remember(
+    var devices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
+    var devicesComputing by remember { mutableStateOf(false) }
+    LaunchedEffect(
         selectedEncounters,
         sortMode,
         approachDetectionEnabled,
@@ -13179,15 +13182,20 @@ private fun DevicesPage(
         wifiRandomizedOneOffSuppressionEnabled,
         bleRandomizedOneOffSuppressionEnabled
     ) {
-        buildDeviceItems(
-            encounters = selectedEncounters,
-            sortMode = sortMode,
-            approachDetectionEnabled = approachDetectionEnabled,
-            ownedDeviceKeys = ownedDeviceKeys,
-            homePoint = homePoint,
-            suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
-            suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
-        )
+        devicesComputing = true
+        val computed = withContext(Dispatchers.Default) {
+            buildDeviceItems(
+                encounters = selectedEncounters,
+                sortMode = sortMode,
+                approachDetectionEnabled = approachDetectionEnabled,
+                ownedDeviceKeys = ownedDeviceKeys,
+                homePoint = homePoint,
+                suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+                suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
+            )
+        }
+        devices = computed
+        devicesComputing = false
     }
     val sourceOptions = remember(devices) {
         orderedEncounterSourceOptions(devices.map { it.source }.toSet())
@@ -13195,35 +13203,54 @@ private fun DevicesPage(
     val topSpeedByDevice = remember(selectedEncounters) {
         DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
-    val filteredDevices = remember(devices, sourceFilter, queryFilter, showOwnedOnly, showTrackerRiskOnly, showHomeAwaySuspiciousOnly, homePoint) {
-        devices.filter { device ->
-            val sourceMatches = sourceFilter == null || device.source == sourceFilter
-            val queryMatches = queryFilter.isBlank() ||
-                device.primaryId.contains(queryFilter, ignoreCase = true) ||
-                (device.secondaryId?.contains(queryFilter, ignoreCase = true) == true)
-            val ownedMatches = !showOwnedOnly || device.isOwned
-            val riskMatches = !showTrackerRiskOnly ||
-                (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
-            val homeAwaySuspiciousMatches = !showHomeAwaySuspiciousOnly || homePoint == null || (
-                !device.isOwned &&
-                    device.trackerRisk?.seenAtHome == true &&
-                    device.trackerRisk?.seenAwayFromHome == true
-                )
-            sourceMatches && queryMatches && ownedMatches && riskMatches && homeAwaySuspiciousMatches
+    var filteredDeviceCount by remember { mutableStateOf(0) }
+    var displayedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
+    var deviceDisplayComputing by remember { mutableStateOf(false) }
+    LaunchedEffect(
+        devices,
+        sourceFilter,
+        queryFilter,
+        showOwnedOnly,
+        showTrackerRiskOnly,
+        showHomeAwaySuspiciousOnly,
+        homePoint,
+        showDistance,
+        sortByDistance,
+        currentLocation
+    ) {
+        deviceDisplayComputing = true
+        val (filtered, displayed) = withContext(Dispatchers.Default) {
+            val filteredDevices = devices.filter { device ->
+                val sourceMatches = sourceFilter == null || device.source == sourceFilter
+                val queryMatches = queryFilter.isBlank() ||
+                    device.primaryId.contains(queryFilter, ignoreCase = true) ||
+                    (device.secondaryId?.contains(queryFilter, ignoreCase = true) == true)
+                val ownedMatches = !showOwnedOnly || device.isOwned
+                val riskMatches = !showTrackerRiskOnly ||
+                    (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
+                val homeAwaySuspiciousMatches = !showHomeAwaySuspiciousOnly || homePoint == null || (
+                    !device.isOwned &&
+                        device.trackerRisk?.seenAtHome == true &&
+                        device.trackerRisk?.seenAwayFromHome == true
+                    )
+                sourceMatches && queryMatches && ownedMatches && riskMatches && homeAwaySuspiciousMatches
+            }
+            val displayed = if (!showDistance || !sortByDistance) {
+                filteredDevices
+            } else {
+                filteredDevices
+                    .map { device -> device to (distanceForDeviceMeters(device, currentLocation) ?: Double.MIN_VALUE) }
+                    .sortedWith(
+                        compareByDescending<Pair<DeviceItem, Double>> { it.second }
+                            .thenByDescending { it.first.lastSeenEpochMs }
+                    )
+                    .map { it.first }
+            }
+            filteredDevices to displayed
         }
-    }
-    val displayedDevices = remember(filteredDevices, showDistance, sortByDistance, currentLocation) {
-        if (!showDistance || !sortByDistance) {
-            filteredDevices
-        } else {
-            filteredDevices
-                .map { device -> device to (distanceForDeviceMeters(device, currentLocation) ?: Double.MIN_VALUE) }
-                .sortedWith(
-                    compareByDescending<Pair<DeviceItem, Double>> { it.second }
-                        .thenByDescending { it.first.lastSeenEpochMs }
-                )
-                .map { it.first }
-        }
+        filteredDeviceCount = filtered.size
+        displayedDevices = displayed
+        deviceDisplayComputing = false
     }
     val distanceByDeviceKey = remember(displayedDevices, showDistance, currentLocation) {
         if (!showDistance || currentLocation == null) {
@@ -13328,7 +13355,17 @@ private fun DevicesPage(
                 }
             }
         }
-        Text("Showing ${displayedDevices.size} of ${devices.size}")
+        if (devicesComputing || deviceDisplayComputing) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(modifier = Modifier.height(16.dp).widthIn(min = 16.dp))
+                Text("Refreshing device analysis...")
+            }
+        }
+        Text("Showing ${displayedDevices.size} of ${devices.size} (filtered ${filteredDeviceCount})")
         LazyColumn {
             items(
                 items = displayedDevices,
@@ -13478,30 +13515,38 @@ private fun EncountersPage(
     val sourceOptions = remember(encounters) {
         orderedEncounterSourceOptions(encounters.map { it.source.name }.toSet())
     }
-    val filteredEncounters = remember(encounters, sourceFilter, queryFilter, showOwnedOnly, ownedDeviceKeys) {
-        encounters.filter { encounter ->
-            val sourceMatches = sourceFilter == null || encounter.source.name == sourceFilter
-            val queryMatches = queryFilter.isBlank() ||
-                encounter.primaryId.contains(queryFilter, ignoreCase = true) ||
-                (encounter.secondaryId?.contains(queryFilter, ignoreCase = true) == true) ||
-                encounter.rawPayloadJson.contains(queryFilter, ignoreCase = true)
-            val ownedMatches = !showOwnedOnly ||
-                (OwnedDeviceRegistry.keyFor(encounter.source.name, encounter.primaryId) in ownedDeviceKeys)
-            sourceMatches && queryMatches && ownedMatches
+    var filteredEncounterCount by remember { mutableStateOf(0) }
+    var displayedEncounters by remember { mutableStateOf<List<Encounter>>(emptyList()) }
+    var encounterDisplayComputing by remember { mutableStateOf(false) }
+    LaunchedEffect(encounters, sourceFilter, queryFilter, showOwnedOnly, ownedDeviceKeys, showDistance, sortByDistance, currentLocation) {
+        encounterDisplayComputing = true
+        val (filtered, displayed) = withContext(Dispatchers.Default) {
+            val filteredEncounters = encounters.filter { encounter ->
+                val sourceMatches = sourceFilter == null || encounter.source.name == sourceFilter
+                val queryMatches = queryFilter.isBlank() ||
+                    encounter.primaryId.contains(queryFilter, ignoreCase = true) ||
+                    (encounter.secondaryId?.contains(queryFilter, ignoreCase = true) == true) ||
+                    encounter.rawPayloadJson.contains(queryFilter, ignoreCase = true)
+                val ownedMatches = !showOwnedOnly ||
+                    (OwnedDeviceRegistry.keyFor(encounter.source.name, encounter.primaryId) in ownedDeviceKeys)
+                sourceMatches && queryMatches && ownedMatches
+            }
+            val displayed = if (!showDistance || !sortByDistance) {
+                filteredEncounters
+            } else {
+                filteredEncounters
+                    .map { encounter -> encounter to (distanceForEncounterMeters(encounter, currentLocation) ?: Double.MIN_VALUE) }
+                    .sortedWith(
+                        compareByDescending<Pair<Encounter, Double>> { it.second }
+                            .thenByDescending { it.first.timestampEpochMs }
+                    )
+                    .map { it.first }
+            }
+            filteredEncounters to displayed
         }
-    }
-    val displayedEncounters = remember(filteredEncounters, showDistance, sortByDistance, currentLocation) {
-        if (!showDistance || !sortByDistance) {
-            filteredEncounters
-        } else {
-            filteredEncounters
-                .map { encounter -> encounter to (distanceForEncounterMeters(encounter, currentLocation) ?: Double.MIN_VALUE) }
-                .sortedWith(
-                    compareByDescending<Pair<Encounter, Double>> { it.second }
-                        .thenByDescending { it.first.timestampEpochMs }
-                )
-                .map { it.first }
-        }
+        filteredEncounterCount = filtered.size
+        displayedEncounters = displayed
+        encounterDisplayComputing = false
     }
     val distanceByEncounterKey = remember(displayedEncounters, showDistance, currentLocation) {
         if (!showDistance || currentLocation == null) {
@@ -13593,7 +13638,17 @@ private fun EncountersPage(
                 }
             }
         }
-        Text("Showing ${displayedEncounters.size} of ${encounters.size}")
+        if (encounterDisplayComputing) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(modifier = Modifier.height(16.dp).widthIn(min = 16.dp))
+                Text("Refreshing encounter list...")
+            }
+        }
+        Text("Showing ${displayedEncounters.size} of ${encounters.size} (filtered ${filteredEncounterCount})")
         LazyColumn {
             items(
                 items = displayedEncounters,
