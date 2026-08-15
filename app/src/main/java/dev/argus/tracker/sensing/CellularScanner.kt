@@ -92,7 +92,7 @@ class CellularScanner(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
                     primaryId = "lte:${id.ci}:${id.pci}:${id.tac}",
-                    secondaryId = "LTE",
+                    secondaryId = buildCellSecondaryId(telephonyManager, "LTE"),
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
                     lat = location?.lat,
@@ -162,7 +162,7 @@ class CellularScanner(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
                     primaryId = "nr:${nciIdentity.displayValue ?: "unknown"}:${if (pci == Int.MAX_VALUE) "unknown" else pci}:${if (tac == Int.MAX_VALUE) "unknown" else tac}",
-                    secondaryId = "NR",
+                    secondaryId = buildCellSecondaryId(telephonyManager, "NR"),
                     rssiDbm = if (dbm == Int.MIN_VALUE) null else dbm,
                     frequencyMhz = null,
                     lat = location?.lat,
@@ -188,7 +188,7 @@ class CellularScanner(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
                     primaryId = "wcdma:${id.cid}:${id.psc}:${id.lac}",
-                    secondaryId = "WCDMA",
+                    secondaryId = buildCellSecondaryId(telephonyManager, "WCDMA"),
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
                     lat = location?.lat,
@@ -214,7 +214,7 @@ class CellularScanner(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
                     primaryId = "gsm:${id.cid}:${id.lac}:${id.arfcn}",
-                    secondaryId = "GSM",
+                    secondaryId = buildCellSecondaryId(telephonyManager, "GSM"),
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
                     lat = location?.lat,
@@ -237,7 +237,7 @@ class CellularScanner(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
                     primaryId = "cdma:${id.basestationId}:${id.networkId}:${id.systemId}",
-                    secondaryId = "CDMA",
+                    secondaryId = buildCellSecondaryId(telephonyManager, "CDMA"),
                     rssiDbm = cellSignalStrength.dbm,
                     frequencyMhz = null,
                     lat = location?.lat,
@@ -247,6 +247,18 @@ class CellularScanner(
             }
 
             else -> null
+        }
+    }
+
+    private fun buildCellSecondaryId(telephonyManager: TelephonyManager, radio: String): String {
+        val operator = telephonyManager.networkOperatorName
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) }
+        val deviceLabel = "${radio.uppercase()} tower"
+        return if (operator != null) {
+            "$operator Cell ($deviceLabel)"
+        } else {
+            "Cell ($deviceLabel)"
         }
     }
 
