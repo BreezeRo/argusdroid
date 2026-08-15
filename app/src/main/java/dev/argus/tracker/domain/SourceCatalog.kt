@@ -23,6 +23,7 @@ object SourceCatalog {
     const val KEY_MAGNETIC = "magnetic"
 
     val SOURCE_WIFI: String = EncounterSource.WIFI.name
+    val SOURCE_WIFI_SWEEP: String = EncounterSource.WIFI_SWEEP.name
     val SOURCE_WIFI_DIRECT: String = EncounterSource.WIFI_DIRECT.name
     val SOURCE_BLUETOOTH_LE: String = EncounterSource.BLUETOOTH_LE.name
     val SOURCE_BLUETOOTH_CLASSIC: String = EncounterSource.BLUETOOTH_CLASSIC.name

@@ -2,6 +2,7 @@ package dev.argus.tracker.domain
 
 enum class EncounterSource {
     WIFI,
+    WIFI_SWEEP,
     WIFI_DIRECT,
     BLUETOOTH_LE,
     BLUETOOTH_CLASSIC,

@@ -648,6 +648,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var wifiRandomizedOneOffSuppressionEnabled by remember {
         mutableStateOf(ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context))
     }
+    var wifiAggregateOnlyEnabled by remember {
+        mutableStateOf(ScanSettings.isWifiAggregateOnlyEnabled(context))
+    }
     var sourceScanIntervals by remember { mutableStateOf(ScanSettings.getAllSourceScanIntervalSeconds(context)) }
     var sourceLastScanEpochs by remember { mutableStateOf(ScanSettings.getAllSourceLastScanEpochMs(context)) }
     var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
@@ -924,6 +927,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
+        wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
         foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
@@ -1435,6 +1439,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
+                    wifiAggregateOnlyEnabled = wifiAggregateOnlyEnabled,
                     suppressedWifiRandomizedOneOffCount = suppressedWifiRandomizedOneOffCount,
                     sourceScanIntervals = sourceScanIntervals,
                     lastScanDurationMs = lastScanDurationMs,
@@ -1580,6 +1585,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         wifiRandomizedOneOffSuppressionEnabled = enabled
                         ScanSettings.setWifiRandomizedOneOffSuppressionEnabled(context, enabled)
                     },
+                    onWifiAggregateOnlyEnabledChanged = { enabled ->
+                        wifiAggregateOnlyEnabled = enabled
+                        ScanSettings.setWifiAggregateOnlyEnabled(context, enabled)
+                    },
                     onExportBackup = {
                         val file = AppBackupManager.exportSnapshot(
                             context = context,
@@ -1618,6 +1627,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
+                        wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
@@ -1663,6 +1673,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
+                        wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
@@ -1732,6 +1743,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
+                        wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
                         viewModel.refreshSummary()
                         "Hard reset completed: local data/logs cleared and mesh settings reset."
                     }
@@ -2945,6 +2957,7 @@ private fun AppSettingsPage(
     mapNoFlyZonesEnabled: Boolean,
     mapScannerSweepAnimationEnabled: Boolean,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
+    wifiAggregateOnlyEnabled: Boolean,
     suppressedWifiRandomizedOneOffCount: Int,
     sourceScanIntervals: Map<String, Long>,
     lastScanDurationMs: Long?,
@@ -2982,6 +2995,7 @@ private fun AppSettingsPage(
     onMapNoFlyZonesEnabledChanged: (Boolean) -> Unit,
     onMapScannerSweepAnimationEnabledChanged: (Boolean) -> Unit,
     onWifiRandomizedOneOffSuppressionEnabledChanged: (Boolean) -> Unit,
+    onWifiAggregateOnlyEnabledChanged: (Boolean) -> Unit,
     onExportBackup: suspend () -> String,
     onExportEncryptedBackup: suspend (String) -> String,
     onImportLatestBackup: suspend () -> String,
@@ -3313,6 +3327,18 @@ private fun AppSettingsPage(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Wi-Fi aggregate-only mode")
+                            Switch(
+                                checked = wifiAggregateOnlyEnabled,
+                                onCheckedChange = onWifiAggregateOnlyEnabledChanged
+                            )
+                        }
+                        Text("When on, each Wi-Fi sweep is stored as one aggregate detection instead of one detection per access point.")
+                        Text("Turn off to include both aggregate sweep and raw per-AP detections.")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -7971,6 +7997,16 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
         secondaryIdLabel = "SSID"
     ),
     SourceTypeUiMeta(
+        source = SourceCatalog.SOURCE_WIFI_SWEEP,
+        scanType = SourceCatalog.KEY_WIFI,
+        settingsLabel = "Wi-Fi Sweep",
+        legendLabel = "WIFI SWEEP",
+        listLabel = "WIFI SWEEP",
+        glyph = "WFS",
+        hue = BitmapDescriptorFactory.HUE_ORANGE,
+        color = Color(0xFFFFA726)
+    ),
+    SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_WIFI_DIRECT,
         scanType = SourceCatalog.KEY_WIFI_DIRECT,
         settingsLabel = "Wi-Fi Direct",
@@ -8788,7 +8824,18 @@ private fun readWifiAccessPointFields(rawPayloadJson: String): List<Pair<String,
             "Operator Friendly Name" to "operatorFriendlyName",
             "Venue Name" to "venueName",
             "Scan Request Accepted" to "scanRequestAccepted",
-            "Scan Timestamp (us)" to "timestampMicros"
+            "Scan Timestamp (us)" to "timestampMicros",
+            "Mode" to "mode",
+            "Access Point Count" to "apCount",
+            "Unique BSSID Count" to "uniqueBssidCount",
+            "Hidden SSID Count" to "hiddenSsidCount",
+            "Strongest RSSI (dBm)" to "strongestRssiDbm",
+            "Median RSSI (dBm)" to "medianRssiDbm",
+            "2.4 GHz AP Count" to "band24Count",
+            "5 GHz AP Count" to "band5Count",
+            "6 GHz AP Count" to "band6Count",
+            "Top Role Hints" to "topRoleHints",
+            "Newest Scan Timestamp (us)" to "timestampMicrosMax"
         )
     )
 }
@@ -9142,6 +9189,7 @@ private fun formatCoordinate(value: Double): String =
 private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
     when (encounter.source) {
         EncounterSource.WIFI -> "Wi-Fi Access Point Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
+        EncounterSource.WIFI_SWEEP -> "Wi-Fi Sweep Aggregate Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
         EncounterSource.WIFI_DIRECT -> "Wi-Fi Direct Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_CLASSIC -> "Bluetooth Classic Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)

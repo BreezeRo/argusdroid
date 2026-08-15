@@ -58,6 +58,7 @@ object ScanSettings {
     private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
     private const val KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "wifi_randomized_one_off_suppression_enabled"
+    private const val KEY_WIFI_AGGREGATE_ONLY_ENABLED = "wifi_aggregate_only_enabled"
     private const val KEY_APP_THEME_MODE = "app_theme_mode"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -82,6 +83,7 @@ object ScanSettings {
     const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = false
     const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
+    const val DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED = true
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 1800L
@@ -752,6 +754,20 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isWifiAggregateOnlyEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(
+                KEY_WIFI_AGGREGATE_ONLY_ENABLED,
+                DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED
+            )
+
+    fun setWifiAggregateOnlyEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_WIFI_AGGREGATE_ONLY_ENABLED, enabled)
             .apply()
     }
 

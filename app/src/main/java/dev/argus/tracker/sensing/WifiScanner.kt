@@ -11,6 +11,7 @@ import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
 import dev.argus.tracker.worker.ScanSettings
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 class WifiScanner(
     private val context: Context
@@ -27,10 +28,21 @@ class WifiScanner(
 
         @Suppress("DEPRECATION")
         val results = runCatching { wifiManager.scanResults }.getOrNull() ?: emptyList()
+        if (results.isEmpty()) return emptyList()
+
         val now = System.currentTimeMillis()
         val location = LocationSnapshotProvider.read(context)
+        val aggregateOnly = ScanSettings.isWifiAggregateOnlyEnabled(context)
 
-        return results.map { result ->
+        val aggregate = buildWifiSweepEncounter(
+            results = results,
+            now = now,
+            location = location,
+            scanRequested = scanRequested
+        )
+        if (aggregateOnly) return listOf(aggregate)
+
+        val perAccessPoint = results.map { result ->
             Encounter(
                 timestampEpochMs = now,
                 source = EncounterSource.WIFI,
@@ -42,6 +54,71 @@ class WifiScanner(
                 lon = location?.lon,
                 rawPayloadJson = buildWifiPayload(result, scanRequested)
             )
+        }
+
+        return listOf(aggregate) + perAccessPoint
+    }
+
+    private fun buildWifiSweepEncounter(
+        results: List<android.net.wifi.ScanResult>,
+        now: Long,
+        location: DetectionLocation?,
+        scanRequested: Boolean
+    ): Encounter {
+        val strongest = results.maxByOrNull { it.level }
+        val strongestRssi = strongest?.level
+        val medianRssi = median(results.map { it.level })
+        val uniqueBssidCount = results.mapNotNull { it.BSSID?.takeIf { bssid -> bssid.isNotBlank() } }
+            .toSet()
+            .size
+        val hiddenSsidCount = results.count { it.SSID.isNullOrBlank() }
+        val band24Count = results.count { it.frequency in 2400..2500 }
+        val band5Count = results.count { it.frequency in 4900..5900 }
+        val band6Count = results.count { it.frequency in 5925..7125 }
+        val roleCounts = linkedMapOf<String, Int>()
+        results.forEach { result ->
+            val role = classifyWifiRole(result.SSID, result.capabilities)
+            roleCounts[role] = (roleCounts[role] ?: 0) + 1
+        }
+        val topRoles = roleCounts.entries
+            .sortedByDescending { it.value }
+            .take(5)
+            .joinToString(" | ") { (role, count) -> "$role:$count" }
+
+        return Encounter(
+            timestampEpochMs = now,
+            source = EncounterSource.WIFI_SWEEP,
+            primaryId = "wifi-scan-aggregate",
+            secondaryId = "${results.size} APs",
+            rssiDbm = strongestRssi,
+            frequencyMhz = strongest?.frequency,
+            lat = location?.lat,
+            lon = location?.lon,
+            rawPayloadJson = JSONObject()
+                .put("mode", "aggregate")
+                .put("scanRequestAccepted", scanRequested)
+                .put("apCount", results.size)
+                .put("uniqueBssidCount", uniqueBssidCount)
+                .put("hiddenSsidCount", hiddenSsidCount)
+                .put("strongestRssiDbm", strongestRssi)
+                .put("medianRssiDbm", medianRssi)
+                .put("band24Count", band24Count)
+                .put("band5Count", band5Count)
+                .put("band6Count", band6Count)
+                .put("topRoleHints", topRoles)
+                .put("timestampMicrosMax", results.maxOfOrNull { it.timestamp } ?: 0L)
+                .toString()
+        )
+    }
+
+    private fun median(values: List<Int>): Int? {
+        if (values.isEmpty()) return null
+        val ordered = values.sorted()
+        val middle = ordered.size / 2
+        return if (ordered.size % 2 == 1) {
+            ordered[middle]
+        } else {
+            ((ordered[middle - 1] + ordered[middle]) / 2.0).roundToInt()
         }
     }
 
