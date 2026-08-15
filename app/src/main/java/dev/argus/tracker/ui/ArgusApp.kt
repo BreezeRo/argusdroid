@@ -3529,6 +3529,10 @@ private fun DetectionPage(
     var liveOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    var deviceMapAircraftRadiusMiles by rememberSaveable { mutableStateOf(50) }
+    var flightMapRadiusMiles by rememberSaveable {
+        mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
+    }
     val deviceMapLiveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
     val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
     val deviceMapAircraftRecentWindowMs = maxOf(600_000L, deviceMapRecentWindowMs)
@@ -3541,16 +3545,20 @@ private fun DetectionPage(
         onInitialTabRequestHandled()
     }
 
-    val isDeviceLocationTabActive = selectedTab == 3
+    val isDeviceLocationTabActive = selectedTab == 3 && selectedMapSubTab == 0
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
     val signalIntel = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 2) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
     }
-    val flightDisplayRadiusMeters = ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 300) * 1609.344
-    val topSpeedRecords = remember(meshInsightEncounters) {
-        DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
+    val flightDisplayRadiusMeters = flightMapRadiusMiles.coerceIn(10, 1000) * 1609.344
+    val topSpeedRecords = remember(selectedTab, selectedMapSubTab, meshInsightEncounters.size) {
+        if (selectedTab == 3 && selectedMapSubTab == 0) {
+            DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
+        } else {
+            emptyMap()
+        }
     }
 
     val maxDeviceCandidatesToResolve = remember(cellDevicePinLimit) {
@@ -3633,6 +3641,14 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
+    val deviceMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 0) {
+        LocationSnapshotProvider.observe(
+            context,
+            minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+        ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
 
     val isFlightMapActive = selectedTab == 3 && selectedMapSubTab == 1
     val allTrackedAircraftPins = remember(meshInsightEncounters, deviceMapAircraftLiveWindowMs, isFlightMapActive) {
@@ -3696,6 +3712,7 @@ private fun DetectionPage(
                             previous = acc.previous,
                             latest = latest
                         )
+                        val visualHints = readAircraftVisualHints(latest.rawPayloadJson)
                         MapPin(
                             position = LatLng(latest.lat!!, latest.lon!!),
                             title = buildPinTitle(
@@ -3703,16 +3720,19 @@ private fun DetectionPage(
                                 primaryId = latest.primaryId,
                                 motionBadge = null
                             ),
-                            snippet = buildThreeLineSnippet(
-                                line1 = "Seen ${acc.seenCount}x",
-                                line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}",
-                                line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
-                            ),
+                            snippetBuilder = {
+                                buildThreeLineSnippet(
+                                    line1 = "Seen ${acc.seenCount}x",
+                                    line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}",
+                                    line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
+                                )
+                            },
                             timestampEpochMs = latest.timestampEpochMs,
                             source = latest.source.name,
                             primaryId = latest.primaryId,
                             encounterTimestampEpochMs = latest.timestampEpochMs,
-                            headingDegrees = readAircraftHeadingDegrees(latest.rawPayloadJson) ?: derivedHeading,
+                            aircraftIconType = visualHints.iconType,
+                            headingDegrees = visualHints.headingDegrees ?: derivedHeading,
                             motionBadge = null,
                             motionSpeedMps = null,
                             isLive = isLive
@@ -3824,11 +3844,13 @@ private fun DetectionPage(
                     primaryId = candidate.primaryId,
                     motionBadge = motionBadge
                 ),
-                snippet = buildThreeLineSnippet(
-                    line1 = "Seen ${candidate.seenCount}x",
-                    line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
-                    line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
-                ),
+                snippetBuilder = {
+                    buildThreeLineSnippet(
+                        line1 = "Seen ${candidate.seenCount}x",
+                        line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
+                        line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
+                    )
+                },
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
@@ -4008,26 +4030,52 @@ private fun DetectionPage(
                 }
 
                 if (selectedMapSubTab == 0) {
-                    val deviceMapPins = estimatedDeviceLocationPins
-                        .asSequence()
-                        .filter { pin ->
-                            if (!liveOnlyOnDeviceMap) true else pin.isLive
-                        }
-                        .filter { pin ->
-                            if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
-                        }
-                        .filter { pin ->
-                            if (!sinceSnapshotOnlyOnDeviceMap) {
-                                true
-                            } else {
-                                val snapshotEpoch = deviceMapSnapshotEpochMs
-                                snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                    val deviceMapAircraftRadiusMeters = deviceMapAircraftRadiusMiles.coerceIn(25, 75) * 1609.344
+                    val deviceMapPins = remember(
+                        estimatedDeviceLocationPins,
+                        deviceMapCurrentLocation,
+                        deviceMapAircraftRadiusMeters,
+                        liveOnlyOnDeviceMap,
+                        movingOnlyOnDeviceMap,
+                        sinceSnapshotOnlyOnDeviceMap,
+                        deviceMapSnapshotEpochMs
+                    ) {
+                        estimatedDeviceLocationPins
+                            .asSequence()
+                            .filter { pin ->
+                                if (pin.source != EncounterSource.AIRCRAFT.name) {
+                                    true
+                                } else {
+                                    deviceMapCurrentLocation?.let { loc ->
+                                        distanceFromLocationMeters(
+                                            fromLat = loc.lat,
+                                            fromLon = loc.lon,
+                                            toLat = pin.position.latitude,
+                                            toLon = pin.position.longitude
+                                        )?.let { distance -> distance <= deviceMapAircraftRadiusMeters } ?: false
+                                    } ?: true
+                                }
                             }
-                        }
-                        .toList()
+                            .filter { pin ->
+                                if (!liveOnlyOnDeviceMap) true else pin.isLive
+                            }
+                            .filter { pin ->
+                                if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
+                            }
+                            .filter { pin ->
+                                if (!sinceSnapshotOnlyOnDeviceMap) {
+                                    true
+                                } else {
+                                    val snapshotEpoch = deviceMapSnapshotEpochMs
+                                    snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                                }
+                            }
+                            .toList()
+                    }
                     DetectionMapPage(
                         mapTitle = "Device Map",
                         mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
+                        currentLocationOverride = deviceMapCurrentLocation,
                         pins = deviceMapPins,
                         pinLimit = cellDevicePinLimit,
                         onPinLimitChange = { cellDevicePinLimit = it },
@@ -4050,6 +4098,13 @@ private fun DetectionPage(
                         showLiveOnlyControl = true,
                         liveOnlyEnabled = liveOnlyOnDeviceMap,
                         onLiveOnlyEnabledChange = { liveOnlyOnDeviceMap = it },
+                        showRadiusControl = true,
+                        radiusMiles = deviceMapAircraftRadiusMiles,
+                        onRadiusMilesChange = { miles ->
+                            deviceMapAircraftRadiusMiles = miles.coerceIn(25, 75)
+                        },
+                        radiusControlLabel = "Aircraft Radius (mi)",
+                        radiusOptions = listOf(25, 50, 75),
                         showMovingOnlyControl = true,
                         movingOnlyEnabled = movingOnlyOnDeviceMap,
                         onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
@@ -4069,35 +4124,45 @@ private fun DetectionPage(
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
                 } else {
-                    val flightMapPins = allTrackedAircraftPins
-                        .asSequence()
-                        .filter { pin ->
-                            if (!liveOnlyOnFlightMap) {
-                                true
-                            } else {
-                                val withinRadius = flightMapCurrentLocation?.let { loc ->
-                                    distanceFromLocationMeters(
-                                        fromLat = loc.lat,
-                                        fromLon = loc.lon,
-                                        toLat = pin.position.latitude,
-                                        toLon = pin.position.longitude
-                                    )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
-                                } ?: true
-                                pin.isLive && withinRadius
+                    val flightMapPins = remember(
+                        allTrackedAircraftPins,
+                        liveOnlyOnFlightMap,
+                        flightMapCurrentLocation,
+                        flightDisplayRadiusMeters,
+                        sinceSnapshotOnlyOnFlightMap,
+                        flightMapSnapshotEpochMs
+                    ) {
+                        allTrackedAircraftPins
+                            .asSequence()
+                            .filter { pin ->
+                                if (!liveOnlyOnFlightMap) {
+                                    true
+                                } else {
+                                    val withinRadius = flightMapCurrentLocation?.let { loc ->
+                                        distanceFromLocationMeters(
+                                            fromLat = loc.lat,
+                                            fromLon = loc.lon,
+                                            toLat = pin.position.latitude,
+                                            toLon = pin.position.longitude
+                                        )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
+                                    } ?: true
+                                    pin.isLive && withinRadius
+                                }
                             }
-                        }
-                        .filter { pin ->
-                            if (!sinceSnapshotOnlyOnFlightMap) {
-                                true
-                            } else {
-                                val snapshotEpoch = flightMapSnapshotEpochMs
-                                snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                            .filter { pin ->
+                                if (!sinceSnapshotOnlyOnFlightMap) {
+                                    true
+                                } else {
+                                    val snapshotEpoch = flightMapSnapshotEpochMs
+                                    snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                                }
                             }
-                        }
-                        .toList()
+                            .toList()
+                    }
                     DetectionMapPage(
                         mapTitle = "Flight Map",
                         mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
+                        currentLocationOverride = flightMapCurrentLocation,
                         pins = flightMapPins,
                         pinLimit = flightMapPinLimit,
                         onPinLimitChange = { flightMapPinLimit = it },
@@ -4116,6 +4181,13 @@ private fun DetectionPage(
                         showLiveOnlyControl = true,
                         liveOnlyEnabled = liveOnlyOnFlightMap,
                         onLiveOnlyEnabledChange = { liveOnlyOnFlightMap = it },
+                        showRadiusControl = true,
+                        radiusMiles = flightMapRadiusMiles,
+                        onRadiusMilesChange = { miles ->
+                            flightMapRadiusMiles = miles.coerceIn(10, 1000)
+                        },
+                        radiusControlLabel = "Radius (mi)",
+                        radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
                         showMovingOnlyControl = false,
                         showSinceSnapshotControl = true,
                         sinceSnapshotEnabled = sinceSnapshotOnlyOnFlightMap,
@@ -5238,6 +5310,7 @@ private fun buildMeshCoverageInsights(
 private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
+    currentLocationOverride: DetectionLocation? = null,
     pins: List<MapPin>,
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
@@ -5248,6 +5321,11 @@ private fun DetectionMapPage(
     showLiveOnlyControl: Boolean = false,
     liveOnlyEnabled: Boolean = false,
     onLiveOnlyEnabledChange: (Boolean) -> Unit = {},
+    showRadiusControl: Boolean = false,
+    radiusMiles: Int = 100,
+    onRadiusMilesChange: (Int) -> Unit = {},
+    radiusControlLabel: String = "Radius (mi)",
+    radiusOptions: List<Int> = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
     showMovingOnlyControl: Boolean = false,
     movingOnlyEnabled: Boolean = false,
     onMovingOnlyEnabledChange: (Boolean) -> Unit = {},
@@ -5273,6 +5351,7 @@ private fun DetectionMapPage(
     }
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
     var pinLimitExpanded by remember { mutableStateOf(false) }
+    var radiusExpanded by remember { mutableStateOf(false) }
     var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
@@ -5305,10 +5384,15 @@ private fun DetectionMapPage(
         if (diagnosticsVisible) AviationPerfStatsStore.snapshot(context) else null
     }
 
-    val currentLocation by LocationSnapshotProvider.observe(
-        context,
-        minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
-    ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    val observedCurrentLocation by if (currentLocationOverride == null) {
+        LocationSnapshotProvider.observe(
+            context,
+            minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+        ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
+    val currentLocation = currentLocationOverride ?: observedCurrentLocation
     val nearbyVisiblePins = remember(filteredVisiblePins, currentLocation) {
         filterPinsNearCurrentLocation(
             pins = filteredVisiblePins,
@@ -5342,6 +5426,27 @@ private fun DetectionMapPage(
     val useDenseDotMarkers = remember(zoomBucket, filteredVisiblePins.size) {
         val bucketZoom = zoomBucket / 2f
         filteredVisiblePins.size > MAP_RENDER_PIN_LIMIT_MID || bucketZoom < 9.5f
+    }
+    val mapRenderItems = remember(renderedPins, useDenseDotMarkers, zoomBucket) {
+        if (useDenseDotMarkers) {
+            clusterPinsForRender(renderedPins, zoomBucket / 2f)
+        } else {
+            renderedPins.map { pin -> MapRenderItem.SinglePin(pin) }
+        }
+    }
+    val renderedPinSnippetCache = remember(mapRenderItems, preciseDotsEnabled, useDenseDotMarkers) {
+        if (preciseDotsEnabled || useDenseDotMarkers) {
+            emptyMap()
+        } else {
+            mapRenderItems
+                .asSequence()
+                .mapNotNull { item ->
+                    val pin = (item as? MapRenderItem.SinglePin)?.pin ?: return@mapNotNull null
+                    val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                    key to pin.snippetBuilder?.invoke()
+                }
+                .toMap()
+        }
     }
 
     LaunchedEffect(currentLocation, cameraFocusPins, hasMapsApiKey, autoPositioned, mapLoaded) {
@@ -5645,6 +5750,32 @@ private fun DetectionMapPage(
                                             )
                                         }
                                     }
+                                    if (showRadiusControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text(radiusControlLabel)
+                                            Button(onClick = { radiusExpanded = true }) {
+                                                Text(radiusMiles.toString())
+                                            }
+                                            DropdownMenu(
+                                                expanded = radiusExpanded,
+                                                onDismissRequest = { radiusExpanded = false }
+                                            ) {
+                                                radiusOptions.forEach { option ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(option.toString()) },
+                                                        onClick = {
+                                                            onRadiusMilesChange(option)
+                                                            radiusExpanded = false
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                     if (showMovingOnlyControl) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -5746,6 +5877,32 @@ private fun DetectionMapPage(
                                                 checked = liveOnlyEnabled,
                                                 onCheckedChange = onLiveOnlyEnabledChange
                                             )
+                                        }
+                                    }
+                                    if (showRadiusControl) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text(radiusControlLabel)
+                                            Button(onClick = { radiusExpanded = true }) {
+                                                Text(radiusMiles.toString())
+                                            }
+                                            DropdownMenu(
+                                                expanded = radiusExpanded,
+                                                onDismissRequest = { radiusExpanded = false }
+                                            ) {
+                                                radiusOptions.forEach { option ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(option.toString()) },
+                                                        onClick = {
+                                                            onRadiusMilesChange(option)
+                                                            radiusExpanded = false
+                                                        }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                     if (showMovingOnlyControl) {
@@ -5886,30 +6043,50 @@ private fun DetectionMapPage(
                         myLocationButtonEnabled = hasLocationPermission
                     )
                 ) {
-                    renderedPins.forEach { pin ->
-                        val aircraftHeading = if (pin.source == "AIRCRAFT") {
-                            pin.headingDegrees?.toFloat()?.let { value ->
-                                ((value % 360f) + 360f) % 360f
-                            } ?: 0f
-                        } else {
-                            0f
-                        }
-                        Marker(
-                            state = MarkerState(position = pin.position),
-                            title = pin.title,
-                            snippet = pin.snippet,
-                            icon = if (preciseDotsEnabled || useDenseDotMarkers) {
-                                markerDotIconForPin(pin, useSourceOnlyPinColors)
-                            } else {
-                                markerIconForPin(pin, useSourceOnlyPinColors)
-                            },
-                            anchor = if (pin.source == "AIRCRAFT") Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
-                            rotation = aircraftHeading,
-                            flat = pin.source == "AIRCRAFT",
-                            onInfoWindowClick = {
-                                onPinDetailsClick(pin)
+                    mapRenderItems.forEach { item ->
+                        when (item) {
+                            is MapRenderItem.SinglePin -> {
+                                val pin = item.pin
+                                val markerState = remember(pin.position) { MarkerState(position = pin.position) }
+                                val aircraftHeading = if (pin.source == "AIRCRAFT") {
+                                    pin.headingDegrees?.toFloat()?.let { value ->
+                                        ((value % 360f) + 360f) % 360f
+                                    } ?: 0f
+                                } else {
+                                    0f
+                                }
+                                val showMarkerDetails = !(preciseDotsEnabled || useDenseDotMarkers)
+                                val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                                Marker(
+                                    state = markerState,
+                                    title = if (showMarkerDetails) pin.title else null,
+                                    snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
+                                    icon = if (preciseDotsEnabled || useDenseDotMarkers) {
+                                        markerDotIconForPin(pin, useSourceOnlyPinColors)
+                                    } else {
+                                        markerIconForPin(pin, useSourceOnlyPinColors)
+                                    },
+                                    anchor = if (pin.source == "AIRCRAFT") Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
+                                    rotation = aircraftHeading,
+                                    flat = pin.source == "AIRCRAFT",
+                                    onInfoWindowClick = {
+                                        onPinDetailsClick(pin)
+                                    }
+                                )
                             }
-                        )
+
+                            is MapRenderItem.Cluster -> {
+                                val markerState = remember(item.position) { MarkerState(position = item.position) }
+                                Marker(
+                                    state = markerState,
+                                    title = "Cluster (${item.count})",
+                                    snippet = item.summary,
+                                    icon = clusterMarkerIcon(item),
+                                    anchor = Offset(0.5f, 0.5f),
+                                    flat = false
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -6012,6 +6189,29 @@ private fun DetectionMapPage(
                                         checked = liveOnlyEnabled,
                                         onCheckedChange = onLiveOnlyEnabledChange
                                     )
+                                }
+                            }
+                            if (showRadiusControl) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(radiusControlLabel)
+                                    Button(onClick = { radiusExpanded = true }) {
+                                        Text(radiusMiles.toString())
+                                    }
+                                }
+                                DropdownMenu(expanded = radiusExpanded, onDismissRequest = { radiusExpanded = false }) {
+                                    radiusOptions.forEach { option ->
+                                        DropdownMenuItem(
+                                            text = { Text(option.toString()) },
+                                            onClick = {
+                                                onRadiusMilesChange(option)
+                                                radiusExpanded = false
+                                            }
+                                        )
+                                    }
                                 }
                             }
                             if (showMovingOnlyControl) {
@@ -6223,11 +6423,12 @@ private fun MovingDevicePathMapPage(
 private data class MapPin(
     val position: LatLng,
     val title: String,
-    val snippet: String,
+    val snippetBuilder: (() -> String)? = null,
     val timestampEpochMs: Long,
     val source: String,
     val primaryId: String,
     val encounterTimestampEpochMs: Long?,
+    val aircraftIconType: String? = null,
     val headingDegrees: Double? = null,
     val motionBadge: String? = null,
     val motionSpeedMps: Double? = null,
@@ -6239,6 +6440,18 @@ private data class PinLegendItem(
     val label: String,
     val color: Color
 )
+
+private sealed class MapRenderItem {
+    data class SinglePin(val pin: MapPin) : MapRenderItem()
+
+    data class Cluster(
+        val position: LatLng,
+        val count: Int,
+        val source: String,
+        val summary: String,
+        val isLive: Boolean
+    ) : MapRenderItem()
+}
 
 private fun offsetLatLng(base: LatLng, distanceMeters: Double, bearingDegrees: Double): LatLng {
     val earthRadiusMeters = 6_378_137.0
@@ -6536,6 +6749,105 @@ private fun markerHueForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false
 private val deviceMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val deviceDotMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val aircraftMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
+private val clusterMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
+
+private fun clusterPinsForRender(pins: List<MapPin>, zoom: Float): List<MapRenderItem> {
+    if (pins.size < 8) {
+        return pins.map { MapRenderItem.SinglePin(it) }
+    }
+
+    val cellDegrees = when {
+        zoom < 7.0f -> 0.25
+        zoom < 9.0f -> 0.12
+        zoom < 11.0f -> 0.06
+        else -> 0.03
+    }
+
+    val grouped = LinkedHashMap<String, MutableList<MapPin>>()
+    pins.forEach { pin ->
+        val latKey = kotlin.math.floor(pin.position.latitude / cellDegrees).toInt()
+        val lonKey = kotlin.math.floor(pin.position.longitude / cellDegrees).toInt()
+        val key = "$latKey:$lonKey"
+        grouped.getOrPut(key) { mutableListOf() }.add(pin)
+    }
+
+    return grouped.values.map { bucket ->
+        if (bucket.size == 1) {
+            MapRenderItem.SinglePin(bucket.first())
+        } else {
+            val lat = bucket.map { it.position.latitude }.average()
+            val lon = bucket.map { it.position.longitude }.average()
+            val sourceCounts = bucket.groupingBy { it.source }.eachCount()
+            val dominantSource = sourceCounts.maxByOrNull { it.value }?.key ?: "UNKNOWN_RF"
+            val liveCount = bucket.count { it.isLive }
+            val topSourcesSummary = sourceCounts.entries
+                .sortedByDescending { it.value }
+                .take(3)
+                .joinToString(" • ") { (source, count) ->
+                    "${markerLegendLabelForSource(source)} $count"
+                }
+            val summary = "${bucket.size} pins • Live $liveCount • $topSourcesSummary"
+            MapRenderItem.Cluster(
+                position = LatLng(lat, lon),
+                count = bucket.size,
+                source = dominantSource,
+                summary = summary,
+                isLive = liveCount > 0
+            )
+        }
+    }
+}
+
+private fun clusterMarkerIcon(cluster: MapRenderItem.Cluster): BitmapDescriptor {
+    val sourceColor = markerLegendColorForSource(cluster.source)
+    val baseColor = if (cluster.isLive) sourceColor else sourceColor.copy(alpha = 0.55f)
+    val bucket = when {
+        cluster.count >= 100 -> "100+"
+        cluster.count >= 50 -> "50+"
+        cluster.count >= 20 -> "20+"
+        else -> cluster.count.toString()
+    }
+    val key = "cluster|${cluster.source}|$bucket|${baseColor.toArgb()}|${cluster.isLive}"
+    clusterMarkerIconCache[key]?.let { return it }
+
+    val size = when {
+        cluster.count >= 100 -> 54
+        cluster.count >= 50 -> 50
+        cluster.count >= 20 -> 46
+        else -> 42
+    }
+    val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+    val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = baseColor.toArgb()
+    }
+    val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 3f
+        color = android.graphics.Color.argb(if (cluster.isLive) 230 else 150, 8, 16, 18)
+    }
+    val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.WHITE
+        textAlign = android.graphics.Paint.Align.CENTER
+        textSize = if (size >= 50) 15f else 13f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
+    }
+
+    val center = size / 2f
+    val radius = center - 3f
+    canvas.drawCircle(center, center, radius, fillPaint)
+    canvas.drawCircle(center, center, radius, strokePaint)
+
+    val text = bucket
+    val textY = center - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(text, center, textY, textPaint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap).also {
+        clusterMarkerIconCache[key] = it
+    }
+}
 
 private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): BitmapDescriptor {
     if (pin.source == "AIRCRAFT") {
@@ -6594,9 +6906,11 @@ private fun markerAircraftIconForPin(
     useSourceOnlyPinColors: Boolean = false,
     compact: Boolean
 ): BitmapDescriptor {
+    val aircraftIconType = pin.aircraftIconType?.trim()?.lowercase(Locale.US).orEmpty()
+    val isHelicopter = aircraftIconType.contains("heli")
     val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
     val alpha = if (pin.isLive) 255 else 150
-    val key = "aircraft|${if (compact) "compact" else "regular"}|${bgColor.toArgb()}|$alpha"
+    val key = "aircraft|${if (isHelicopter) "heli" else "plane"}|${if (compact) "compact" else "regular"}|${bgColor.toArgb()}|$alpha"
     aircraftMarkerIconCache[key]?.let { return it }
 
     val width = if (compact) 28 else 34
@@ -6618,36 +6932,69 @@ private fun markerAircraftIconForPin(
 
     val cx = width / 2f
     val cy = height / 2f
-    val bodyHalf = if (compact) 7f else 8.5f
-    val wingHalf = if (compact) 11f else 13f
-    val nose = if (compact) 11.5f else 13.5f
-    val tail = if (compact) 7.5f else 9f
-    val planePath = android.graphics.Path().apply {
-        moveTo(cx, cy - nose)
-        lineTo(cx + (if (compact) 2.2f else 2.6f), cy - bodyHalf)
-        lineTo(cx + wingHalf, cy - (if (compact) 1.0f else 1.2f))
-        lineTo(cx + wingHalf, cy + (if (compact) 1.6f else 2.0f))
-        lineTo(cx + (if (compact) 2.8f else 3.2f), cy + (if (compact) 2.5f else 3.0f))
-        lineTo(cx + (if (compact) 1.4f else 1.7f), cy + tail)
-        lineTo(cx - (if (compact) 1.4f else 1.7f), cy + tail)
-        lineTo(cx - (if (compact) 2.8f else 3.2f), cy + (if (compact) 2.5f else 3.0f))
-        lineTo(cx - wingHalf, cy + (if (compact) 1.6f else 2.0f))
-        lineTo(cx - wingHalf, cy - (if (compact) 1.0f else 1.2f))
-        lineTo(cx - (if (compact) 2.2f else 2.6f), cy - bodyHalf)
-        close()
-    }
-    canvas.drawPath(planePath, planePaint)
-    canvas.drawPath(planePath, outlinePaint)
+    if (isHelicopter) {
+        val bodyWidth = if (compact) 7.5f else 9.0f
+        val bodyHeight = if (compact) 10.5f else 12.5f
+        val bodyRect = android.graphics.RectF(
+            cx - bodyWidth / 2f,
+            cy - bodyHeight / 2f,
+            cx + bodyWidth / 2f,
+            cy + bodyHeight / 2f
+        )
+        canvas.drawRoundRect(bodyRect, 3.2f, 3.2f, planePaint)
+        canvas.drawRoundRect(bodyRect, 3.2f, 3.2f, outlinePaint)
 
-    val tailPath = android.graphics.Path().apply {
-        moveTo(cx - (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
-        lineTo(cx - (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
-        lineTo(cx + (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
-        lineTo(cx + (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
-        close()
+        val tailLength = if (compact) 9.5f else 12.0f
+        val tailWidth = if (compact) 1.5f else 1.8f
+        val tailRect = android.graphics.RectF(
+            cx - tailWidth / 2f,
+            bodyRect.bottom - 0.5f,
+            cx + tailWidth / 2f,
+            bodyRect.bottom + tailLength
+        )
+        canvas.drawRoundRect(tailRect, 1.2f, 1.2f, planePaint)
+        canvas.drawRoundRect(tailRect, 1.2f, 1.2f, outlinePaint)
+
+        val mastTopY = bodyRect.top - (if (compact) 2.0f else 2.4f)
+        val rotorHalf = if (compact) 10.8f else 13.2f
+        canvas.drawLine(cx - rotorHalf, mastTopY, cx + rotorHalf, mastTopY, outlinePaint)
+        canvas.drawLine(cx, mastTopY - 1.5f, cx, mastTopY + 1.5f, outlinePaint)
+
+        val skidY = bodyRect.bottom + (if (compact) 2.2f else 2.8f)
+        val skidHalf = if (compact) 7.0f else 8.2f
+        canvas.drawLine(cx - skidHalf, skidY, cx + skidHalf, skidY, outlinePaint)
+    } else {
+        val bodyHalf = if (compact) 7f else 8.5f
+        val wingHalf = if (compact) 11f else 13f
+        val nose = if (compact) 11.5f else 13.5f
+        val tail = if (compact) 7.5f else 9f
+        val planePath = android.graphics.Path().apply {
+            moveTo(cx, cy - nose)
+            lineTo(cx + (if (compact) 2.2f else 2.6f), cy - bodyHalf)
+            lineTo(cx + wingHalf, cy - (if (compact) 1.0f else 1.2f))
+            lineTo(cx + wingHalf, cy + (if (compact) 1.6f else 2.0f))
+            lineTo(cx + (if (compact) 2.8f else 3.2f), cy + (if (compact) 2.5f else 3.0f))
+            lineTo(cx + (if (compact) 1.4f else 1.7f), cy + tail)
+            lineTo(cx - (if (compact) 1.4f else 1.7f), cy + tail)
+            lineTo(cx - (if (compact) 2.8f else 3.2f), cy + (if (compact) 2.5f else 3.0f))
+            lineTo(cx - wingHalf, cy + (if (compact) 1.6f else 2.0f))
+            lineTo(cx - wingHalf, cy - (if (compact) 1.0f else 1.2f))
+            lineTo(cx - (if (compact) 2.2f else 2.6f), cy - bodyHalf)
+            close()
+        }
+        canvas.drawPath(planePath, planePaint)
+        canvas.drawPath(planePath, outlinePaint)
+
+        val tailPath = android.graphics.Path().apply {
+            moveTo(cx - (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
+            lineTo(cx - (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
+            lineTo(cx + (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
+            lineTo(cx + (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
+            close()
+        }
+        canvas.drawPath(tailPath, planePaint)
+        canvas.drawPath(tailPath, outlinePaint)
     }
-    canvas.drawPath(tailPath, planePaint)
-    canvas.drawPath(tailPath, outlinePaint)
 
     val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
     aircraftMarkerIconCache[key] = descriptor
@@ -7100,6 +7447,39 @@ private fun readAircraftHeadingDegrees(rawPayloadJson: String): Double? {
         ?: return null
     if (!rawHeading.isFinite()) return null
     return ((rawHeading % 360.0) + 360.0) % 360.0
+}
+
+private fun readAircraftIconType(rawPayloadJson: String): String {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return "plane"
+    val hint = payload.optString("aircraftTypeHint", "")
+        .ifBlank { payload.optString("aircraftType", "") }
+        .ifBlank { payload.optString("type", "") }
+        .ifBlank { payload.optString("category", "") }
+        .trim()
+        .lowercase(Locale.US)
+    return if (hint.contains("heli")) "helicopter" else "plane"
+}
+
+private data class AircraftVisualHints(
+    val iconType: String,
+    val headingDegrees: Double?
+)
+
+private fun readAircraftVisualHints(rawPayloadJson: String): AircraftVisualHints {
+    val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull()
+        ?: return AircraftVisualHints(iconType = "plane", headingDegrees = null)
+    val hint = payload.optString("aircraftTypeHint", "")
+        .ifBlank { payload.optString("aircraftType", "") }
+        .ifBlank { payload.optString("type", "") }
+        .ifBlank { payload.optString("category", "") }
+        .trim()
+        .lowercase(Locale.US)
+    val iconType = if (hint.contains("heli")) "helicopter" else "plane"
+    val rawHeading = payload.optDoubleOrNull("headingDegrees")
+        ?: payload.optDoubleOrNull("track")
+        ?: payload.optDoubleOrNull("trueTrack")
+    val heading = rawHeading?.takeIf { it.isFinite() }?.let { ((it % 360.0) + 360.0) % 360.0 }
+    return AircraftVisualHints(iconType = iconType, headingDegrees = heading)
 }
 
 private fun estimateHeadingFromEncounters(previous: Encounter?, latest: Encounter): Double? {

@@ -1,357 +1,157 @@
 # Argusdroid
 
-Argusdroid is an Android app for on-device radio encounter intelligence. It collects detections from supported phone radios, normalizes them into a shared encounter model, stores them locally, and surfaces trends through map and list workflows.
+Argusdroid is an Android app for local-first RF encounter intelligence. It collects detections from phone radios and optional ingest feeds, normalizes them into a shared encounter model, and surfaces activity through maps, logs, and device workflows.
 
-## Why this app exists
+## What it does
 
-- Turn raw RF-adjacent phone telemetry into usable operational context.
-- Keep the default pipeline local-first and device-resident.
-- Provide a foundation for future advanced ingest sources (OEM SDKs, SDR, external decoders).
+- Scans Wi-Fi, Wi-Fi Direct, Bluetooth LE, Bluetooth Classic, and Cellular.
+- Supports direct-channel acoustic and magnetometer sampling.
+- Supports ingest feeds for Remote ID, ADS-B aircraft, UWB, and SDR (JSONL-based).
+- Normalizes all detections into one encounter schema and stores history in Room.
+- Supports Chain Link mesh sync across LAN peers with authenticated exchange and provenance.
+- Includes local analytics for approach detection, tracker-risk scoring, and foreign-signal risk.
 
-## Current feature set
+## App navigation
 
-### Core collection and storage
+- Home
+- Detection
+- Logs
+- Settings
 
-- Multi-source sensing for Wi-Fi, Wi-Fi Direct peers, Bluetooth LE, Bluetooth Classic, and Cellular.
-- Direct-channel sensing for acoustic signatures (microphone) and magnetometer disturbance samples.
-- External-feed sensing hooks for UWB and SDR JSONL ingest streams.
-- Optional aviation tracking sources for ADS-B ingest and public internet radar feeds, normalized into AIRCRAFT encounters.
-- BLE heuristics now classify likely device classes (for example tracker-tag, wearable, audio, sensor) and can promote likely Remote ID BLE signatures.
-- Encounter normalization into a shared model with timestamp, IDs, signal metadata, optional location, and raw payload JSON.
-- Room-backed local persistence for historical analysis.
-- Configurable scan interval with WorkManager-based scheduling.
-- Optional Chain Linking across devices on the same LAN, including deduplicated peer synchronization.
-- Encounter provenance tracking for local vs chain-linked observations.
-- Secure chain-link authentication using a shared passphrase across participating devices.
-- Configurable chain auto-sync interval for periodic peer data pulls while chain linking is enabled.
-- Optional persistent channel heartbeat mode for near-live peer connectivity state when enabled on both devices.
+### Detection
 
-### Home and readiness
+- Status tab: readiness, source health, and quick operational state.
+- Devices tab: triage and filtering of recent/all observed devices.
+- Signal tab: channel-health and knowledge-gap diagnostics.
+- Map tab with two sub-tabs:
+	- Device Map: nearby inferred device locations, live/moving/snapshot filters.
+	- Flight Map: aircraft-focused map from ADS-B/public aviation feeds.
+- Mesh tab: peer state, link requests, sync controls, and wipe coordination.
 
-- Tracking controls: start, stop, refresh, and last scan visibility.
-- Tracking status now shows both last scan-cycle total duration and per-source last durations.
-- Home warning cards are freshness-aware and per-source (current overruns vs previous overruns).
-- Sensor-level gating (Wi-Fi, Bluetooth LE, Cellular, Remote ID, UWB, SDR, Direct Acoustic, Direct Magnetometer) persisted in app settings and enforced in scanners.
-- Readiness advisor with deep links to system settings for missing prerequisites.
-- Readiness advisor includes source and sensor checks for UWB availability, SDR feed presence, microphone permission, and magnetometer availability.
-- Clear encounters and clear devices actions for rapid reset.
-- Settings now include two explicit reset actions:
-	- Soft Reset: clears local encounters/devices and operational logs.
-	- Hard Reset: runs Soft Reset and also clears mesh network settings.
-- Settings page is organized into tabbed sections for:
-	- Appearance
-	- Scheduling
-	- Detection
-	- Notifications
-	- Data
-- Appearance settings include app theme mode selection:
-	- System
-	- Light
-	- Dark
-- Notifications settings include explicit per-type toggles for:
-	- Approach notifications
-	- Tracker suspicion alerts
-	- Foreign signal alerts
-	- Magnetic disturbance alerts
-	- Mesh peer connectivity alerts
-	- Mesh wipe lifecycle alerts
-- Settings includes app-wide backup/restore actions:
-	- Export Backup / Import Latest Backup for plain JSON snapshots.
-	- Export Encrypted Backup / Import Latest Encrypted for passphrase-protected snapshots.
+### Logs
 
-### Detection and mapping
+- Alerts tab
+- Errors tab (operational error stream)
+- Encounters tab
 
-- Detection tabs:
-	- Readiness
-	- Signal Intel
-	- Device Encounters Map
-	- Device Location Map
-	- Alert Logs
-	- Mesh Network
-- Signal Intel tab provides a focused channel-health view for UWB, GNSS inference, RF texture, direct acoustic, and direct magnetometer observations.
-- Signal Intel tab includes explicit knowledge-gap diagnostics when channel data is insufficient or missing.
-- Device Encounters Map shows direct encounter points.
-- Device Location Map shows best-effort approximate device locations:
-	- Cellular: tower lookup estimate with observed-location fallback.
-	- Wi-Fi and BLE: multi-observation range inference with observed-location fallback.
-	- Other sources: best observed encounter location.
-- Source-colored map pins and an in-app pin color legend.
-- Map controls:
-	- Live map updates are active on Device Location Map (default ON there)
-	- Live map update interval selection (1s through 1h)
-	- Pin limit selection (default 1000)
-	- Optional diagnostics panel (default OFF)
-	- Compact LIVE badge in header when live updates are enabled
-- Device Location Map supports a Moving Only filter toggle.
-- Device Location Map supports an optional Since Snapshot filter:
-	- Capture Snapshot sets a timestamp baseline.
-	- Since Snapshot shows only pins seen at or after that baseline.
-- Tapping a moving device pin opens a dedicated single-device map with that device's historical path.
-- Device-location pin info windows use compact single-line summaries to reduce clipping on smaller displays.
+## Maps and flight tracking
 
-### Mesh Network tab
+- Source-colored pins with legend filtering.
+- Live updates, pin limits, diagnostics panel, and compact control layout.
+- Device Map includes aircraft in a personal radius (25/50/75 mi selector).
+- Flight Map supports live-radius filtering up to 1000 mi.
+- Aircraft pins support heading rotation and helicopter/plane icon hints.
+- Moving-device path map is available from moving pins.
 
-- Chain linking controls were moved from Settings into Detection > Mesh Network.
-- Peer operations include refresh, manual link requests, sync now, and peer-state inspection.
-- Mesh visualizer now overlays on Google Maps and shows peer state with link lines.
-- Mesh Soft Reset (All Devices) clears encounters/devices/logs across discovered peers and is intended to keep two or more mesh devices better synchronized.
-- Mesh-wide reset uses authenticated coordination with wipe notices (including initiator identity) and a temporary scan gate until all targeted peers complete.
-- Mesh-wide soft reset now exports backup snapshots before wiping on orchestrator and peers.
-- Android system notifications are emitted for mesh wipe lifecycle events (initiated/received/completed/incomplete/released) when notifications are permitted.
-- Android system notifications are emitted for peer connectivity transitions (connected/disconnected) when notifications are permitted.
-- Mesh supports optional accurate location sharing between linked peers:
-	- New toggle: Share Precise Location
-	- Shared coordinates are included in peer hello/status payloads when enabled.
-	- Mesh map uses shared precise peer coordinates when available and relative placement fallback for peers that do not share location.
-- Foreground mesh service keeps persistent channel behavior active more reliably while backgrounded when chain linking and persistent channel are both enabled.
+## Mesh features
 
-### Additional source hooks
+- Authenticated Chain Link with shared passphrase.
+- Peer discovery and state tracking (including persistent channel mode).
+- Manual link request and sync-now actions.
+- Mesh-wide soft reset workflow with notices and temporary scan gate.
+- Optional precise location sharing between peers.
 
-- Remote ID ingest hook is active via JSONL feed file: app internal files path ingest/remote_id.jsonl.
-- Remote ID BLE decoding attempts are now performed from service/manufacturer data.
-- Remote ID companion ingest broadcast is available for external decoders (`dev.argus.tracker.action.INGEST_REMOTE_ID`).
-- Remote ID payloads are normalized to schema `argus.remote_id.v1` with decoded fields when available.
-- ADS-B ingest hook is active via JSONL feed file: app internal files path ingest/adsb.jsonl.
-- Public flight radar ingest can query OpenSky-compatible JSON over internet (bounded to local vicinity when location is available).
-- Aircraft payloads are normalized to schema `argus.aviation.v1` and include `deviceClassHint=aircraft` plus best-effort `aircraftTypeHint`.
-- UWB ingest hook is active via JSONL feed file: app internal files path ingest/uwb.jsonl.
-- SDR ingest hook is active via JSONL feed file: app internal files path ingest/sdr.jsonl.
-- UWB, SDR, ADS-B, and public flight-radar ingest collection are each gated by dedicated Home sensor toggles.
-- Each JSON line should be a single object containing at minimum an id (or primaryId) and optional fields such as timestampEpochMs, label, rssiDbm, frequencyMhz, lat, and lon.
-- Remote ID feed entries can also include semantic fields such as messageType, uasId, operatorId, droneLat, droneLon, altitudeMeters, speedMetersPerSecond, and headingDegrees.
-- Ingest files are expected to come from companion SDR tooling, external collectors, or test fixtures; app storage settings themselves do not create these files.
-- Full ingest contract and companion intent format: docs/remote-id-ingest.md.
+## Ingest sources
 
-### Devices and encounters workflows
+- Remote ID JSONL: app internal files path ingest/remote_id.jsonl
+- ADS-B JSONL: app internal files path ingest/adsb.jsonl
+- UWB JSONL: app internal files path ingest/uwb.jsonl
+- SDR JSONL: app internal files path ingest/sdr.jsonl
+- Public aviation feed: OpenSky-compatible JSON endpoint (location-bounded when available)
 
-- Unified Devices and Encounters page with tabs replaces separate top-level menu items.
-- Scope filters (Recent 100 or All).
-- Source and text filtering.
-- Optional secondary ID visibility.
-- Optional distance display.
-- Optional distance-based sorting.
-- Device list sorting by last seen or most seen.
-- Chain-linked detections are clearly marked in map pins, list cards, and detail pages with peer attribution.
-- Chain settings now support manual Sync Now and background auto-sync.
-- Chain settings include peer refresh, link requests, connected vs unconnected peer counts, and a mesh visualizer.
-- Chain peers can be assigned human-readable device names, propagated across the mesh.
-- Device Details and Encounter Details use a responsive split layout:
-	- Two-column layout on wider displays (for example foldables/tablets).
-	- Automatic single-column collapse on narrower screens.
-- Device Details includes an embedded Device Location Map card with a Real-time updates toggle:
-	- ON: map follows incoming device location updates while the details page is visible.
-	- OFF: map stays pinned to the last captured location.
-	- Updates naturally stop when leaving the details page.
-- Device Details and Encounter Details maps now support:
-	- Optional map controls (zoom controls, compass, map toolbar).
-	- Quick focus actions (device, local observer, both).
-	- Dual-pin rendering for local observer vs foreign device/encounter when both positions exist.
-	- Small automatic pin separation (about 2.5 ft) when positions overlap so both markers remain visible.
-
-### Wear OS companion
-
-- Dedicated Wear module (`wear/`) for direct watch deployment.
-- Watch status page receives mesh/alert/device map payloads from phone over Wear Data Layer.
-- Watch Device Map now uses native Google Maps markers (newest marker highlighted).
-- Watch map input points are generated from per-device resolved locations (including inferred Wi-Fi/BLE and Remote ID broadcast coordinates).
-
-### Evasion posture controls
-
-- Evasion tab provides posture profiles (Quiet, Balanced, Watch) that control in-app sensor gates and cadence behavior.
-- Current Posture includes explicit per-profile sensor/cadence details.
-- Current Posture now includes a compact Posture Readiness table:
-	- Shows required state vs current state for key permissions/settings relevant to the selected posture.
-	- Provides one-tap Open actions to jump into the matching Android settings pages.
-	- Includes quick Refresh to re-evaluate readiness after returning from settings.
-- Truth-in-advertising note is surfaced in UI: posture presets cannot directly revoke Android permissions or force global radio state outside app scope.
-
-### Scan interval tuning and telemetry
-
-- Global worker cadence supports fast options including 1s and 3s (default 15s).
-- Per-source scan intervals are configurable independently (Wi-Fi, Wi-Fi Direct, BLE, Bluetooth Classic, Cellular, Remote ID, Aircraft, UWB, SDR, Acoustic, Magnetometer).
-- Per-source intervals are minimum per-source spacing within scan batches; effective per-source cadence cannot exceed the global worker cadence.
-- Per-source timing telemetry tracks last, avg, p50, p95, and max durations.
-- Auto-adjust mode can increase/decrease source intervals based on overrun/stability behavior.
-- Settings include a recent auto-adjust/manual interval change activity log.
-
-### Cellular enrichment
-
-- Cellular entries labeled as tower context (for example CELL TOWER LTE/NR when available).
-- Parsed cellular detail fields in detail pages (radio type, operator, IDs, signal fields).
-- Optional tower geolocation lookup through Mozilla Location Service and range-from-device display.
-
-### Approach detection and alerts
-
-- Approach analytics estimate whether a device is moving closer using recent distance trend analysis.
-- Devices can be explicitly marked as owned ("My Device") in device details.
-- Co-movement analysis scores devices that repeatedly appear across distinct locations while you move.
-- Tracker risk levels (Low, Medium, High) are shown for non-owned devices based on spread, repeat presence, and time window.
-- Devices page supports ownership and tracker-risk filtering for rapid triage.
-- Settings controls:
-	- Enable approach detection
-	- Enable approach notifications
-	- Enable tracker suspicion alerts
-- Local notifications fire on transition into approaching state with per-device cooldown to reduce alert spam.
-- Local tracker notifications fire when an unknown device transitions into high tracker-risk state.
-- Local foreign-signal notifications fire when configured risk threshold levels are crossed (HIGH/CRITICAL) with cooldown controls.
-
-## Known limits and truth-in-advertising
-
-- Android does not expose universal arbitrary RF spectrum scanning APIs.
-- Remote ID decoding is best-effort and may be partial depending on device BLE stack visibility and payload format.
-- Cellular detail richness and update rate are device/OEM/version dependent.
-- Background behavior is constrained by power policy, Doze, and OEM optimizations.
-- Distance and approach estimates are best-effort due to RSSI variability and environment effects.
+See docs/remote-id-ingest.md for payload expectations and companion intent format.
 
 ## Quick start
 
 1. Install Android Studio (latest stable).
 2. Install Android SDK Platform 36.
-3. Open this repository.
-4. Let Gradle sync complete.
-5. Connect a physical Android device.
-6. Run the app module.
-7. Grant requested runtime permissions when prompted.
+3. Open this repository and allow Gradle sync.
+4. Connect a physical Android device and run the app module.
+5. Grant runtime permissions when prompted.
 
-## Android device setup
+## Maps API key setup
 
-1. Enable Developer options (tap Build number 7 times).
-2. Enable USB debugging.
-3. Connect phone by USB and accept RSA prompt.
-4. Select device in Android Studio and run.
+Google Maps SDK requires MAPS_API_KEY.
 
-## Maps API key setup (do not commit secrets)
+Option A (recommended): add this to local.properties
 
-Google Maps SDK requires a key.
+- MAPS_API_KEY=your_real_key
 
-Option A: set local property (recommended)
+Option B: set MAPS_API_KEY as an environment variable before launching Gradle/Android Studio.
 
-- Add to local.properties:
-	- MAPS_API_KEY=your_real_key
-
-Option B: environment variable
-
-- Set MAPS_API_KEY in your shell/session before launching Gradle/Android Studio.
-
-Both phone and wear manifests consume MAPS_API_KEY via Gradle manifest placeholders.
+Phone and wear manifests consume MAPS_API_KEY via Gradle manifest placeholders.
 
 ## Runtime permissions
-
-Current runtime asks include:
 
 - ACCESS_FINE_LOCATION
 - READ_PHONE_STATE
 - RECORD_AUDIO
 - BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-dependent)
 - NEARBY_WIFI_DEVICES (API-dependent)
-- POST_NOTIFICATIONS (Android 13+ for approach/status alerts)
+- POST_NOTIFICATIONS (Android 13+)
 
-Notification-driven features include approach/tracker alerts plus mesh wipe/peer-connectivity status notifications.
+If a source is disabled on Home, its scanner is skipped in scheduled and live collection.
 
-If a sensor is disabled from Home, that scanner is skipped in both scheduled and live collection.
+## Scheduling
 
-## Scheduling model
-
-- Under 15 minutes: chained one-time work requests.
+- Under 15 minutes: chained one-time WorkManager requests.
 - 15 minutes and above: periodic WorkManager requests.
 - Global worker cadence controls scan-batch wakeups.
-- Per-source intervals only gate individual sources within those batches.
-- The app does not force worker cadence changes just because a per-source interval is faster.
+- Per-source intervals gate individual sources inside those batches.
 
 ## Troubleshooting
 
 ### Map does not render
 
 - Confirm MAPS_API_KEY is present and not placeholder text.
-- Confirm Maps SDK + billing/API restrictions are correct in Google Cloud.
-- Confirm network connectivity and Play Services availability.
-- Turn on map diagnostics panel in Detection map controls.
+- Confirm Maps SDK, billing, and key restrictions are valid.
+- Confirm Play Services and network availability.
+- Enable the map diagnostics panel in Detection map controls.
 
-### Cellular detections are missing or sparse
+### No/limited cellular detections
 
-- Confirm READ_PHONE_STATE is granted.
+- Confirm READ_PHONE_STATE permission is granted.
 - Confirm Cellular sensor toggle is enabled on Home.
-- Check readiness items for missing prerequisites.
-- Note that some devices/carriers expose limited cell metadata.
+- Some OEM/carrier stacks expose limited cell metadata.
 
-### No approach notifications
+### Mesh peers not connecting
 
-- Confirm both settings are enabled:
-	- Approach detection
-	- Approach notifications
-- Confirm POST_NOTIFICATIONS permission is granted (Android 13+).
-- Confirm detections provide enough recent samples to classify an approach trend.
+- Confirm both devices are on the same LAN and not guest-isolated.
+- Confirm Chain Link is enabled on both devices.
+- Confirm shared passphrase is identical on all peers.
+- Use Mesh tab controls to refresh peers or send link requests.
 
-### Encrypted backup import/export issues
+## Web dashboard
 
-- Encrypted backup actions require a passphrase with at least 8 characters.
-- Import requires the exact passphrase used at export time.
-- Ensure at least one encrypted snapshot exists in app internal files under backups/.
-- If import fails, verify the selected/latest file is an encrypted snapshot and was not manually edited.
+- Path: dashboard/
+- Preferred launcher: ./scripts/run-dashboard-node.ps1
+- Optional port: ./scripts/run-dashboard-node.ps1 -Port 8090
+- Live mesh config: dashboard/config/mesh-config.json
 
-### Tracker suspicion alerts are not appearing
-
-- Confirm "Enable approach detection" is ON in Settings.
-- Confirm "Tracker suspicion alerts" is ON in Settings.
-- Confirm target device is not marked as owned in Device Details.
-- Confirm detections include diverse locations over time; static single-location data will not reach high tracker risk.
-
-### Chain peers remain 0/0
-
-- Confirm both devices are on the same Wi-Fi LAN/subnet and not on a guest-isolated network.
-- Confirm Chain Linking is enabled on both devices.
-- Confirm both devices use the exact same Chain Shared Passphrase.
-- Use Settings > Refresh Peers to force discovery.
-- If using persistent channel, enable it on both devices and verify heartbeat interval is set.
-- In Mesh Network, confirm the foreground mesh chip shows active when persistent channel is enabled.
-- Try sending a Link Request using peer host IP from one device to the other.
+See docs/web-dashboard.md for full setup and key behavior.
 
 ## Repository layout
 
 - app: Android application module
-- wear: Wear OS companion application module
-- dashboard: static view-only web dashboard (map + operational summaries)
-- docs/architecture.md: architecture and data flow
-- docs/capabilities-and-limits.md: practical platform constraints
-- src: reserved for shared or non-Android code
-- tests: repository-level test assets
-
-## View-only web dashboard
-
-- Dashboard path: `dashboard/`
-- Start server on LAN: `./scripts/run-dashboard-node.ps1`
-- Optional port: `./scripts/run-dashboard-node.ps1 -Port 8090`
-- Live mesh config: `dashboard/config/mesh-config.json`
-- First run installs Node dependencies under `dashboard-server/node_modules`.
-- Map tabs: Encounters Map, Regional Hotspots, Device Location Map.
-- Dashboard is live-feed only (no built-in sample geodata fallback); it surfaces loading/error states when live mesh data is unavailable.
-
-When started, the script prints both localhost and LAN URLs so any device on the same Wi-Fi network can open the dashboard.
-To pull real app/mesh data, enable and configure peer IPs and shared secret in `dashboard/config/mesh-config.json`.
+- wear: Wear OS companion module
+- dashboard: static web dashboard UI
+- dashboard-server: Node server for dashboard and live mesh bridge
+- docs: architecture and operational docs
 
 ## Tech stack
 
-- Kotlin 2.x
-- Android Gradle Plugin 8.x
-- Jetpack Compose
+- Kotlin + Jetpack Compose
 - Room
 - WorkManager
 - Coroutines
-
-## Security and privacy notes
-
-Before production deployment, implement:
-
-- Explicit user consent and policy disclosures.
-- Retention and deletion controls.
-- Encryption at rest for sensitive payloads.
-- Auditable telemetry handling.
+- Google Maps Compose
 
 ## Documentation
 
-- Architecture: docs/architecture.md
-- Capabilities and limits: docs/capabilities-and-limits.md
-- Web dashboard: docs/web-dashboard.md
+- docs/architecture.md
+- docs/capabilities-and-limits.md
+- docs/remote-id-ingest.md
+- docs/web-dashboard.md
 
 ## License
 

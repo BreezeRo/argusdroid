@@ -89,20 +89,28 @@ class AviationScanner(
         val file = context.filesDir.resolve("ingest").resolve("adsb.jsonl")
         if (!file.exists() || !file.isFile) return emptyList()
 
-        val lines = runCatching { file.readLines() }.getOrDefault(emptyList())
-        if (lines.isEmpty()) return emptyList()
-
-        return lines.mapNotNull { rawLine ->
-            val line = rawLine.trim()
-            if (line.isEmpty()) return@mapNotNull null
-            val payload = runCatching { JSONObject(line) }.getOrNull() ?: return@mapNotNull null
-            payloadToEncounter(
-                payload = payload,
-                provider = "ADSB_JSONL",
-                fallbackLocation = location,
-                fallbackNowEpochMs = fallbackNowEpochMs
-            )
+        val latestByPrimaryId = LinkedHashMap<String, Encounter>()
+        runCatching {
+            file.bufferedReader().useLines { lines ->
+                lines.forEach { rawLine ->
+                    val line = rawLine.trim()
+                    if (line.isEmpty()) return@forEach
+                    val payload = runCatching { JSONObject(line) }.getOrNull() ?: return@forEach
+                    val encounter = payloadToEncounter(
+                        payload = payload,
+                        provider = "ADSB_JSONL",
+                        fallbackLocation = location,
+                        fallbackNowEpochMs = fallbackNowEpochMs
+                    ) ?: return@forEach
+                    val previous = latestByPrimaryId[encounter.primaryId]
+                    if (previous == null || encounter.timestampEpochMs >= previous.timestampEpochMs) {
+                        latestByPrimaryId[encounter.primaryId] = encounter
+                    }
+                }
+            }
         }
+
+        return latestByPrimaryId.values.toList()
     }
 
     private fun fetchPublicAviationFeed(location: DetectionLocation?, fallbackNowEpochMs: Long): List<Encounter> {
