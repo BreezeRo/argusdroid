@@ -235,8 +235,8 @@ private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
 private const val MAP_RENDER_PIN_LIMIT_FAR = 260
 private const val MAP_RENDER_PIN_LIMIT_MID = 420
 private const val MAP_SWEEP_ANIMATION_STEP_DEGREES = 8f
-private const val MAP_SWEEP_ANIMATION_FRAME_MS = 90L
-private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 650
+private const val MAP_SWEEP_ANIMATION_FRAME_MS = 140L
+private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 280
 private const val INCIDENT_NO_FLY_BOUNDARY_POINT_LIMIT = 120
 private const val NO_FLY_ZONE_RENDER_COUNT_LOW = 60
 private const val NO_FLY_ZONE_RENDER_COUNT_BALANCED = 120
@@ -7204,7 +7204,14 @@ private fun DetectionMapPage(
             selectVisiblePinsWithSourceCoverage(pins, pinLimit)
         }
     }
-    val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
+    val legendItems by produceState(
+        initialValue = emptyList<PinLegendItem>(),
+        key1 = visiblePins
+    ) {
+        value = withContext(Dispatchers.Default) {
+            legendItemsForPins(visiblePins)
+        }
+    }
     val legendSources = remember(legendItems) { legendItems.map { it.source }.toSet() }
     var filteredVisiblePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     LaunchedEffect(visiblePins, hiddenLegendSources, metadataFilterQuery) {
@@ -7216,26 +7223,29 @@ private fun DetectionMapPage(
             }
         }
     }
-    val displayFilteredPins = remember(filteredVisiblePins, identityModeEnabled) {
-        if (!identityModeEnabled) {
-            filteredVisiblePins
-        } else {
-            filteredVisiblePins.map { pin ->
-                val identityName = pin.secondaryId
-                    ?.trim()
-                    ?.takeIf { value -> value.isNotBlank() }
-                if (identityName == null) {
-                    pin
-                } else {
-                    pin.copy(
-                        markerGlyphOverride = identityName,
-                        title = buildPinTitle(
-                            sourceLabel = identityName,
-                            primaryId = pin.primaryId,
-                            secondaryId = null,
-                            motionBadge = pin.motionBadge
+    var displayFilteredPins by remember { mutableStateOf<List<MapPin>>(filteredVisiblePins) }
+    LaunchedEffect(filteredVisiblePins, identityModeEnabled) {
+        displayFilteredPins = withContext(Dispatchers.Default) {
+            if (!identityModeEnabled) {
+                filteredVisiblePins
+            } else {
+                filteredVisiblePins.map { pin ->
+                    val identityName = pin.secondaryId
+                        ?.trim()
+                        ?.takeIf { value -> value.isNotBlank() }
+                    if (identityName == null) {
+                        pin
+                    } else {
+                        pin.copy(
+                            markerGlyphOverride = identityName,
+                            title = buildPinTitle(
+                                sourceLabel = identityName,
+                                primaryId = pin.primaryId,
+                                secondaryId = null,
+                                motionBadge = pin.motionBadge
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
@@ -7285,16 +7295,22 @@ private fun DetectionMapPage(
             coverageAnchorUpdatedEpochMs = now
         }
     }
-    val nonAircraftCoveragePins = remember(displayFilteredPins) {
-        displayFilteredPins.filter { pin ->
-            pin.source != SourceCatalog.SOURCE_AIRCRAFT &&
-                pin.source != SourceCatalog.SOURCE_REMOTE_ID &&
-                pin.source != SourceCatalog.SOURCE_CAMERA
+    val coveragePinBuckets by produceState(
+        initialValue = Pair(emptyList<MapPin>(), emptyList<MapPin>()),
+        key1 = displayFilteredPins
+    ) {
+        value = withContext(Dispatchers.Default) {
+            val nonAircraft = displayFilteredPins.filter { pin ->
+                pin.source != SourceCatalog.SOURCE_AIRCRAFT &&
+                    pin.source != SourceCatalog.SOURCE_REMOTE_ID &&
+                    pin.source != SourceCatalog.SOURCE_CAMERA
+            }
+            val aircraft = displayFilteredPins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
+            nonAircraft to aircraft
         }
     }
-    val aircraftCoveragePins = remember(displayFilteredPins) {
-        displayFilteredPins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
-    }
+    val nonAircraftCoveragePins = coveragePinBuckets.first
+    val aircraftCoveragePins = coveragePinBuckets.second
     val nearbyVisiblePins by produceState(
         initialValue = displayFilteredPins,
         key1 = displayFilteredPins,
@@ -7775,14 +7791,16 @@ private fun DetectionMapPage(
         mapTouchInProgress = false
     }
 
+    val contentModifier = if (useScrollableLayout && scrollState != null) {
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState, enabled = !mapTouchInProgress)
+    } else {
+        Modifier.fillMaxSize()
+    }
+
     Column(
-        modifier = if (useScrollableLayout) {
-            Modifier
-                .fillMaxSize()
-                .verticalScroll(scrollState!!, enabled = !mapTouchInProgress)
-        } else {
-            Modifier.fillMaxSize()
-        },
+        modifier = contentModifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
@@ -8531,8 +8549,9 @@ private fun DetectionMapPage(
                             )
                         }
                     }
-                    if (showCoverageRadiusCircle && proximityRenderCenter != null && stableCoverageRadiusMeters > 10.0) {
-                        val center = proximityRenderCenter!!
+                    if (showCoverageRadiusCircle && stableCoverageRadiusMeters > 10.0) {
+                        val center = proximityRenderCenter
+                        if (center != null) {
                         val coverageCenter = LatLng(center.lat, center.lon)
                         Circle(
                             center = coverageCenter,
@@ -8556,9 +8575,11 @@ private fun DetectionMapPage(
                                 strokeWidth = 0f
                             )
                         }
+                        }
                     }
-                    if (showCoverageRadiusCircle && aircraftRenderCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
-                        val center = aircraftRenderCenter!!
+                    if (showCoverageRadiusCircle && stableAircraftCoverageRadiusMeters > 10.0) {
+                        val center = aircraftRenderCenter
+                        if (center != null) {
                         val coverageCenter = LatLng(center.lat, center.lon)
                         Circle(
                             center = coverageCenter,
@@ -8581,6 +8602,7 @@ private fun DetectionMapPage(
                                 strokeColor = Color.Transparent,
                                 strokeWidth = 0f
                             )
+                        }
                         }
                     }
                     mapRenderItems.forEach { item ->
@@ -8681,8 +8703,7 @@ private fun DetectionMapPage(
                     }
                 }
 
-                if (selectedMapPin != null) {
-                    val pin = selectedMapPin!!
+                selectedMapPin?.let { pin ->
                     Card(
                         modifier = Modifier
                             .align(androidx.compose.ui.Alignment.BottomCenter)
