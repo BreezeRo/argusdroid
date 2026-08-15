@@ -799,6 +799,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         )
     }
 
+    LaunchedEffect(lastScanEpochMs) {
+        if (lastScanEpochMs == null) return@LaunchedEffect
+        delay(200L)
+        viewModel.refreshSummary()
+    }
+
     val nowTickerEnabled = remember(currentRoute) { routeNeedsNowTicker(currentRoute) }
     LaunchedEffect(nowTickerEnabled) {
         if (!nowTickerEnabled) return@LaunchedEffect
@@ -3251,7 +3257,8 @@ private fun AppSettingsPage(
         it == SourceCatalog.KEY_REMOTE_ID ||
         it == SourceCatalog.KEY_NFC
     }
-    val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
+    val workerCadenceMs = scanIntervalSeconds * 1000L
+    val workerCadenceOverrun = (lastScanDurationMs ?: 0L) > workerCadenceMs
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -3486,15 +3493,27 @@ private fun AppSettingsPage(
                     fontWeight = FontWeight.Medium
                 )
             }
-            if (intervalOverrun) {
+            if (workerCadenceOverrun) {
                 item {
                     Card(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Warning: scan duration exceeded interval. Consider raising scan interval.",
-                            color = Color(0xFFB3261E),
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Warning: last full worker cycle exceeded worker cadence.",
+                                color = Color(0xFFB3261E),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Cycle ${formatScanDuration(lastScanDurationMs ?: 0L)} > Cadence ${ScanSettings.formatInterval(scanIntervalSeconds)}",
+                                color = Color(0xFFB3261E)
+                            )
+                            Text(
+                                text = "Per-source overruns are listed below in Per-Source Scan Timing.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -3505,7 +3524,16 @@ private fun AppSettingsPage(
             items(ScanSettings.SOURCE_TYPES) { sourceType ->
                 val timing = timingBySource[sourceType]
                 val lastScanEpochMs = sourceLastScanEpochs[sourceType] ?: 0L
-                val lastRawObservationEpochMs = sourceLastRawObservationEpochs[sourceType] ?: 0L
+                val directRawObservationEpochMs = sourceLastRawObservationEpochs[sourceType] ?: 0L
+                val lastRawObservationEpochMs = effectiveRawObservationEpochMsForSource(
+                    sourceType = sourceType,
+                    sourceLastRawObservationEpochs = sourceLastRawObservationEpochs
+                )
+                val canonicalSourceType = canonicalScanSourceType(sourceType)
+                val usesCanonicalRawObservation =
+                    canonicalSourceType != sourceType &&
+                        directRawObservationEpochMs <= 0L &&
+                        lastRawObservationEpochMs > 0L
                 val sourceLabel = formatSourceTypeLabel(sourceType)
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -3529,7 +3557,12 @@ private fun AppSettingsPage(
                             "Never"
                         }
                         val rawSightingLabel = if (lastRawObservationEpochMs > 0L) {
-                            "${formatEpoch(lastRawObservationEpochMs)} (${formatMapPinAge(lastRawObservationEpochMs)} ago)"
+                            val suffix = if (usesCanonicalRawObservation) {
+                                " (shared via ${formatSourceTypeLabel(canonicalSourceType)} loop)"
+                            } else {
+                                ""
+                            }
+                            "${formatEpoch(lastRawObservationEpochMs)} (${formatMapPinAge(lastRawObservationEpochMs)} ago)$suffix"
                         } else {
                             "Never"
                         }
@@ -6734,7 +6767,8 @@ private fun DetectionMapPage(
     }
     val proximityRenderCenter = coverageAnchorLocation ?: currentLocation ?: stableCoverageCenter
     val aircraftRenderCenter = coverageAnchorLocation ?: currentLocation ?: stableAircraftCoverageCenter
-    var autoPositioned by rememberSaveable { mutableStateOf(false) }
+    var initialFallbackPositioned by rememberSaveable { mutableStateOf(false) }
+    var initialMyLocationPositioned by rememberSaveable { mutableStateOf(false) }
 
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 2f)
@@ -6842,11 +6876,31 @@ private fun DetectionMapPage(
         }
     }
 
-    LaunchedEffect(currentLocation, cameraFocusPins, hasMapsApiKey, autoPositioned, mapLoaded) {
-        if (!hasMapsApiKey || autoPositioned || !mapLoaded) return@LaunchedEffect
+    LaunchedEffect(currentLocation, hasMapsApiKey, mapLoaded, initialMyLocationPositioned) {
+        if (!hasMapsApiKey || !mapLoaded || initialMyLocationPositioned) return@LaunchedEffect
+        val location = currentLocation ?: return@LaunchedEffect
+
+        mapError = null
+        runCatching {
+            cameraPositionState.move(
+                CameraUpdateFactory.newLatLngZoom(
+                    LatLng(location.lat, location.lon),
+                    17f
+                )
+            )
+        }.onFailure {
+            mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+        }.onSuccess {
+            initialMyLocationPositioned = true
+        }
+    }
+
+    LaunchedEffect(cameraFocusPins, hasMapsApiKey, initialFallbackPositioned, mapLoaded, initialMyLocationPositioned) {
+        if (!hasMapsApiKey || initialFallbackPositioned || !mapLoaded || initialMyLocationPositioned) {
+            return@LaunchedEffect
+        }
 
         val focusPins = cameraFocusPins
-        val currentLocationSnapshot = currentLocation
 
         when {
             focusPins.size > 1 -> {
@@ -6870,19 +6924,6 @@ private fun DetectionMapPage(
                 }
             }
 
-            currentLocationSnapshot != null -> {
-                runCatching {
-                    cameraPositionState.move(
-                        CameraUpdateFactory.newLatLngZoom(
-                            LatLng(currentLocationSnapshot.lat, currentLocationSnapshot.lon),
-                            13f
-                        )
-                    )
-                }.onFailure {
-                    mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
-                }
-            }
-
             else -> {
                 runCatching {
                     cameraPositionState.move(
@@ -6894,7 +6935,7 @@ private fun DetectionMapPage(
             }
         }
 
-        autoPositioned = true
+        initialFallbackPositioned = true
     }
 
     LaunchedEffect(hasMapsApiKey, mapLoaded, hasNetwork, playServicesDiagnostic) {
@@ -7646,7 +7687,8 @@ private fun DetectionMapPage(
                     },
                     onMapLoaded = {
                         mapLoaded = true
-                        autoPositioned = false
+                        initialFallbackPositioned = false
+                        initialMyLocationPositioned = false
                     },
                     uiSettings = MapUiSettings(
                         zoomControlsEnabled = true,
@@ -9474,12 +9516,7 @@ private fun mapSourceIntervalSeconds(
     sourceType: String,
     sourceScanIntervals: Map<String, Long>
 ): Long {
-    val canonicalType = when (sourceType) {
-        SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
-        SourceCatalog.KEY_BT_CLASSIC,
-        SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
-        else -> sourceType
-    }
+    val canonicalType = canonicalScanSourceType(sourceType)
     return sourceScanIntervals[canonicalType]
         ?: sourceScanIntervals[sourceType]
         ?: when (canonicalType) {
@@ -9487,6 +9524,27 @@ private fun mapSourceIntervalSeconds(
             SourceCatalog.KEY_CAMERA -> ScanSettings.DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
             else -> ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
         }
+}
+
+private fun canonicalScanSourceType(sourceType: String): String = when (sourceType) {
+    SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
+    SourceCatalog.KEY_BT_CLASSIC,
+    SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
+    else -> sourceType
+}
+
+private fun effectiveRawObservationEpochMsForSource(
+    sourceType: String,
+    sourceLastRawObservationEpochs: Map<String, Long>
+): Long {
+    val directEpoch = sourceLastRawObservationEpochs[sourceType] ?: 0L
+    val canonicalType = canonicalScanSourceType(sourceType)
+    val canonicalEpoch = if (canonicalType != sourceType) {
+        sourceLastRawObservationEpochs[canonicalType] ?: 0L
+    } else {
+        0L
+    }
+    return maxOf(directEpoch, canonicalEpoch)
 }
 
 private fun mapLiveWindowMsForSource(
@@ -12666,6 +12724,28 @@ private fun DeviceDetailPage(
             Text("Device not found in current encounter window.")
             return
         }
+        DeviceDetailMapSection(
+            source = item.source,
+            primaryId = item.primaryId,
+            lat = pinnedMapLat,
+            lon = pinnedMapLon,
+            currentLocation = currentLocation,
+            lastSeenEpochMs = pinnedMapTimestampEpochMs ?: item.lastSeenEpochMs,
+            realtimeEnabled = realtimeMapEnabled,
+            onRealtimeEnabledChanged = { enabled ->
+                realtimeMapEnabled = enabled
+                if (enabled) {
+                    pinnedMapLat = item.lastLat
+                    pinnedMapLon = item.lastLon
+                    pinnedMapTimestampEpochMs = item.lastSeenEpochMs
+                }
+            }
+        )
+
+        if (!item.lastRawPayloadJson.isNullOrBlank() && deviceEncounter != null) {
+            SourceSpecificDetailsSection(encounter = deviceEncounter, currentLocation = currentLocation)
+        }
+
         if (item.gpsSpoofSuspected) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
@@ -12783,27 +12863,6 @@ private fun DeviceDetailPage(
                 }
                 if (mapApproximateRangeMeters != null) {
                     DetailRow("Map Approx Range", formatDistanceFeetMiles(mapApproximateRangeMeters!!))
-                }
-                DeviceDetailMapSection(
-                    source = item.source,
-                    primaryId = item.primaryId,
-                    lat = pinnedMapLat,
-                    lon = pinnedMapLon,
-                    currentLocation = currentLocation,
-                    lastSeenEpochMs = pinnedMapTimestampEpochMs ?: item.lastSeenEpochMs,
-                    realtimeEnabled = realtimeMapEnabled,
-                    onRealtimeEnabledChanged = { enabled ->
-                        realtimeMapEnabled = enabled
-                        if (enabled) {
-                            pinnedMapLat = item.lastLat
-                            pinnedMapLon = item.lastLon
-                            pinnedMapTimestampEpochMs = item.lastSeenEpochMs
-                        }
-                    }
-                )
-
-                if (!item.lastRawPayloadJson.isNullOrBlank() && deviceEncounter != null) {
-                    SourceSpecificDetailsSection(encounter = deviceEncounter, currentLocation = currentLocation)
                 }
             }
         )
