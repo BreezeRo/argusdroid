@@ -53,6 +53,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -347,7 +348,9 @@ private data class TrackerRiskSignal(
     val uniqueLocationCells: Int,
     val spreadMeters: Double,
     val activeWindowMinutes: Double,
-    val summary: String
+    val summary: String,
+    val seenAtHome: Boolean,
+    val seenAwayFromHome: Boolean
 )
 
 private enum class ForeignSignalRiskLevel {
@@ -727,6 +730,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
     var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
     var foreignDirectMagneticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectMagneticEnabled(context)) }
+    var homePoint by remember { mutableStateOf(ScanSettings.getHomePoint(context)) }
     var chainLinkEnabled by remember { mutableStateOf(ScanSettings.isChainLinkEnabled(context)) }
     var chainNodeId by remember { mutableStateOf(ScanSettings.getChainNodeId(context)) }
     var chainDeviceName by remember { mutableStateOf(ScanSettings.getChainDeviceName(context)) }
@@ -772,6 +776,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var operationalObserverInitialized by remember { mutableStateOf(false) }
     var mapDataPrewarmReady by remember { mutableStateOf(false) }
     var startupBootstrapScanCompleted by remember { mutableStateOf(false) }
+    var startupBootstrapWaitRequired by remember { mutableStateOf(true) }
     var startupRuntimeGateReleased by remember { mutableStateOf(false) }
     var startupPrewarmedDevicePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     var startupPrewarmedNoFlyZones by remember { mutableStateOf<List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>(emptyList()) }
@@ -830,6 +835,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var mapPrewarmReady by remember { mutableStateOf(!hasMapsApiKey) }
     val appStartupReady = startupConfigLoaded && trackingObserverInitialized && operationalObserverInitialized
     val appRuntimeReady = appStartupReady && mapPrewarmReady && mapDataPrewarmReady
+    val startupBootstrapGateSatisfied = !startupBootstrapWaitRequired || startupBootstrapScanCompleted
     val lastScanEpochMs = remember(recent) { recent.maxOfOrNull { it.timestampEpochMs } }
     val operationalAnalysisWindow = remember(recent) {
         selectRecentEncounterWindow(
@@ -931,6 +937,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         operationalAnalysisWindow,
         ownedDeviceKeys,
         approachDetectionEnabled,
+        homePoint,
         wifiRandomizedOneOffSuppressionEnabled,
         bleRandomizedOneOffSuppressionEnabled
     ) {
@@ -943,6 +950,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 encounters = operationalAnalysisWindow,
                 approachDetectionEnabled = true,
                 ownedDeviceKeys = ownedDeviceKeys,
+                homePoint = homePoint,
                 suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
                 suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
             )
@@ -1060,6 +1068,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
 
     LaunchedEffect(Unit) {
+        startupBootstrapWaitRequired = ScanSettings.isStartupBootstrapWaitRequired(context)
+
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
         sensorGateSettings = readSensorGateSettings(context)
@@ -1090,6 +1100,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
+        homePoint = ScanSettings.getHomePoint(context)
         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
@@ -1104,8 +1115,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         startupConfigLoaded = true
     }
 
-    LaunchedEffect(appRuntimeReady, startupBootstrapScanCompleted, startupRuntimeGateReleased) {
-        if (startupRuntimeGateReleased || !appRuntimeReady || !startupBootstrapScanCompleted) return@LaunchedEffect
+    LaunchedEffect(appRuntimeReady, startupBootstrapGateSatisfied, startupRuntimeGateReleased) {
+        if (startupRuntimeGateReleased || !appRuntimeReady || !startupBootstrapGateSatisfied) return@LaunchedEffect
         startupRuntimeGateReleased = true
     }
 
@@ -1625,6 +1636,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     LaunchedEffect(
         operationalAnalysisWindow,
         ownedDeviceKeys,
+        homePoint,
         wifiRandomizedOneOffSuppressionEnabled,
         bleRandomizedOneOffSuppressionEnabled
     ) {
@@ -1633,6 +1645,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 encounters = operationalAnalysisWindow,
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
+                homePoint = homePoint,
                 suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
                 suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
             )
@@ -1838,6 +1851,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     foreignSignalAlertThreshold = foreignSignalAlertThreshold,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
                     foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
+                    homePoint = homePoint,
                     onSourceScanIntervalSelected = { sourceType, seconds ->
                         val previous = sourceScanIntervals[sourceType]
                             ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
@@ -1950,6 +1964,42 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-magnetic")
                         }
                     },
+                    onSetHomePointFromCurrentLocation = {
+                        val currentLocation = LocationSnapshotProvider.read(context)
+                        if (currentLocation == null || !isValidLatLon(currentLocation.lat, currentLocation.lon)) {
+                            "Current location unavailable. Wait for a GNSS fix and try again."
+                        } else {
+                            val existingRadiusMeters = homePoint?.radiusMeters
+                                ?: ScanSettings.DEFAULT_HOME_POINT_RADIUS_METERS
+                            ScanSettings.setHomePoint(
+                                context = context,
+                                lat = currentLocation.lat,
+                                lon = currentLocation.lon,
+                                radiusMeters = existingRadiusMeters
+                            )
+                            homePoint = ScanSettings.getHomePoint(context)
+                            val safeHomePoint = homePoint
+                            if (safeHomePoint == null) {
+                                "Home point could not be saved."
+                            } else {
+                                "Home point set to ${String.format(Locale.US, "%.5f", safeHomePoint.lat)}, ${String.format(Locale.US, "%.5f", safeHomePoint.lon)}"
+                            }
+                        }
+                    },
+                    onSetHomePointRadiusMeters = { radiusMeters ->
+                        val updated = ScanSettings.setHomePointRadiusMeters(context, radiusMeters)
+                        homePoint = ScanSettings.getHomePoint(context)
+                        if (!updated || homePoint == null) {
+                            "Home point is not set. Set a Home Point first."
+                        } else {
+                            "Home radius set to ${String.format(Locale.US, "%.0f", homePoint!!.radiusMeters)} m"
+                        }
+                    },
+                    onClearHomePoint = {
+                        ScanSettings.clearHomePoint(context)
+                        homePoint = null
+                        "Home point cleared."
+                    },
                     onLiveMapUpdateIntervalSelected = { seconds ->
                         liveMapUpdateIntervalSeconds = seconds
                         ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
@@ -2049,6 +2099,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
+                        homePoint = ScanSettings.getHomePoint(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
@@ -2101,6 +2152,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
+                        homePoint = ScanSettings.getHomePoint(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
                         scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
@@ -2158,6 +2210,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         )
                         ScanSettings.setForeignDirectAcousticEnabled(context, false)
                         ScanSettings.setForeignDirectMagneticEnabled(context, false)
+                        ScanSettings.clearHomePoint(context)
 
                         intervalManagedSourceTypes.forEach { sourceType ->
                             val defaultSeconds = when (sourceType) {
@@ -2194,6 +2247,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertThreshold = ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         foreignDirectAcousticEnabled = false
                         foreignDirectMagneticEnabled = false
+                        homePoint = null
                         sensorGateSettings = readSensorGateSettings(context)
                         sensorStatuses = SensorStatusProvider.read(context)
 
@@ -2252,6 +2306,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
+                        homePoint = ScanSettings.getHomePoint(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
@@ -2799,7 +2854,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             operationalObserverInitialized,
                             mapPrewarmReady,
                             mapDataPrewarmReady,
-                            startupBootstrapScanCompleted
+                            startupBootstrapGateSatisfied
                         )
                         val startupProgress = startupChecks.count { it }.toFloat() / startupChecks.size.toFloat()
                         val startupProgressPercent = (startupProgress * 100f).toInt().coerceIn(0, 100)
@@ -2818,7 +2873,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         )
                         Text(
                             if (appRuntimeReady && !startupRuntimeGateReleased) {
-                                "Waiting for first startup scan to complete..."
+                                if (startupBootstrapWaitRequired) {
+                                    "Waiting for startup scan to complete..."
+                                } else {
+                                    "Preparing Argus runtime..."
+                                }
                             } else {
                                 "Preparing Argus runtime..."
                             }
@@ -2836,7 +2895,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 append(" • Map data prewarm: ")
                                 append(if (mapDataPrewarmReady) "ok" else "warming")
                                 append(" • Startup scan: ")
-                                append(if (startupBootstrapScanCompleted) "complete" else "running")
+                                append(
+                                    if (!startupBootstrapWaitRequired) {
+                                        "skipped (<1h since last start)"
+                                    } else if (startupBootstrapScanCompleted) {
+                                        "complete"
+                                    } else {
+                                        "running"
+                                    }
+                                )
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -3600,6 +3667,7 @@ private fun AppSettingsPage(
     foreignSignalAlertThreshold: String,
     foreignDirectAcousticEnabled: Boolean,
     foreignDirectMagneticEnabled: Boolean,
+    homePoint: ScanSettings.HomePoint?,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
     onAllSourceScanIntervalsSelected: (Long) -> Unit,
     onThemeModeSelected: (AppThemeMode) -> Unit,
@@ -3616,6 +3684,9 @@ private fun AppSettingsPage(
     onForeignSignalAlertThresholdChanged: (String) -> Unit,
     onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
     onForeignDirectMagneticEnabledChanged: (Boolean) -> Unit,
+    onSetHomePointFromCurrentLocation: () -> String,
+    onSetHomePointRadiusMeters: (Double) -> String,
+    onClearHomePoint: () -> String,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     onMapClusterRangeLevelSelected: (Int) -> Unit,
@@ -3639,6 +3710,7 @@ private fun AppSettingsPage(
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
     var allSourceIntervalsExpanded by remember { mutableStateOf(false) }
     var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
+    var homePointRadiusExpanded by remember { mutableStateOf(false) }
     var themeModeExpanded by remember { mutableStateOf(false) }
     var mapClusterRangeExpanded by remember { mutableStateOf(false) }
     var noFlyRenderQualityExpanded by remember { mutableStateOf(false) }
@@ -3650,6 +3722,7 @@ private fun AppSettingsPage(
     var resetActionInProgress by remember { mutableStateOf(false) }
     var resetStatusMessage by remember { mutableStateOf<String?>(null) }
     var resetStatusIsError by remember { mutableStateOf(false) }
+    var homePointStatusMessage by remember { mutableStateOf<String?>(null) }
     var defaultsResetInProgress by remember { mutableStateOf(false) }
     var selectedSettingsTab by rememberSaveable { mutableStateOf(0) }
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
@@ -4198,6 +4271,81 @@ private fun AppSettingsPage(
                             )
                         }
                         Text("Approach detection drives approaching-state analysis and tracker-risk modeling.")
+                    }
+                }
+            }
+            item {
+                Text("Home Point", fontWeight = FontWeight.Bold)
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val homePointSummary = homePoint?.let {
+                            "${String.format(Locale.US, "%.5f", it.lat)}, ${String.format(Locale.US, "%.5f", it.lon)} • ${String.format(Locale.US, "%.0f m", it.radiusMeters)}"
+                        } ?: "Not set"
+                        Text("Saved point: $homePointSummary")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    homePointStatusMessage = onSetHomePointFromCurrentLocation()
+                                }
+                            ) {
+                                Text("Set From Current Location")
+                            }
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    homePointStatusMessage = onClearHomePoint()
+                                },
+                                enabled = homePoint != null
+                            ) {
+                                Text("Clear")
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Radius")
+                            Button(
+                                enabled = homePoint != null,
+                                onClick = { homePointRadiusExpanded = true }
+                            ) {
+                                Text(
+                                    homePoint?.let { String.format(Locale.US, "%.0f m", it.radiusMeters) }
+                                        ?: "Set Home First"
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = homePointRadiusExpanded,
+                                onDismissRequest = { homePointRadiusExpanded = false }
+                            ) {
+                                ScanSettings.ALLOWED_HOME_POINT_RADIUS_METERS.forEach { radiusMeters ->
+                                    DropdownMenuItem(
+                                        text = { Text(String.format(Locale.US, "%.0f m", radiusMeters)) },
+                                        onClick = {
+                                            homePointStatusMessage = onSetHomePointRadiusMeters(radiusMeters)
+                                            homePointRadiusExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            "Tracker scoring gives extra weight when non-owned devices appear both near Home Point and away from it.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (!homePointStatusMessage.isNullOrBlank()) {
+                            Text(homePointStatusMessage!!)
+                        }
                     }
                 }
             }
@@ -4910,6 +5058,7 @@ private fun DetectionPage(
         }
 
         deviceCandidatesPrepared = false
+        val trackerHomePoint = ScanSettings.getHomePoint(context)
 
         allDeviceCandidates = withContext(Dispatchers.Default) {
             val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { encounter ->
@@ -4985,7 +5134,8 @@ private fun DetectionPage(
                             analyzeTrackerRisk(
                                 encounters = deviceEncounters,
                                 isOwned = owned,
-                                approachSignal = approachSignal
+                                approachSignal = approachSignal,
+                                homePoint = trackerHomePoint
                             )
                         }
                     )
@@ -11772,7 +11922,8 @@ private fun locationCellKey(lat: Double, lon: Double, cellDegrees: Double = 0.00
 private fun analyzeTrackerRisk(
     encounters: List<Encounter>,
     isOwned: Boolean,
-    approachSignal: ApproachSignal?
+    approachSignal: ApproachSignal?,
+    homePoint: ScanSettings.HomePoint? = null
 ): TrackerRiskSignal? {
     if (isOwned) {
         return TrackerRiskSignal(
@@ -11781,7 +11932,9 @@ private fun analyzeTrackerRisk(
             uniqueLocationCells = 0,
             spreadMeters = 0.0,
             activeWindowMinutes = 0.0,
-            summary = "Marked as owned by user"
+            summary = "Marked as owned by user",
+            seenAtHome = false,
+            seenAwayFromHome = false
         )
     }
 
@@ -11814,6 +11967,21 @@ private fun analyzeTrackerRisk(
     val activeWindowMinutes = ((ordered.last().timestampEpochMs - ordered.first().timestampEpochMs)
         .coerceAtLeast(0L) / 60_000.0)
 
+    var seenAtHome = false
+    var seenAwayFromHome = false
+    if (homePoint != null) {
+        val awayThresholdMeters = homePoint.radiusMeters + 120.0
+        validLocations.forEach { (lat, lon) ->
+            val metersFromHome = distanceFromLocationMeters(homePoint.lat, homePoint.lon, lat, lon) ?: return@forEach
+            if (metersFromHome <= homePoint.radiusMeters) {
+                seenAtHome = true
+            }
+            if (metersFromHome >= awayThresholdMeters) {
+                seenAwayFromHome = true
+            }
+        }
+    }
+
     val locationScore = ((uniqueCells - 1).toDouble() / 5.0).coerceIn(0.0, 1.0)
     val spreadScore = (maxSpreadMeters / 1500.0).coerceIn(0.0, 1.0)
     val durationScore = (activeWindowMinutes / 90.0).coerceIn(0.0, 1.0)
@@ -11821,19 +11989,23 @@ private fun analyzeTrackerRisk(
         approachSignal?.isApproaching == true -> approachSignal.confidence.coerceIn(0.0, 1.0)
         else -> 0.0
     }
+    val homeTransitionBoost = if (seenAtHome && seenAwayFromHome) 0.12 else 0.0
     val confidence = (
         0.35 * locationScore +
             0.30 * spreadScore +
             0.20 * durationScore +
-            0.15 * approachScore
+            0.15 * approachScore +
+            homeTransitionBoost
         ).coerceIn(0.0, 1.0)
 
     val level = when {
-        uniqueCells >= 5 && maxSpreadMeters >= 1200.0 && activeWindowMinutes >= 40.0 && confidence >= 0.75 -> {
+        uniqueCells >= 5 && maxSpreadMeters >= 1200.0 && activeWindowMinutes >= 40.0 &&
+            confidence >= if (seenAtHome && seenAwayFromHome) 0.68 else 0.75 -> {
             TrackerRiskLevel.HIGH
         }
 
-        uniqueCells >= 3 && maxSpreadMeters >= 450.0 && activeWindowMinutes >= 20.0 && confidence >= 0.55 -> {
+        uniqueCells >= 3 && maxSpreadMeters >= 450.0 && activeWindowMinutes >= 20.0 &&
+            confidence >= if (seenAtHome && seenAwayFromHome) 0.48 else 0.55 -> {
             TrackerRiskLevel.MEDIUM
         }
 
@@ -11849,6 +12021,10 @@ private fun analyzeTrackerRisk(
         TrackerRiskLevel.MEDIUM -> "Moderate cross-location repeat pattern"
         TrackerRiskLevel.LOW -> "Early co-movement signal; monitor"
         TrackerRiskLevel.NONE -> "No meaningful co-movement pattern"
+    } + if (seenAtHome && seenAwayFromHome) {
+        " (Observed both near Home Point and away from it)"
+    } else {
+        ""
     }
 
     return TrackerRiskSignal(
@@ -11857,7 +12033,9 @@ private fun analyzeTrackerRisk(
         uniqueLocationCells = uniqueCells,
         spreadMeters = maxSpreadMeters,
         activeWindowMinutes = activeWindowMinutes,
-        summary = summary
+        summary = summary,
+        seenAtHome = seenAtHome,
+        seenAwayFromHome = seenAwayFromHome
     )
 }
 
@@ -12972,6 +13150,7 @@ private fun DevicesPage(
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
+    val homePoint = ScanSettings.getHomePoint(context)
     var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
@@ -12981,6 +13160,7 @@ private fun DevicesPage(
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
+    var showHomeAwaySuspiciousOnly by rememberSaveable { mutableStateOf(false) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
@@ -12995,6 +13175,7 @@ private fun DevicesPage(
         sortMode,
         approachDetectionEnabled,
         ownedDeviceKeys,
+        homePoint,
         wifiRandomizedOneOffSuppressionEnabled,
         bleRandomizedOneOffSuppressionEnabled
     ) {
@@ -13003,6 +13184,7 @@ private fun DevicesPage(
             sortMode = sortMode,
             approachDetectionEnabled = approachDetectionEnabled,
             ownedDeviceKeys = ownedDeviceKeys,
+            homePoint = homePoint,
             suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
             suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
         )
@@ -13013,7 +13195,7 @@ private fun DevicesPage(
     val topSpeedByDevice = remember(selectedEncounters) {
         DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
-    val filteredDevices = remember(devices, sourceFilter, queryFilter, showOwnedOnly, showTrackerRiskOnly) {
+    val filteredDevices = remember(devices, sourceFilter, queryFilter, showOwnedOnly, showTrackerRiskOnly, showHomeAwaySuspiciousOnly, homePoint) {
         devices.filter { device ->
             val sourceMatches = sourceFilter == null || device.source == sourceFilter
             val queryMatches = queryFilter.isBlank() ||
@@ -13022,7 +13204,12 @@ private fun DevicesPage(
             val ownedMatches = !showOwnedOnly || device.isOwned
             val riskMatches = !showTrackerRiskOnly ||
                 (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
-            sourceMatches && queryMatches && ownedMatches && riskMatches
+            val homeAwaySuspiciousMatches = !showHomeAwaySuspiciousOnly || homePoint == null || (
+                !device.isOwned &&
+                    device.trackerRisk?.seenAtHome == true &&
+                    device.trackerRisk?.seenAwayFromHome == true
+                )
+            sourceMatches && queryMatches && ownedMatches && riskMatches && homeAwaySuspiciousMatches
         }
     }
     val displayedDevices = remember(filteredDevices, showDistance, sortByDistance, currentLocation) {
@@ -13131,6 +13318,12 @@ private fun DevicesPage(
                             checked = showTrackerRiskOnly,
                             onCheckedChange = { showTrackerRiskOnly = it }
                         )
+                        CompactSwitchControl(
+                            label = "Home→Away Suspicious Only",
+                            checked = showHomeAwaySuspiciousOnly,
+                            onCheckedChange = { showHomeAwaySuspiciousOnly = it },
+                            enabled = homePoint != null
+                        )
                     }
                 }
             }
@@ -13167,6 +13360,17 @@ private fun DevicesPage(
                                 text = "Marked as My Device",
                                 color = Color(0xFF2E7D32),
                                 fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        if (device.trackerRisk?.seenAtHome == true) {
+                            Text(
+                                text = if (device.trackerRisk.seenAwayFromHome) {
+                                    "Seen near Home Point and away"
+                                } else {
+                                    "Seen near Home Point"
+                                },
+                                color = Color(0xFF6A4F00),
+                                fontWeight = FontWeight.Medium
                             )
                         }
                         if (device.gpsSpoofSuspected) {
@@ -13448,6 +13652,7 @@ private fun buildDeviceItems(
     sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN,
     approachDetectionEnabled: Boolean = true,
     ownedDeviceKeys: Set<String> = emptySet(),
+    homePoint: ScanSettings.HomePoint? = null,
     suppressLikelyRandomizedWifiOneOffs: Boolean = true,
     suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): List<DeviceItem> =
@@ -13460,6 +13665,7 @@ private fun buildDeviceItems(
                 groupedEncounters = groupedEncounters,
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
+                homePoint = homePoint,
                 suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs,
                 suppressLikelyRandomizedBleOneOffs = suppressLikelyRandomizedBleOneOffs
             )
@@ -13480,6 +13686,7 @@ private fun buildSingleDeviceItem(
     groupedEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
+    homePoint: ScanSettings.HomePoint? = null,
     suppressLikelyRandomizedWifiOneOffs: Boolean = true,
     suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): DeviceItem? = buildDeviceItemForGroup(
@@ -13488,6 +13695,7 @@ private fun buildSingleDeviceItem(
     groupedEncounters = groupedEncounters,
     approachDetectionEnabled = approachDetectionEnabled,
     ownedDeviceKeys = ownedDeviceKeys,
+    homePoint = homePoint,
     suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs,
     suppressLikelyRandomizedBleOneOffs = suppressLikelyRandomizedBleOneOffs
 )
@@ -13498,6 +13706,7 @@ private fun buildDeviceItemForGroup(
     groupedEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
+    homePoint: ScanSettings.HomePoint? = null,
     suppressLikelyRandomizedWifiOneOffs: Boolean = true,
     suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): DeviceItem? {
@@ -13533,7 +13742,8 @@ private fun buildDeviceItemForGroup(
         analyzeTrackerRisk(
             encounters = groupedEncounters,
             isOwned = owned,
-            approachSignal = approachSignal
+            approachSignal = approachSignal,
+            homePoint = homePoint
         )
     }
     val motionSignal = if (isCameraSource) null else analyzeMotionSignal(groupedEncounters)
@@ -14126,6 +14336,8 @@ private fun DeviceDetailPage(
                     DetailRow("Cross-Location Cells", item.trackerRisk.uniqueLocationCells.toString())
                     DetailRow("Observed Spread", formatDistanceFeetMiles(item.trackerRisk.spreadMeters))
                     DetailRow("Observed Window", String.format(Locale.US, "%.1f min", item.trackerRisk.activeWindowMinutes))
+                    DetailRow("Seen Near Home Point", if (item.trackerRisk.seenAtHome) "Yes" else "No")
+                    DetailRow("Seen Away From Home Point", if (item.trackerRisk.seenAwayFromHome) "Yes" else "No")
                     DetailRow("Assessment", item.trackerRisk.summary)
                 }
                 DetailRow(

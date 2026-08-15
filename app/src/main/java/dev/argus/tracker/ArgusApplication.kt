@@ -13,7 +13,7 @@ class ArgusApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = DefaultAppContainer(this)
-        WorkScheduler.enqueueStartupBootstrapScan(this)
+        WorkScheduler.prepareStartupBootstrapOnLaunch(this)
         container.chainLinkCoordinator.ensureServerRunning()
         MeshForegroundServiceController.ensureState(this)
         RemoteIdForegroundServiceController.ensureState(this)

@@ -3,6 +3,7 @@ package dev.argus.tracker.worker
 import android.content.Context
 import android.os.Build
 import dev.argus.tracker.domain.SourceCatalog
+import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -67,6 +68,11 @@ object ScanSettings {
     private const val KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "ble_randomized_one_off_suppression_enabled"
     private const val KEY_BLE_AGGREGATE_ONLY_ENABLED = "ble_aggregate_only_enabled"
     private const val KEY_BLE_SWEEP_IDENTIFIABLE_ONLY_ENABLED = "ble_sweep_identifiable_only_enabled"
+    private const val KEY_LAST_APP_LAUNCH_EPOCH_MS = "last_app_launch_epoch_ms"
+    private const val KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED = "startup_bootstrap_wait_required"
+    private const val KEY_HOME_POINT_LAT = "home_point_lat"
+    private const val KEY_HOME_POINT_LON = "home_point_lon"
+    private const val KEY_HOME_POINT_RADIUS_METERS = "home_point_radius_meters"
     private const val KEY_APP_THEME_MODE = "app_theme_mode"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -103,6 +109,10 @@ object ScanSettings {
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
     const val DEFAULT_APP_THEME_MODE = "DARK"
+    const val DEFAULT_HOME_POINT_RADIUS_METERS = 160.0
+    const val MIN_HOME_POINT_RADIUS_METERS = 30.0
+    const val MAX_HOME_POINT_RADIUS_METERS = 1500.0
+    val ALLOWED_HOME_POINT_RADIUS_METERS = listOf(50.0, 100.0, 160.0, 250.0, 500.0, 800.0, 1200.0)
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     private val SHARED_ALLOWED_CADENCE_SECONDS: List<Long> =
@@ -141,6 +151,12 @@ object ScanSettings {
         val initiatorNodeId: String?,
         val initiatorDeviceName: String?,
         val updatedEpochMs: Long?
+    )
+
+    data class HomePoint(
+        val lat: Double,
+        val lon: Double,
+        val radiusMeters: Double
     )
 
     data class OperationalState(
@@ -487,6 +503,57 @@ object ScanSettings {
             .edit()
             .putBoolean(KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED, enabled)
             .apply()
+    }
+
+    fun getHomePoint(context: Context): HomePoint? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val lat = prefs.getString(KEY_HOME_POINT_LAT, null)?.toDoubleOrNull()
+        val lon = prefs.getString(KEY_HOME_POINT_LON, null)?.toDoubleOrNull()
+        if (lat == null || lon == null) return null
+        if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
+
+        val radiusMeters = prefs.getString(KEY_HOME_POINT_RADIUS_METERS, null)
+            ?.toDoubleOrNull()
+            ?.coerceIn(MIN_HOME_POINT_RADIUS_METERS, MAX_HOME_POINT_RADIUS_METERS)
+            ?: DEFAULT_HOME_POINT_RADIUS_METERS
+
+        return HomePoint(
+            lat = lat,
+            lon = lon,
+            radiusMeters = radiusMeters
+        )
+    }
+
+    fun setHomePoint(context: Context, lat: Double, lon: Double, radiusMeters: Double = DEFAULT_HOME_POINT_RADIUS_METERS) {
+        val safeLat = lat.coerceIn(-90.0, 90.0)
+        val safeLon = lon.coerceIn(-180.0, 180.0)
+        val safeRadius = radiusMeters.coerceIn(MIN_HOME_POINT_RADIUS_METERS, MAX_HOME_POINT_RADIUS_METERS)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_HOME_POINT_LAT, String.format(Locale.US, "%.6f", safeLat))
+            .putString(KEY_HOME_POINT_LON, String.format(Locale.US, "%.6f", safeLon))
+            .putString(KEY_HOME_POINT_RADIUS_METERS, String.format(Locale.US, "%.1f", safeRadius))
+            .apply()
+    }
+
+    fun clearHomePoint(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_HOME_POINT_LAT)
+            .remove(KEY_HOME_POINT_LON)
+            .remove(KEY_HOME_POINT_RADIUS_METERS)
+            .apply()
+    }
+
+    fun setHomePointRadiusMeters(context: Context, radiusMeters: Double): Boolean {
+        val existing = getHomePoint(context) ?: return false
+        setHomePoint(
+            context = context,
+            lat = existing.lat,
+            lon = existing.lon,
+            radiusMeters = radiusMeters
+        )
+        return true
     }
 
     fun isChainLinkEnabled(context: Context): Boolean =
@@ -877,6 +944,29 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_BLE_AGGREGATE_ONLY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getLastAppLaunchEpochMs(context: Context): Long? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_APP_LAUNCH_EPOCH_MS, -1L)
+            .takeIf { it > 0L }
+
+    fun setLastAppLaunchEpochMs(context: Context, epochMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_APP_LAUNCH_EPOCH_MS, epochMs.coerceAtLeast(0L))
+            .apply()
+    }
+
+    fun isStartupBootstrapWaitRequired(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED, true)
+
+    fun setStartupBootstrapWaitRequired(context: Context, required: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED, required)
             .apply()
     }
 

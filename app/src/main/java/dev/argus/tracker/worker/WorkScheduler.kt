@@ -23,6 +23,7 @@ object WorkScheduler {
     private const val PERIODIC_WORK_NAME = "argus-periodic-scan"
     private const val ONE_TIME_WORK_NAME = "argus-one-time-scan"
     private const val STARTUP_BOOTSTRAP_WORK_NAME = "argus-startup-bootstrap-scan"
+    private const val STARTUP_BOOTSTRAP_IDLE_THRESHOLD_MS = 60L * 60L * 1000L
 
     data class StartResult(
         val success: Boolean,
@@ -41,6 +42,21 @@ object WorkScheduler {
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<ArgusWorker>().build()
         )
+    }
+
+    fun prepareStartupBootstrapOnLaunch(context: Context): Boolean {
+        val nowEpochMs = System.currentTimeMillis()
+        val lastLaunchEpochMs = ScanSettings.getLastAppLaunchEpochMs(context)
+        val idleMs = lastLaunchEpochMs?.let { (nowEpochMs - it).coerceAtLeast(0L) }
+        val shouldEnqueueStartupBootstrap = idleMs == null || idleMs >= STARTUP_BOOTSTRAP_IDLE_THRESHOLD_MS
+
+        ScanSettings.setStartupBootstrapWaitRequired(context, shouldEnqueueStartupBootstrap)
+        ScanSettings.setLastAppLaunchEpochMs(context, nowEpochMs)
+
+        if (shouldEnqueueStartupBootstrap) {
+            enqueueStartupBootstrapScan(context)
+        }
+        return shouldEnqueueStartupBootstrap
     }
 
     suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
