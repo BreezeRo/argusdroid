@@ -142,26 +142,20 @@ class CameraScanner(
               node["enforcement"="speed_camera"](around:$radius,$lat,$lon);
               node["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               node["enforcement"="red_light"](around:$radius,$lat,$lon);
-              node["camera:type"="red_light"](around:$radius,$lat,$lon);
-                            node["camera:type"="speed"](around:$radius,$lat,$lon);
-                            node["camera:type"="average_speed"](around:$radius,$lat,$lon);
-                            node["camera:type"="speed_check"](around:$radius,$lat,$lon);
+              node["camera:type"](around:$radius,$lat,$lon);
+              node["surveillance:type"~"camera|anpr|alpr",i](around:$radius,$lat,$lon);
               way["highway"="speed_camera"](around:$radius,$lat,$lon);
               way["enforcement"="speed_camera"](around:$radius,$lat,$lon);
               way["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               way["enforcement"="red_light"](around:$radius,$lat,$lon);
-              way["camera:type"="red_light"](around:$radius,$lat,$lon);
-                            way["camera:type"="speed"](around:$radius,$lat,$lon);
-                            way["camera:type"="average_speed"](around:$radius,$lat,$lon);
-                            way["camera:type"="speed_check"](around:$radius,$lat,$lon);
-                            relation["highway"="speed_camera"](around:$radius,$lat,$lon);
-                            relation["enforcement"="speed_camera"](around:$radius,$lat,$lon);
-                            relation["enforcement"="maxspeed"](around:$radius,$lat,$lon);
-                            relation["enforcement"="red_light"](around:$radius,$lat,$lon);
-                            relation["camera:type"="red_light"](around:$radius,$lat,$lon);
-                            relation["camera:type"="speed"](around:$radius,$lat,$lon);
-                            relation["camera:type"="average_speed"](around:$radius,$lat,$lon);
-                            relation["camera:type"="speed_check"](around:$radius,$lat,$lon);
+              way["camera:type"](around:$radius,$lat,$lon);
+              way["surveillance:type"~"camera|anpr|alpr",i](around:$radius,$lat,$lon);
+              relation["highway"="speed_camera"](around:$radius,$lat,$lon);
+              relation["enforcement"="speed_camera"](around:$radius,$lat,$lon);
+              relation["enforcement"="maxspeed"](around:$radius,$lat,$lon);
+              relation["enforcement"="red_light"](around:$radius,$lat,$lon);
+              relation["camera:type"](around:$radius,$lat,$lon);
+              relation["surveillance:type"~"camera|anpr|alpr",i](around:$radius,$lat,$lon);
             );
             out center tags;
         """.trimIndent()
@@ -186,12 +180,7 @@ class CameraScanner(
             val osmType = element.optString("type", "node")
             val osmId = element.optLong("id", -1L).takeIf { it > 0L } ?: continue
             val label = tags.optString("name", "").ifBlank {
-                when (cameraType) {
-                    "redlight" -> "Red-light camera"
-                    "speed_redlight" -> "Speed/Red-light camera"
-                    "avg_speed_zone" -> "Average speed zone camera"
-                    else -> "Speed camera"
-                }
+                cameraTypeLabel(cameraType)
             }
 
             pois += CameraPoi(
@@ -264,8 +253,8 @@ class CameraScanner(
     }
 
     private fun inferCameraType(payload: JSONObject): String {
-        val directType = payload.optString("cameraType", "").trim().lowercase(Locale.US)
-        if (directType in setOf("speed", "redlight", "speed_redlight", "avg_speed_zone")) {
+        val directType = normalizeCameraType(payload.optString("cameraType", ""))
+        if (directType.isNotBlank()) {
             return directType
         }
 
@@ -274,15 +263,51 @@ class CameraScanner(
         if (signalClass.contains("speed")) return "speed"
 
         val enforcement = payload.optString("enforcement", "").trim().lowercase(Locale.US)
-        val cameraHint = payload.optString("camera:type", "").trim().lowercase(Locale.US)
+        val cameraHint = normalizeCameraType(payload.optString("camera:type", ""))
+        if (cameraHint.isNotBlank()) return cameraHint
+
+        val surveillanceHint = normalizeCameraType(payload.optString("surveillance:type", ""))
+        if (surveillanceHint.isNotBlank()) return surveillanceHint
+
         val hasSpeed = enforcement.contains("maxspeed") || payload.optString("highway", "").equals("speed_camera", ignoreCase = true)
-        val hasRed = enforcement.contains("red_light") || cameraHint.contains("red")
+        val hasRed = enforcement.contains("red_light")
 
         return when {
             hasSpeed && hasRed -> "speed_redlight"
             hasRed -> "redlight"
             hasSpeed -> "speed"
-            else -> "speed"
+            enforcement.isNotBlank() -> normalizeCameraType(enforcement)
+            else -> "camera"
+        }
+    }
+
+    private fun normalizeCameraType(raw: String): String {
+        val value = raw.trim().lowercase(Locale.US)
+        if (value.isBlank()) return ""
+
+        return when {
+            value == "red_light" || value == "redlight" -> "redlight"
+            value == "speed_camera" || value == "speed" || value == "speed_check" -> "speed"
+            value == "average_speed" || value == "avg_speed" || value == "section_control" -> "avg_speed_zone"
+            value == "speed_redlight" || value == "red_light_speed" -> "speed_redlight"
+            else -> value
+                .replace(':', '_')
+                .replace('-', '_')
+                .replace(' ', '_')
+        }
+    }
+
+    private fun cameraTypeLabel(cameraType: String): String {
+        return when (cameraType) {
+            "redlight" -> "Red-light camera"
+            "speed_redlight" -> "Speed/Red-light camera"
+            "avg_speed_zone" -> "Average speed zone camera"
+            "speed" -> "Speed camera"
+            "camera" -> "Traffic camera"
+            else -> cameraType
+                .split('_')
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { token -> token.replaceFirstChar { ch -> ch.uppercaseChar() } } + " camera"
         }
     }
 
