@@ -207,6 +207,13 @@ private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
 private const val REMOTE_ID_BROADCAST_MAX_OFFSET_METERS = 80_000.0
 private const val MAP_COVERAGE_CENTER_JITTER_METERS = 20.0
 private const val MAP_COVERAGE_RADIUS_JITTER_METERS = 30.0
+private const val MAP_COVERAGE_RADIUS_MAX_STEP_METERS = 150.0
+private const val MAP_COVERAGE_RADIUS_UPDATE_MIN_INTERVAL_MS = 4_000L
+private const val MAP_COVERAGE_EMPTY_HOLD_MS = 12_000L
+private const val MAP_COVERAGE_IMMEDIATE_RESIZE_DELTA_METERS = 300.0
+private const val MAP_COVERAGE_RECENT_WINDOW_MS = 120_000L
+private const val MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS = 600_000L
+private const val MAP_COVERAGE_RADIUS_PERCENTILE = 0.85
 private const val WIFI_RANDOMIZED_MIN_SIGHTINGS = 2
 private const val MAP_CAMERA_BOUNDS_SAMPLE_LIMIT = 220
 private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
@@ -382,7 +389,8 @@ private data class MotionSignal(
 
 private data class SensorGateSettings(
     val wifiEnabled: Boolean,
-    val bluetoothEnabled: Boolean,
+    val bluetoothLeEnabled: Boolean,
+    val bluetoothClassicEnabled: Boolean,
     val cellularEnabled: Boolean,
     val remoteIdEnabled: Boolean,
     val aviationAdsbEnabled: Boolean,
@@ -614,7 +622,8 @@ private object DeviceSpeedRecordStore {
 private fun readSensorGateSettings(context: android.content.Context): SensorGateSettings =
     SensorGateSettings(
         wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
-        bluetoothEnabled = ScanSettings.isBleSensorEnabled(context),
+        bluetoothLeEnabled = ScanSettings.isBleSensorEnabled(context),
+        bluetoothClassicEnabled = ScanSettings.isBluetoothClassicSensorEnabled(context),
         cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
         remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context),
         aviationAdsbEnabled = ScanSettings.isAviationAdsbSensorEnabled(context),
@@ -650,6 +659,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
     var wifiAggregateOnlyEnabled by remember {
         mutableStateOf(ScanSettings.isWifiAggregateOnlyEnabled(context))
+    }
+    var bleRandomizedOneOffSuppressionEnabled by remember {
+        mutableStateOf(ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context))
+    }
+    var bleAggregateOnlyEnabled by remember {
+        mutableStateOf(ScanSettings.isBleAggregateOnlyEnabled(context))
     }
     var sourceScanIntervals by remember { mutableStateOf(ScanSettings.getAllSourceScanIntervalSeconds(context)) }
     var sourceLastScanEpochs by remember { mutableStateOf(ScanSettings.getAllSourceLastScanEpochMs(context)) }
@@ -714,6 +729,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
     fun navigateTopLevel(route: String) {
         if (topLevelRouteForSelection(currentRoute) == route) return
+        if (currentRoute == DEVICE_DETAIL_ROUTE && route != DETECTION_ROUTE) {
+            detectionInitialTabRequest = 0
+        }
         navController.navigate(route) {
             launchSingleTop = true
             restoreState = true
@@ -761,6 +779,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         countSuppressedLikelyRandomizedWifiOneOffDevices(
             encounters = operationalAnalysisWindow,
             suppressionEnabled = wifiRandomizedOneOffSuppressionEnabled
+        )
+    }
+    val suppressedBleRandomizedOneOffCount = remember(
+        operationalAnalysisWindow,
+        bleRandomizedOneOffSuppressionEnabled
+    ) {
+        countSuppressedLikelyRandomizedBleOneOffDevices(
+            encounters = operationalAnalysisWindow,
+            suppressionEnabled = bleRandomizedOneOffSuppressionEnabled
         )
     }
 
@@ -821,7 +848,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(operationalAnalysisWindow, ownedDeviceKeys, approachDetectionEnabled, wifiRandomizedOneOffSuppressionEnabled) {
+    LaunchedEffect(
+        operationalAnalysisWindow,
+        ownedDeviceKeys,
+        approachDetectionEnabled,
+        wifiRandomizedOneOffSuppressionEnabled,
+        bleRandomizedOneOffSuppressionEnabled
+    ) {
         if (!approachDetectionEnabled) {
             analyzedDevices = emptyList()
             return@LaunchedEffect
@@ -831,7 +864,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 encounters = operationalAnalysisWindow,
                 approachDetectionEnabled = true,
                 ownedDeviceKeys = ownedDeviceKeys,
-                suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled
+                suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+                suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
             )
         }
     }
@@ -928,6 +962,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
+        bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
+        bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
         foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
@@ -974,7 +1010,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         deviceMapLiveWindowMs = liveWindowMs,
                         deviceMapAircraftLiveWindowMs = aircraftLiveWindowMs,
                         maxDeviceCandidates = 1200,
-                        suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled
+                        suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+                        suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
                     )
                 }
             }
@@ -1255,13 +1292,19 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         lastMagneticObservedSampleEpochMs = current.first
     }
 
-    LaunchedEffect(operationalAnalysisWindow, ownedDeviceKeys, wifiRandomizedOneOffSuppressionEnabled) {
+    LaunchedEffect(
+        operationalAnalysisWindow,
+        ownedDeviceKeys,
+        wifiRandomizedOneOffSuppressionEnabled,
+        bleRandomizedOneOffSuppressionEnabled
+    ) {
         val devices = withContext(Dispatchers.Default) {
             buildDeviceItems(
                 encounters = operationalAnalysisWindow,
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
-                suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled
+                suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+                suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
             )
         }
         devices.forEach { device ->
@@ -1388,7 +1431,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         scope.launch {
                             when (sensor) {
                                 "wifi" -> ScanSettings.setWifiSensorEnabled(context, enabled)
-                                "bluetooth" -> ScanSettings.setBleSensorEnabled(context, enabled)
+                                "bluetooth_le" -> ScanSettings.setBleSensorEnabled(context, enabled)
+                                "bluetooth_classic" -> ScanSettings.setBluetoothClassicSensorEnabled(context, enabled)
                                 "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
                                 "remote_id" -> ScanSettings.setRemoteIdSensorEnabled(context, enabled)
                                 "aviation_adsb" -> ScanSettings.setAviationAdsbSensorEnabled(context, enabled)
@@ -1440,7 +1484,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
                     wifiAggregateOnlyEnabled = wifiAggregateOnlyEnabled,
+                    bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
+                    bleAggregateOnlyEnabled = bleAggregateOnlyEnabled,
                     suppressedWifiRandomizedOneOffCount = suppressedWifiRandomizedOneOffCount,
+                    suppressedBleRandomizedOneOffCount = suppressedBleRandomizedOneOffCount,
                     sourceScanIntervals = sourceScanIntervals,
                     lastScanDurationMs = lastScanDurationMs,
                     sourceScanTimings = sourceScanTimings,
@@ -1589,6 +1636,14 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         wifiAggregateOnlyEnabled = enabled
                         ScanSettings.setWifiAggregateOnlyEnabled(context, enabled)
                     },
+                    onBleRandomizedOneOffSuppressionEnabledChanged = { enabled ->
+                        bleRandomizedOneOffSuppressionEnabled = enabled
+                        ScanSettings.setBleRandomizedOneOffSuppressionEnabled(context, enabled)
+                    },
+                    onBleAggregateOnlyEnabledChanged = { enabled ->
+                        bleAggregateOnlyEnabled = enabled
+                        ScanSettings.setBleAggregateOnlyEnabled(context, enabled)
+                    },
                     onExportBackup = {
                         val file = AppBackupManager.exportSnapshot(
                             context = context,
@@ -1628,6 +1683,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
+                        bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
+                        bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
@@ -1674,6 +1731,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
+                        bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
+                        bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
@@ -1744,6 +1803,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
+                        bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
+                        bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
                         viewModel.refreshSummary()
                         "Hard reset completed: local data/logs cleared and mesh settings reset."
                     }
@@ -1773,6 +1834,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     startupPrewarmedDevicePins = startupPrewarmedDevicePins,
                     startupPrewarmedNoFlyZones = startupPrewarmedNoFlyZones,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
+                    bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
                     mapClusteringEnabled = mapClusteringEnabled,
                     onMapClusteringEnabledChanged = { enabled ->
@@ -2064,14 +2126,23 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 val deviceEncounters = remember(allEncounters, source, primaryId) {
                     allEncounters.filter { it.source.name == source && it.primaryId == primaryId }
                 }
-                val item = remember(deviceEncounters, source, primaryId, approachDetectionEnabled, ownedDeviceKeys, wifiRandomizedOneOffSuppressionEnabled) {
+                val item = remember(
+                    deviceEncounters,
+                    source,
+                    primaryId,
+                    approachDetectionEnabled,
+                    ownedDeviceKeys,
+                    wifiRandomizedOneOffSuppressionEnabled,
+                    bleRandomizedOneOffSuppressionEnabled
+                ) {
                     buildSingleDeviceItem(
                         source = source,
                         primaryId = primaryId,
                         groupedEncounters = deviceEncounters,
                         approachDetectionEnabled = approachDetectionEnabled,
                         ownedDeviceKeys = ownedDeviceKeys,
-                        suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled
+                        suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+                        suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
                     )
                 }
                 DeviceDetailPage(
@@ -2805,11 +2876,18 @@ private fun HomePage(
                             sensorStatusByName["Wi-Fi"]
                         ),
                         HomeSensorToggle(
-                            "bluetooth",
+                            "bluetooth_le",
                             "Bluetooth LE",
                             "Low-energy beacon scan",
-                            sensorGateSettings.bluetoothEnabled,
+                            sensorGateSettings.bluetoothLeEnabled,
                             sensorStatusByName["Bluetooth LE"]
+                        ),
+                        HomeSensorToggle(
+                            "bluetooth_classic",
+                            "Bluetooth Classic",
+                            "Legacy Bluetooth device inquiry",
+                            sensorGateSettings.bluetoothClassicEnabled,
+                            sensorStatusByName["Bluetooth Classic"]
                         ),
                         HomeSensorToggle(
                             "cellular",
@@ -2958,7 +3036,10 @@ private fun AppSettingsPage(
     mapScannerSweepAnimationEnabled: Boolean,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
     wifiAggregateOnlyEnabled: Boolean,
+    bleRandomizedOneOffSuppressionEnabled: Boolean,
+    bleAggregateOnlyEnabled: Boolean,
     suppressedWifiRandomizedOneOffCount: Int,
+    suppressedBleRandomizedOneOffCount: Int,
     sourceScanIntervals: Map<String, Long>,
     lastScanDurationMs: Long?,
     sourceScanTimings: List<ScanSettings.SourceScanTiming>,
@@ -2996,6 +3077,8 @@ private fun AppSettingsPage(
     onMapScannerSweepAnimationEnabledChanged: (Boolean) -> Unit,
     onWifiRandomizedOneOffSuppressionEnabledChanged: (Boolean) -> Unit,
     onWifiAggregateOnlyEnabledChanged: (Boolean) -> Unit,
+    onBleRandomizedOneOffSuppressionEnabledChanged: (Boolean) -> Unit,
+    onBleAggregateOnlyEnabledChanged: (Boolean) -> Unit,
     onExportBackup: suspend () -> String,
     onExportEncryptedBackup: suspend (String) -> String,
     onImportLatestBackup: suspend () -> String,
@@ -3325,32 +3408,105 @@ private fun AppSettingsPage(
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Wi-Fi aggregate-only mode")
-                            Switch(
-                                checked = wifiAggregateOnlyEnabled,
-                                onCheckedChange = onWifiAggregateOnlyEnabledChanged
-                            )
+                        Text("Wi-Fi and Bluetooth LE sweeps use matching noise controls.")
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("Wi-Fi Sweep", fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Wi-Fi aggregate-only mode", fontWeight = FontWeight.Medium)
+                                    Switch(
+                                        checked = wifiAggregateOnlyEnabled,
+                                        onCheckedChange = onWifiAggregateOnlyEnabledChanged
+                                    )
+                                }
+                                Text("Stores each Wi-Fi sweep as one aggregate detection and keeps named Wi-Fi devices as individual entries.")
+                                Text(
+                                    if (wifiAggregateOnlyEnabled) {
+                                        "Current: aggregate + named Wi-Fi devices only"
+                                    } else {
+                                        "Current: aggregate + all raw per-AP detections"
+                                    }
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Hide one-off randomized Wi-Fi IDs", fontWeight = FontWeight.Medium)
+                                    Switch(
+                                        checked = wifiRandomizedOneOffSuppressionEnabled,
+                                        onCheckedChange = onWifiRandomizedOneOffSuppressionEnabledChanged
+                                    )
+                                }
+                                Text("Suppresses likely-randomized Wi-Fi IDs seen only once to reduce one-off noise.")
+                                Text("Currently suppressed: $suppressedWifiRandomizedOneOffCount")
+                                Text(
+                                    if (wifiRandomizedOneOffSuppressionEnabled) {
+                                        "Current: one-off randomized Wi-Fi hidden"
+                                    } else {
+                                        "Current: one-off randomized Wi-Fi shown"
+                                    }
+                                )
+                            }
                         }
-                        Text("When on, each Wi-Fi sweep is stored as one aggregate detection instead of one detection per access point.")
-                        Text("Turn off to include both aggregate sweep and raw per-AP detections.")
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Hide one-off randomized Wi-Fi IDs (${suppressedWifiRandomizedOneOffCount} now)")
-                            Switch(
-                                checked = wifiRandomizedOneOffSuppressionEnabled,
-                                onCheckedChange = onWifiRandomizedOneOffSuppressionEnabledChanged
-                            )
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("Bluetooth LE Sweep", fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Bluetooth LE aggregate-only mode", fontWeight = FontWeight.Medium)
+                                    Switch(
+                                        checked = bleAggregateOnlyEnabled,
+                                        onCheckedChange = onBleAggregateOnlyEnabledChanged
+                                    )
+                                }
+                                Text("Stores each Bluetooth LE sweep as one aggregate detection and keeps named Bluetooth LE devices as individual entries.")
+                                Text(
+                                    if (bleAggregateOnlyEnabled) {
+                                        "Current: aggregate + named Bluetooth LE devices only"
+                                    } else {
+                                        "Current: aggregate + all raw BLE detections"
+                                    }
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Hide one-off randomized Bluetooth LE IDs", fontWeight = FontWeight.Medium)
+                                    Switch(
+                                        checked = bleRandomizedOneOffSuppressionEnabled,
+                                        onCheckedChange = onBleRandomizedOneOffSuppressionEnabledChanged
+                                    )
+                                }
+                                Text("Suppresses likely-randomized Bluetooth LE IDs seen only once to reduce one-off noise.")
+                                Text("Currently suppressed: $suppressedBleRandomizedOneOffCount")
+                                Text(
+                                    if (bleRandomizedOneOffSuppressionEnabled) {
+                                        "Current: one-off randomized Bluetooth LE hidden"
+                                    } else {
+                                        "Current: one-off randomized Bluetooth LE shown"
+                                    }
+                                )
+                            }
                         }
-                        Text("When on, likely-randomized Wi-Fi MACs seen only once are hidden to reduce noise.")
-                        Text("Turn off when hunting short-lived one-off signals.")
                     }
                 }
             }
@@ -3907,6 +4063,7 @@ private fun DetectionPage(
     startupPrewarmedDevicePins: List<MapPin>,
     startupPrewarmedNoFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
+    bleRandomizedOneOffSuppressionEnabled: Boolean,
     mapNoFlyZonesEnabled: Boolean,
     mapClusteringEnabled: Boolean,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
@@ -3934,7 +4091,7 @@ private fun DetectionPage(
     onWipeMeshData: suspend () -> String
 ) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableStateOf(0) }
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
     var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(true) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
@@ -3990,6 +4147,7 @@ private fun DetectionPage(
         approachDetectionEnabled,
         ownedDeviceKeys,
         wifiRandomizedOneOffSuppressionEnabled,
+        bleRandomizedOneOffSuppressionEnabled,
         deviceMapRecentWindowMs,
         deviceMapAircraftRecentWindowMs,
         maxDeviceCandidatesToResolve
@@ -4028,7 +4186,8 @@ private fun DetectionPage(
                             source = latest.source,
                             primaryId = latest.primaryId,
                             seenCount = deviceEncounters.size,
-                            suppressionEnabled = wifiRandomizedOneOffSuppressionEnabled
+                            wifiSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
+                            bleSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled
                         )
                     ) {
                         return@mapNotNull null
@@ -4093,7 +4252,7 @@ private fun DetectionPage(
     val flightMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 1) {
         LocationSnapshotProvider.observe(
             context,
-            minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+            minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
         ).collectAsState(initial = LocationSnapshotProvider.read(context))
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
@@ -4101,7 +4260,7 @@ private fun DetectionPage(
     val deviceMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 0) {
         LocationSnapshotProvider.observe(
             context,
-            minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+            minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
         ).collectAsState(initial = LocationSnapshotProvider.read(context))
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
@@ -4216,6 +4375,7 @@ private fun DetectionPage(
                             title = buildPinTitle(
                                 sourceLabel = listSourceLabel(latest.source.name, latest.secondaryId),
                                 primaryId = latest.primaryId,
+                                secondaryId = latest.secondaryId,
                                 motionBadge = null
                             ),
                             snippetBuilder = {
@@ -4228,6 +4388,7 @@ private fun DetectionPage(
                             timestampEpochMs = latest.timestampEpochMs,
                             source = latest.source.name,
                             primaryId = latest.primaryId,
+                            secondaryId = latest.secondaryId,
                             encounterTimestampEpochMs = latest.timestampEpochMs,
                             aircraftIconType = visualHints.iconType,
                             headingDegrees = visualHints.headingDegrees ?: derivedHeading,
@@ -4383,6 +4544,7 @@ private fun DetectionPage(
                 title = buildPinTitle(
                     sourceLabel = listSourceLabel(candidate.source, candidate.secondaryId),
                     primaryId = candidate.primaryId,
+                    secondaryId = candidate.secondaryId,
                     motionBadge = motionBadge
                 ),
                 snippetBuilder = {
@@ -4395,6 +4557,7 @@ private fun DetectionPage(
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
+                secondaryId = candidate.secondaryId,
                 encounterTimestampEpochMs = null,
                 aircraftIconType = aircraftVisualHints?.iconType,
                 headingDegrees = resolvedAircraftHeading,
@@ -4545,6 +4708,7 @@ private fun DetectionPage(
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
                 wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
+                bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                 onDeviceClick = onDeviceClick
             )
         } else if (selectedTab == 2) {
@@ -5238,10 +5402,13 @@ private fun ErrorLogsPage(
     onClearLogs: () -> Unit
 ) {
     var showWarnings by rememberSaveable { mutableStateOf(false) }
+    val warningCount = remember(logs) { logs.count { it.severity == "WARNING" } }
+    val errorCount = remember(logs) { logs.count { it.severity != "WARNING" } }
     val filteredLogs = remember(logs, showWarnings) {
         if (showWarnings) logs else logs.filter { it.severity != "WARNING" }
     }
-    val warningCount = remember(logs) { logs.count { it.severity == "WARNING" } }
+    val visibleWarningCount = remember(filteredLogs) { filteredLogs.count { it.severity == "WARNING" } }
+    val hiddenWarningCount = if (showWarnings) 0 else warningCount
     val categoryCounts = remember(filteredLogs) {
         filteredLogs.groupingBy { it.category }.eachCount().toList().sortedByDescending { it.second }
     }
@@ -5268,7 +5435,7 @@ private fun ErrorLogsPage(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
             ) {
-                Text("Show warnings")
+                Text("Show warnings ($warningCount)")
                 Switch(
                     checked = showWarnings,
                     onCheckedChange = { showWarnings = it }
@@ -5278,7 +5445,7 @@ private fun ErrorLogsPage(
         item {
             val latest = latestLogEpoch?.let(::formatEpoch) ?: "n/a"
             Text(
-                "Showing ${filteredLogs.size} log${if (filteredLogs.size == 1) "" else "s"} • Latest: $latest${if (!showWarnings && warningCount > 0) " • $warningCount warning hidden" else ""}",
+                "Showing ${filteredLogs.size} log${if (filteredLogs.size == 1) "" else "s"} • Errors $errorCount • Warnings $visibleWarningCount/${warningCount}${if (hiddenWarningCount > 0) " ($hiddenWarningCount hidden)" else ""} • Latest: $latest",
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -5951,6 +6118,7 @@ private fun DetectionMapPage(
     var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
     var noFlyZonesVisible by rememberSaveable { mutableStateOf(true) }
     var selectedNoFlyZoneId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
@@ -5993,21 +6161,45 @@ private fun DetectionMapPage(
     val observedCurrentLocation by if (currentLocationOverride == null) {
         LocationSnapshotProvider.observe(
             context,
-            minUpdateIntervalMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+            minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
         ).collectAsState(initial = LocationSnapshotProvider.read(context))
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
     val currentLocation = currentLocationOverride ?: observedCurrentLocation
-    val nonAircraftCoveragePins = remember(pins) {
-        pins.filter { pin ->
+    var coverageAnchorLocation by remember { mutableStateOf(currentLocation) }
+    var coverageAnchorUpdatedEpochMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(currentLocation, liveMapUpdateIntervalSeconds) {
+        val latest = currentLocation ?: return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val minIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
+        val previous = coverageAnchorLocation
+        val movedMeters = if (previous == null) {
+            Double.MAX_VALUE
+        } else {
+            distanceFromLocationMeters(
+                fromLat = previous.lat,
+                fromLon = previous.lon,
+                toLat = latest.lat,
+                toLon = latest.lon
+            ) ?: 0.0
+        }
+        val movedMeaningfully = movedMeters >= MAP_COVERAGE_CENTER_JITTER_METERS * 2.5
+        val intervalElapsed = now - coverageAnchorUpdatedEpochMs >= minIntervalMs
+        if (previous == null || movedMeaningfully || intervalElapsed) {
+            coverageAnchorLocation = latest
+            coverageAnchorUpdatedEpochMs = now
+        }
+    }
+    val nonAircraftCoveragePins = remember(filteredVisiblePins) {
+        filteredVisiblePins.filter { pin ->
             pin.source != SourceCatalog.SOURCE_AIRCRAFT &&
                 pin.source != SourceCatalog.SOURCE_REMOTE_ID &&
                 pin.source != SourceCatalog.SOURCE_CAMERA
         }
     }
-    val aircraftCoveragePins = remember(pins) {
-        pins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
+    val aircraftCoveragePins = remember(filteredVisiblePins) {
+        filteredVisiblePins.filter { pin -> pin.source == SourceCatalog.SOURCE_AIRCRAFT }
     }
     val nearbyVisiblePins by produceState(
         initialValue = filteredVisiblePins,
@@ -6025,44 +6217,44 @@ private fun DetectionMapPage(
     val nonAircraftCoverageSnapshot by produceState<Pair<DetectionLocation, Double>?>(
         initialValue = null,
         key1 = nonAircraftCoveragePins,
-        key2 = currentLocation,
+        key2 = coverageAnchorLocation,
         key3 = showCoverageRadiusCircle
     ) {
         value = withContext(Dispatchers.Default) {
-            if (!showCoverageRadiusCircle || currentLocation == null || nonAircraftCoveragePins.isEmpty()) {
+            val center = coverageAnchorLocation
+            if (!showCoverageRadiusCircle || center == null || nonAircraftCoveragePins.isEmpty()) {
                 null
             } else {
-                val radiusMeters = nonAircraftCoveragePins.maxOfOrNull { pin ->
-                    distanceFromLocationMeters(
-                        fromLat = currentLocation.lat,
-                        fromLon = currentLocation.lon,
-                        toLat = pin.position.latitude,
-                        toLon = pin.position.longitude
-                    ) ?: 0.0
-                } ?: 0.0
-                currentLocation to normalizeCoverageRadiusMeters(radiusMeters)
+                val radiusMeters = calculateRealtimeCoverageRadiusMeters(
+                    center = center,
+                    pins = nonAircraftCoveragePins,
+                    nowEpochMs = System.currentTimeMillis(),
+                    recentWindowMs = MAP_COVERAGE_RECENT_WINDOW_MS,
+                    percentile = MAP_COVERAGE_RADIUS_PERCENTILE
+                )
+                radiusMeters?.let { center to it }
             }
         }
     }
     val aircraftCoverageSnapshot by produceState<Pair<DetectionLocation, Double>?>(
         initialValue = null,
         key1 = aircraftCoveragePins,
-        key2 = currentLocation,
+        key2 = coverageAnchorLocation,
         key3 = showCoverageRadiusCircle
     ) {
         value = withContext(Dispatchers.Default) {
-            if (!showCoverageRadiusCircle || currentLocation == null || aircraftCoveragePins.isEmpty()) {
+            val center = coverageAnchorLocation
+            if (!showCoverageRadiusCircle || center == null || aircraftCoveragePins.isEmpty()) {
                 null
             } else {
-                val radiusMeters = aircraftCoveragePins.maxOfOrNull { pin ->
-                    distanceFromLocationMeters(
-                        fromLat = currentLocation.lat,
-                        fromLon = currentLocation.lon,
-                        toLat = pin.position.latitude,
-                        toLon = pin.position.longitude
-                    ) ?: 0.0
-                } ?: 0.0
-                currentLocation to normalizeCoverageRadiusMeters(radiusMeters)
+                val radiusMeters = calculateRealtimeCoverageRadiusMeters(
+                    center = center,
+                    pins = aircraftCoveragePins,
+                    nowEpochMs = System.currentTimeMillis(),
+                    recentWindowMs = MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS,
+                    percentile = MAP_COVERAGE_RADIUS_PERCENTILE
+                )
+                radiusMeters?.let { center to it }
             }
         }
     }
@@ -6070,86 +6262,98 @@ private fun DetectionMapPage(
     var stableCoverageRadiusMeters by remember { mutableStateOf(0.0) }
     var stableAircraftCoverageCenter by remember { mutableStateOf<DetectionLocation?>(null) }
     var stableAircraftCoverageRadiusMeters by remember { mutableStateOf(0.0) }
+    var lastCoverageRadiusUpdateEpochMs by remember { mutableStateOf(0L) }
+    var lastAircraftCoverageRadiusUpdateEpochMs by remember { mutableStateOf(0L) }
+    var lastCoverageEvidenceEpochMs by remember { mutableStateOf(0L) }
+    var lastAircraftCoverageEvidenceEpochMs by remember { mutableStateOf(0L) }
     LaunchedEffect(showCoverageRadiusCircle, nonAircraftCoverageSnapshot, nonAircraftCoveragePins.size) {
         val latest = nonAircraftCoverageSnapshot
-        if (!showCoverageRadiusCircle || latest == null || nonAircraftCoveragePins.isEmpty()) {
+        val now = System.currentTimeMillis()
+        if (!showCoverageRadiusCircle) {
             stableCoverageCenter = null
             stableCoverageRadiusMeters = 0.0
+            lastCoverageRadiusUpdateEpochMs = 0L
+            lastCoverageEvidenceEpochMs = 0L
             return@LaunchedEffect
         }
+        if (nonAircraftCoveragePins.isEmpty()) {
+            if (now - lastCoverageEvidenceEpochMs >= MAP_COVERAGE_EMPTY_HOLD_MS) {
+                stableCoverageRadiusMeters = 0.0
+            }
+            return@LaunchedEffect
+        }
+        if (latest == null) {
+            // Keep last stable values if current location momentarily drops out.
+            return@LaunchedEffect
+        }
+
+        lastCoverageEvidenceEpochMs = now
 
         val targetCenter = latest.first
         val targetRadius = latest.second
+        stableCoverageCenter = targetCenter
 
-        val previousCenter = stableCoverageCenter
         val previousRadius = stableCoverageRadiusMeters
 
-        if (previousCenter == null) {
-            stableCoverageCenter = targetCenter
+        if (previousRadius <= 0.0) {
             stableCoverageRadiusMeters = targetRadius
             return@LaunchedEffect
         }
 
-        val centerShiftMeters = distanceFromLocationMeters(
-            fromLat = previousCenter.lat,
-            fromLon = previousCenter.lon,
-            toLat = targetCenter.lat,
-            toLon = targetCenter.lon
-        ) ?: 0.0
-        val centerShouldUpdate = centerShiftMeters >= MAP_COVERAGE_CENTER_JITTER_METERS
-        if (centerShouldUpdate) {
-            stableCoverageCenter = targetCenter
-        }
-
-        val radiusDeltaMeters = abs(targetRadius - previousRadius)
-        val radiusDeadband = maxOf(
-            MAP_COVERAGE_RADIUS_JITTER_METERS,
-            previousRadius * 0.05,
-            targetRadius * 0.03
-        )
-        val radiusShouldUpdate = radiusDeltaMeters >= radiusDeadband
-        if (radiusShouldUpdate) {
-            stableCoverageRadiusMeters = targetRadius
+        val stabilizedRadius = stabilizeCoverageRadius(previousRadius, targetRadius)
+        if (stabilizedRadius != previousRadius) {
+            val deltaMeters = abs(stabilizedRadius - previousRadius)
+            val intervalElapsed = now - lastCoverageRadiusUpdateEpochMs >= MAP_COVERAGE_RADIUS_UPDATE_MIN_INTERVAL_MS
+            val allowImmediate = deltaMeters >= MAP_COVERAGE_IMMEDIATE_RESIZE_DELTA_METERS
+            if (intervalElapsed || allowImmediate) {
+                stableCoverageRadiusMeters = stabilizedRadius
+                lastCoverageRadiusUpdateEpochMs = now
+            }
         }
     }
     LaunchedEffect(showCoverageRadiusCircle, aircraftCoverageSnapshot, aircraftCoveragePins.size) {
         val latest = aircraftCoverageSnapshot
-        if (!showCoverageRadiusCircle || latest == null || aircraftCoveragePins.isEmpty()) {
+        val now = System.currentTimeMillis()
+        if (!showCoverageRadiusCircle) {
             stableAircraftCoverageCenter = null
             stableAircraftCoverageRadiusMeters = 0.0
+            lastAircraftCoverageRadiusUpdateEpochMs = 0L
+            lastAircraftCoverageEvidenceEpochMs = 0L
             return@LaunchedEffect
         }
+        if (aircraftCoveragePins.isEmpty()) {
+            if (now - lastAircraftCoverageEvidenceEpochMs >= MAP_COVERAGE_EMPTY_HOLD_MS) {
+                stableAircraftCoverageRadiusMeters = 0.0
+            }
+            return@LaunchedEffect
+        }
+        if (latest == null) {
+            // Keep last stable values if current location momentarily drops out.
+            return@LaunchedEffect
+        }
+
+        lastAircraftCoverageEvidenceEpochMs = now
 
         val targetCenter = latest.first
         val targetRadius = latest.second
+        stableAircraftCoverageCenter = targetCenter
 
-        val previousCenter = stableAircraftCoverageCenter
         val previousRadius = stableAircraftCoverageRadiusMeters
 
-        if (previousCenter == null) {
-            stableAircraftCoverageCenter = targetCenter
+        if (previousRadius <= 0.0) {
             stableAircraftCoverageRadiusMeters = targetRadius
             return@LaunchedEffect
         }
 
-        val centerShiftMeters = distanceFromLocationMeters(
-            fromLat = previousCenter.lat,
-            fromLon = previousCenter.lon,
-            toLat = targetCenter.lat,
-            toLon = targetCenter.lon
-        ) ?: 0.0
-        if (centerShiftMeters >= MAP_COVERAGE_CENTER_JITTER_METERS) {
-            stableAircraftCoverageCenter = targetCenter
-        }
-
-        val radiusDeltaMeters = abs(targetRadius - previousRadius)
-        val radiusDeadband = maxOf(
-            MAP_COVERAGE_RADIUS_JITTER_METERS,
-            previousRadius * 0.05,
-            targetRadius * 0.03
-        )
-        if (radiusDeltaMeters >= radiusDeadband) {
-            stableAircraftCoverageRadiusMeters = targetRadius
+        val stabilizedRadius = stabilizeCoverageRadius(previousRadius, targetRadius)
+        if (stabilizedRadius != previousRadius) {
+            val deltaMeters = abs(stabilizedRadius - previousRadius)
+            val intervalElapsed = now - lastAircraftCoverageRadiusUpdateEpochMs >= MAP_COVERAGE_RADIUS_UPDATE_MIN_INTERVAL_MS
+            val allowImmediate = deltaMeters >= MAP_COVERAGE_IMMEDIATE_RESIZE_DELTA_METERS
+            if (intervalElapsed || allowImmediate) {
+                stableAircraftCoverageRadiusMeters = stabilizedRadius
+                lastAircraftCoverageRadiusUpdateEpochMs = now
+            }
         }
     }
     val cameraFocusPins by produceState(
@@ -6162,6 +6366,8 @@ private fun DetectionMapPage(
             samplePinsForCamera(focusPins, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
         }
     }
+    val proximityRenderCenter = coverageAnchorLocation ?: currentLocation ?: stableCoverageCenter
+    val aircraftRenderCenter = coverageAnchorLocation ?: currentLocation ?: stableAircraftCoverageCenter
     var autoPositioned by rememberSaveable { mutableStateOf(false) }
 
     val cameraPositionState = rememberCameraPositionState {
@@ -6375,6 +6581,18 @@ private fun DetectionMapPage(
         if (selectedNoFlyZoneId == null) return@LaunchedEffect
         if (renderedNoFlyZones.none { it.id == selectedNoFlyZoneId }) {
             selectedNoFlyZoneId = null
+        }
+    }
+
+    LaunchedEffect(renderedPins, selectedMapPin) {
+        val selected = selectedMapPin ?: return@LaunchedEffect
+        val stillVisible = renderedPins.any { pin ->
+            pin.source == selected.source &&
+                pin.primaryId == selected.primaryId &&
+                pin.timestampEpochMs == selected.timestampEpochMs
+        }
+        if (!stillVisible) {
+            selectedMapPin = null
         }
     }
 
@@ -6972,6 +7190,7 @@ private fun DetectionMapPage(
                     properties = mapProperties,
                     onMapClick = {
                         selectedNoFlyZoneId = null
+                        selectedMapPin = null
                     },
                     onMapLoaded = {
                         mapLoaded = true
@@ -7017,8 +7236,8 @@ private fun DetectionMapPage(
                             )
                         }
                     }
-                    if (showCoverageRadiusCircle && stableCoverageCenter != null && stableCoverageRadiusMeters > 10.0) {
-                        val center = stableCoverageCenter!!
+                    if (showCoverageRadiusCircle && proximityRenderCenter != null && stableCoverageRadiusMeters > 10.0) {
+                        val center = proximityRenderCenter!!
                         val coverageCenter = LatLng(center.lat, center.lon)
                         Circle(
                             center = coverageCenter,
@@ -7038,13 +7257,13 @@ private fun DetectionMapPage(
                                     arcStepDegrees = 6f
                                 ),
                                 fillColor = Color(0x33FFB74D),
-                                strokeColor = Color(0x70FFB74D),
-                                strokeWidth = 1.5f
+                                strokeColor = Color.Transparent,
+                                strokeWidth = 0f
                             )
                         }
                     }
-                    if (showCoverageRadiusCircle && stableAircraftCoverageCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
-                        val center = stableAircraftCoverageCenter!!
+                    if (showCoverageRadiusCircle && aircraftRenderCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
+                        val center = aircraftRenderCenter!!
                         val coverageCenter = LatLng(center.lat, center.lon)
                         Circle(
                             center = coverageCenter,
@@ -7064,8 +7283,8 @@ private fun DetectionMapPage(
                                     arcStepDegrees = 6f
                                 ),
                                 fillColor = Color(0x3D4FC3F7),
-                                strokeColor = Color(0x704FC3F7),
-                                strokeWidth = 1.5f
+                                strokeColor = Color.Transparent,
+                                strokeWidth = 0f
                             )
                         }
                     }
@@ -7095,7 +7314,28 @@ private fun DetectionMapPage(
                                     anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
                                     rotation = aircraftHeading,
                                     flat = pin.source == SourceCatalog.SOURCE_AIRCRAFT,
+                                    onClick = {
+                                        if (!showMarkerDetails) {
+                                            val selected = selectedMapPin
+                                            val isSameSelection =
+                                                selected != null &&
+                                                    selected.source == pin.source &&
+                                                    selected.primaryId == pin.primaryId &&
+                                                    selected.timestampEpochMs == pin.timestampEpochMs
+
+                                            if (isSameSelection) {
+                                                onPinDetailsClick(pin)
+                                            } else {
+                                                selectedMapPin = pin
+                                                selectedNoFlyZoneId = null
+                                            }
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    },
                                     onInfoWindowClick = {
+                                        selectedMapPin = null
                                         onPinDetailsClick(pin)
                                     }
                                 )
@@ -7140,6 +7380,42 @@ private fun DetectionMapPage(
                             ) {
                                 TextButton(onClick = { selectedNoFlyZoneId = null }) {
                                     Text("Close")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (selectedMapPin != null) {
+                    val pin = selectedMapPin!!
+                    Card(
+                        modifier = Modifier
+                            .align(androidx.compose.ui.Alignment.BottomCenter)
+                            .padding(10.dp)
+                            .fillMaxWidth(if (compactMapLayout) 0.95f else 0.7f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(pin.title, fontWeight = FontWeight.Bold)
+                            Text("Primary ID: ${pin.primaryId}")
+                            Text("Secondary ID: ${pin.secondaryId?.takeIf { it.isNotBlank() } ?: "n/a"}")
+                            Text(pin.snippetBuilder?.invoke() ?: "No details available")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(onClick = { selectedMapPin = null }) {
+                                    Text("Close")
+                                }
+                                Button(
+                                    onClick = {
+                                        selectedMapPin = null
+                                        onPinDetailsClick(pin)
+                                    }
+                                ) {
+                                    Text("Open Details")
                                 }
                             }
                         }
@@ -7534,6 +7810,7 @@ private data class MapPin(
     val timestampEpochMs: Long,
     val source: String,
     val primaryId: String,
+    val secondaryId: String?,
     val encounterTimestampEpochMs: Long?,
     val aircraftIconType: String? = null,
     val headingDegrees: Double? = null,
@@ -7611,17 +7888,75 @@ private fun buildRadarSweepSectorPoints(
 
 private fun normalizeCoverageRadiusMeters(radiusMeters: Double): Double {
     if (!radiusMeters.isFinite() || radiusMeters <= 0.0) return 0.0
-    val stepMeters = 25.0
+    val stepMeters = 50.0
     return (radiusMeters / stepMeters).roundToInt() * stepMeters
+}
+
+private fun calculateRealtimeCoverageRadiusMeters(
+    center: DetectionLocation,
+    pins: List<MapPin>,
+    nowEpochMs: Long,
+    recentWindowMs: Long,
+    percentile: Double
+): Double? {
+    if (pins.isEmpty()) return null
+
+    val clampedPercentile = percentile.coerceIn(0.50, 1.0)
+    fun distancesFrom(candidatePins: List<MapPin>): List<Double> = candidatePins
+        .mapNotNull { pin ->
+            distanceFromLocationMeters(
+                fromLat = center.lat,
+                fromLon = center.lon,
+                toLat = pin.position.latitude,
+                toLon = pin.position.longitude
+            )
+        }
+        .filter { it.isFinite() && it > 0.0 }
+        .sorted()
+
+    val recentPins = pins.filter { pin ->
+        val ageMs = nowEpochMs - pin.timestampEpochMs
+        ageMs in 0..recentWindowMs
+    }
+
+    val candidateDistances = distancesFrom(recentPins).ifEmpty {
+        distancesFrom(pins)
+    }
+    if (candidateDistances.isEmpty()) return null
+
+    val percentileIndex = ((candidateDistances.lastIndex.toDouble()) * clampedPercentile)
+        .roundToInt()
+        .coerceIn(0, candidateDistances.lastIndex)
+    return normalizeCoverageRadiusMeters(candidateDistances[percentileIndex])
+}
+
+private fun stabilizeCoverageRadius(previousRadiusMeters: Double, targetRadiusMeters: Double): Double {
+    if (previousRadiusMeters <= 0.0) return targetRadiusMeters
+
+    val radiusDeltaMeters = targetRadiusMeters - previousRadiusMeters
+    val radiusDeadband = maxOf(
+        MAP_COVERAGE_RADIUS_JITTER_METERS * 1.6,
+        previousRadiusMeters * 0.08,
+        targetRadiusMeters * 0.05
+    )
+    if (abs(radiusDeltaMeters) < radiusDeadband) {
+        return previousRadiusMeters
+    }
+
+    val softenedDelta = radiusDeltaMeters * 0.28
+    val limitedDelta = softenedDelta.coerceIn(
+        -MAP_COVERAGE_RADIUS_MAX_STEP_METERS * 0.75,
+        MAP_COVERAGE_RADIUS_MAX_STEP_METERS * 0.75
+    )
+    return normalizeCoverageRadiusMeters(
+        (previousRadiusMeters + limitedDelta).coerceAtLeast(0.0)
+    )
 }
 
 private fun containedSweepRadiusMeters(containerRadiusMeters: Double): Double {
     val clampedRadius = containerRadiusMeters.coerceAtLeast(0.0)
     if (clampedRadius <= 0.0) return 0.0
-    val proportionalInset = clampedRadius * 0.03
-    val fixedInset = 20.0
-    val insetMeters = maxOf(proportionalInset, fixedInset)
-    return (clampedRadius - insetMeters).coerceAtLeast(0.0)
+    return clampedRadius
 }
 
 private fun centroidOfDetectionPolygon(points: List<DetectionLocation>): DetectionLocation? {
@@ -7748,7 +8083,8 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
     deviceMapLiveWindowMs: Long,
     deviceMapAircraftLiveWindowMs: Long,
     maxDeviceCandidates: Int,
-    suppressLikelyRandomizedWifiOneOffs: Boolean = true
+    suppressLikelyRandomizedWifiOneOffs: Boolean = true,
+    suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): List<MapPin> {
     if (encounters.isEmpty()) return emptyList()
 
@@ -7779,7 +8115,8 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
                     source = latest.source,
                     primaryId = latest.primaryId,
                     seenCount = deviceEncounters.size,
-                    suppressionEnabled = suppressLikelyRandomizedWifiOneOffs
+                    wifiSuppressionEnabled = suppressLikelyRandomizedWifiOneOffs,
+                    bleSuppressionEnabled = suppressLikelyRandomizedBleOneOffs
                 )
             ) {
                 return@mapNotNull null
@@ -7836,6 +8173,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             title = buildPinTitle(
                 sourceLabel = listSourceLabel(sourceName, latest.secondaryId),
                 primaryId = latest.primaryId,
+                secondaryId = latest.secondaryId,
                 motionBadge = motionBadge
             ),
             snippetBuilder = {
@@ -7848,6 +8186,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             timestampEpochMs = latest.timestampEpochMs,
             source = sourceName,
             primaryId = latest.primaryId,
+            secondaryId = latest.secondaryId,
             encounterTimestampEpochMs = null,
             aircraftIconType = null,
             headingDegrees = null,
@@ -8031,6 +8370,16 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
         secondaryIdLabel = "Device Name"
     ),
     SourceTypeUiMeta(
+        source = SourceCatalog.SOURCE_BLUETOOTH_LE_SWEEP,
+        scanType = SourceCatalog.KEY_BLE,
+        settingsLabel = "Bluetooth LE Sweep",
+        legendLabel = "BLE SWEEP",
+        listLabel = "BLE SWEEP",
+        glyph = "BLS",
+        hue = BitmapDescriptorFactory.HUE_GREEN,
+        color = Color(0xFF66BB6A)
+    ),
+    SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_BLUETOOTH_CLASSIC,
         scanType = SourceCatalog.KEY_BT_CLASSIC,
         settingsLabel = "Bluetooth Classic",
@@ -8128,14 +8477,19 @@ private fun legendItemsForPins(pins: List<MapPin>): List<PinLegendItem> {
     }
 }
 
-private fun buildPinTitle(sourceLabel: String, primaryId: String, motionBadge: String?): String {
+private fun buildPinTitle(sourceLabel: String, primaryId: String, secondaryId: String?, motionBadge: String?): String {
     val shortId = if (primaryId.length <= 18) primaryId else primaryId.take(15) + "..."
+    val shortSecondary = secondaryId
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { value -> if (value.length <= 16) value else value.take(13) + "..." }
     val badge = when (motionBadge) {
         "MOVING" -> "[M] "
         "STATIC" -> "[S] "
         else -> ""
     }
-    return "$badge$sourceLabel • $shortId"
+    val secondarySegment = shortSecondary?.let { " • $it" }.orEmpty()
+    return "$badge$sourceLabel • $shortId$secondarySegment"
 }
 
 private fun buildThreeLineSnippet(line1: String, line2: String, line3: String): String {
@@ -8588,8 +8942,10 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
         add(SourceCatalog.KEY_WIFI)
         add(SourceCatalog.KEY_WIFI_DIRECT)
     }
-    if (sensorGateSettings.bluetoothEnabled) {
+    if (sensorGateSettings.bluetoothLeEnabled) {
         add(SourceCatalog.KEY_BLE)
+    }
+    if (sensorGateSettings.bluetoothClassicEnabled) {
         add(SourceCatalog.KEY_BT_CLASSIC)
     }
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
@@ -9192,6 +9548,7 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.WIFI_SWEEP -> "Wi-Fi Sweep Aggregate Details" to readWifiAccessPointFields(encounter.rawPayloadJson)
         EncounterSource.WIFI_DIRECT -> "Wi-Fi Direct Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_LE -> "Bluetooth LE Device Details" to readBleDeviceFields(encounter.rawPayloadJson)
+        EncounterSource.BLUETOOTH_LE_SWEEP -> "Bluetooth LE Sweep Aggregate Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.BLUETOOTH_CLASSIC -> "Bluetooth Classic Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.CELL -> "Cell Tower Details" to readCellTowerFields(encounter.rawPayloadJson)
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readRemoteIdFields(encounter.rawPayloadJson)
@@ -10641,6 +10998,7 @@ private fun DevicesEncountersPage(
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
+    bleRandomizedOneOffSuppressionEnabled: Boolean,
     onDeviceClick: (DeviceItem) -> Unit,
     onEncounterClick: (Encounter) -> Unit
 ) {
@@ -10671,6 +11029,7 @@ private fun DevicesEncountersPage(
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
+                    bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                     onDeviceClick = onDeviceClick
                 )
             } else {
@@ -10693,6 +11052,7 @@ private fun DevicesPage(
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     wifiRandomizedOneOffSuppressionEnabled: Boolean = true,
+    bleRandomizedOneOffSuppressionEnabled: Boolean = true,
     onDeviceClick: (DeviceItem) -> Unit
 ) {
     val context = LocalContext.current
@@ -10713,13 +11073,21 @@ private fun DevicesPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
     val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
-    val devices = remember(selectedEncounters, sortMode, approachDetectionEnabled, ownedDeviceKeys, wifiRandomizedOneOffSuppressionEnabled) {
+    val devices = remember(
+        selectedEncounters,
+        sortMode,
+        approachDetectionEnabled,
+        ownedDeviceKeys,
+        wifiRandomizedOneOffSuppressionEnabled,
+        bleRandomizedOneOffSuppressionEnabled
+    ) {
         buildDeviceItems(
             encounters = selectedEncounters,
             sortMode = sortMode,
             approachDetectionEnabled = approachDetectionEnabled,
             ownedDeviceKeys = ownedDeviceKeys,
-            suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled
+            suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
+            suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
         )
     }
     val sourceOptions = remember(devices) {
@@ -11131,7 +11499,8 @@ private fun buildDeviceItems(
     sortMode: DeviceSortMode = DeviceSortMode.LAST_SEEN,
     approachDetectionEnabled: Boolean = true,
     ownedDeviceKeys: Set<String> = emptySet(),
-    suppressLikelyRandomizedWifiOneOffs: Boolean = true
+    suppressLikelyRandomizedWifiOneOffs: Boolean = true,
+    suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): List<DeviceItem> =
     encounters
         .groupBy { it.source.name to it.primaryId }
@@ -11142,7 +11511,8 @@ private fun buildDeviceItems(
                 groupedEncounters = groupedEncounters,
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
-                suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs
+                suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs,
+                suppressLikelyRandomizedBleOneOffs = suppressLikelyRandomizedBleOneOffs
             )
         }
         .let { deviceItems ->
@@ -11161,14 +11531,16 @@ private fun buildSingleDeviceItem(
     groupedEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
-    suppressLikelyRandomizedWifiOneOffs: Boolean = true
+    suppressLikelyRandomizedWifiOneOffs: Boolean = true,
+    suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): DeviceItem? = buildDeviceItemForGroup(
     source = source,
     primaryId = primaryId,
     groupedEncounters = groupedEncounters,
     approachDetectionEnabled = approachDetectionEnabled,
     ownedDeviceKeys = ownedDeviceKeys,
-    suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs
+    suppressLikelyRandomizedWifiOneOffs = suppressLikelyRandomizedWifiOneOffs,
+    suppressLikelyRandomizedBleOneOffs = suppressLikelyRandomizedBleOneOffs
 )
 
 private fun buildDeviceItemForGroup(
@@ -11177,7 +11549,8 @@ private fun buildDeviceItemForGroup(
     groupedEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
-    suppressLikelyRandomizedWifiOneOffs: Boolean = true
+    suppressLikelyRandomizedWifiOneOffs: Boolean = true,
+    suppressLikelyRandomizedBleOneOffs: Boolean = true
 ): DeviceItem? {
     if (groupedEncounters.isEmpty()) return null
     if (
@@ -11185,7 +11558,8 @@ private fun buildDeviceItemForGroup(
             source = source,
             primaryId = primaryId,
             seenCount = groupedEncounters.size,
-            suppressionEnabled = suppressLikelyRandomizedWifiOneOffs
+            wifiSuppressionEnabled = suppressLikelyRandomizedWifiOneOffs,
+            bleSuppressionEnabled = suppressLikelyRandomizedBleOneOffs
         )
     ) {
         return null
@@ -11278,23 +11652,41 @@ private fun shouldSuppressLikelyRandomizedWifiNoise(
     source: EncounterSource,
     primaryId: String,
     seenCount: Int,
-    suppressionEnabled: Boolean = true
+    wifiSuppressionEnabled: Boolean = true,
+    bleSuppressionEnabled: Boolean = true
 ): Boolean {
-    if (!suppressionEnabled) return false
-    if (source != EncounterSource.WIFI) return false
-    return isLikelyRandomizedMacAddress(primaryId) && seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+    val wifiShouldSuppress =
+        source == EncounterSource.WIFI &&
+            wifiSuppressionEnabled &&
+            isLikelyRandomizedMacAddress(primaryId) &&
+            seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+    val bleShouldSuppress =
+        source == EncounterSource.BLUETOOTH_LE &&
+            bleSuppressionEnabled &&
+            isLikelyRandomizedMacAddress(primaryId) &&
+            seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+
+    return wifiShouldSuppress || bleShouldSuppress
 }
 
 private fun shouldSuppressLikelyRandomizedWifiNoise(
     source: String,
     primaryId: String,
     seenCount: Int,
-    suppressionEnabled: Boolean = true
+    wifiSuppressionEnabled: Boolean = true,
+    bleSuppressionEnabled: Boolean = true
 ): Boolean {
-    if (!suppressionEnabled) return false
-    return source == EncounterSource.WIFI.name &&
-        isLikelyRandomizedMacAddress(primaryId) &&
-        seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+    val wifiShouldSuppress =
+        source == EncounterSource.WIFI.name &&
+            wifiSuppressionEnabled &&
+            isLikelyRandomizedMacAddress(primaryId) &&
+            seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+    val bleShouldSuppress =
+        source == EncounterSource.BLUETOOTH_LE.name &&
+            bleSuppressionEnabled &&
+            isLikelyRandomizedMacAddress(primaryId) &&
+            seenCount < WIFI_RANDOMIZED_MIN_SIGHTINGS
+    return wifiShouldSuppress || bleShouldSuppress
 }
 
 private fun isLikelyRandomizedMacAddress(macAddress: String?): Boolean {
@@ -11318,7 +11710,26 @@ private fun countSuppressedLikelyRandomizedWifiOneOffDevices(
                 source = key.first,
                 primaryId = key.second,
                 seenCount = groupedEncounters.size,
-                suppressionEnabled = suppressionEnabled
+                wifiSuppressionEnabled = suppressionEnabled,
+                bleSuppressionEnabled = false
+            )
+        }
+}
+
+private fun countSuppressedLikelyRandomizedBleOneOffDevices(
+    encounters: List<Encounter>,
+    suppressionEnabled: Boolean
+): Int {
+    if (!suppressionEnabled || encounters.isEmpty()) return 0
+    return encounters
+        .groupBy { it.source.name to it.primaryId }
+        .count { (key, groupedEncounters) ->
+            shouldSuppressLikelyRandomizedWifiNoise(
+                source = key.first,
+                primaryId = key.second,
+                seenCount = groupedEncounters.size,
+                wifiSuppressionEnabled = false,
+                bleSuppressionEnabled = suppressionEnabled
             )
         }
 }
