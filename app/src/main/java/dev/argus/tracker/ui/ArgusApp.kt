@@ -391,9 +391,7 @@ private data class MotionSignal(
 private data class SensorGateSettings(
     val wifiEnabled: Boolean,
     val bluetoothLeEnabled: Boolean,
-    val bluetoothClassicEnabled: Boolean,
     val cellularEnabled: Boolean,
-    val remoteIdEnabled: Boolean,
     val aviationAdsbEnabled: Boolean,
     val aviationPublicEnabled: Boolean,
     val uwbEnabled: Boolean,
@@ -608,9 +606,7 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
     SensorGateSettings(
         wifiEnabled = ScanSettings.isWifiSensorEnabled(context),
         bluetoothLeEnabled = ScanSettings.isBleSensorEnabled(context),
-        bluetoothClassicEnabled = ScanSettings.isBluetoothClassicSensorEnabled(context),
         cellularEnabled = ScanSettings.isCellularSensorEnabled(context),
-        remoteIdEnabled = ScanSettings.isRemoteIdSensorEnabled(context),
         aviationAdsbEnabled = ScanSettings.isAviationAdsbSensorEnabled(context),
         aviationPublicEnabled = ScanSettings.isAviationPublicSensorEnabled(context),
         uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
@@ -653,6 +649,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
     var sourceScanIntervals by remember { mutableStateOf(ScanSettings.getAllSourceScanIntervalSeconds(context)) }
     var sourceLastScanEpochs by remember { mutableStateOf(ScanSettings.getAllSourceLastScanEpochMs(context)) }
+    var sourceLastRawObservationEpochs by remember {
+        mutableStateOf(ScanSettings.getAllSourceLastRawObservationEpochMs(context))
+    }
     var sensorGateSettings by remember { mutableStateOf(readSensorGateSettings(context)) }
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
@@ -952,6 +951,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+        sourceLastRawObservationEpochs = ScanSettings.getAllSourceLastRawObservationEpochMs(context)
         foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
@@ -1074,6 +1074,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 append('|')
                 append(state.sourceLastScanEpochs.hashCode())
                 append('|')
+                append(state.sourceLastRawObservationEpochs.hashCode())
+                append('|')
                 append(state.scanIntervalChangeEvents.hashCode())
             }
             if (signature == lastOperationalStateSignature) return@collect
@@ -1083,6 +1085,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             sourceScanTimings = state.sourceScanTimings
             sourceScanIntervals = state.sourceScanIntervals
             sourceLastScanEpochs = state.sourceLastScanEpochs
+            sourceLastRawObservationEpochs = state.sourceLastRawObservationEpochs
             scanIntervalChangeEvents = state.scanIntervalChangeEvents
             errorLogs = OperationalErrorLogStore.read(context)
         }
@@ -1418,9 +1421,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             when (sensor) {
                                 "wifi" -> ScanSettings.setWifiSensorEnabled(context, enabled)
                                 "bluetooth_le" -> ScanSettings.setBleSensorEnabled(context, enabled)
-                                "bluetooth_classic" -> ScanSettings.setBluetoothClassicSensorEnabled(context, enabled)
                                 "cellular" -> ScanSettings.setCellularSensorEnabled(context, enabled)
-                                "remote_id" -> ScanSettings.setRemoteIdSensorEnabled(context, enabled)
                                 "aviation_adsb" -> ScanSettings.setAviationAdsbSensorEnabled(context, enabled)
                                 "aviation_public" -> ScanSettings.setAviationPublicSensorEnabled(context, enabled)
                                 "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
@@ -1475,8 +1476,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     suppressedWifiRandomizedOneOffCount = suppressedWifiRandomizedOneOffCount,
                     suppressedBleRandomizedOneOffCount = suppressedBleRandomizedOneOffCount,
                     sourceScanIntervals = sourceScanIntervals,
+                    sourceLastScanEpochs = sourceLastScanEpochs,
                     lastScanDurationMs = lastScanDurationMs,
                     sourceScanTimings = sourceScanTimings,
+                    sourceLastRawObservationEpochs = sourceLastRawObservationEpochs,
                     scanIntervalChangeEvents = scanIntervalChangeEvents,
                     appThemeMode = appThemeMode,
                     approachDetectionEnabled = approachDetectionEnabled,
@@ -1673,6 +1676,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        sourceLastRawObservationEpochs = ScanSettings.getAllSourceLastRawObservationEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
@@ -1721,6 +1725,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
                         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
                         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+                        sourceLastRawObservationEpochs = ScanSettings.getAllSourceLastRawObservationEpochMs(context)
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.getAppThemeMode(context)) }
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
@@ -2870,17 +2875,10 @@ private fun HomePage(
                         ),
                         HomeSensorToggle(
                             "bluetooth_le",
-                            "Bluetooth LE",
-                            "Low-energy beacon scan",
+                            "Bluetooth (LE + Classic + Remote ID)",
+                            "Combined Bluetooth sensor collection",
                             sensorGateSettings.bluetoothLeEnabled,
-                            sensorStatusByName["Bluetooth LE"]
-                        ),
-                        HomeSensorToggle(
-                            "bluetooth_classic",
-                            "Bluetooth Classic",
-                            "Legacy Bluetooth device inquiry",
-                            sensorGateSettings.bluetoothClassicEnabled,
-                            sensorStatusByName["Bluetooth Classic"]
+                            sensorStatusByName["Bluetooth (LE + Classic + Remote ID)"]
                         ),
                         HomeSensorToggle(
                             "cellular",
@@ -2888,13 +2886,6 @@ private fun HomePage(
                             "Cell and network telemetry",
                             sensorGateSettings.cellularEnabled,
                             sensorStatusByName["Cellular"]
-                        ),
-                        HomeSensorToggle(
-                            "remote_id",
-                            "Remote ID",
-                            "Remote ID identity broadcasts",
-                            sensorGateSettings.remoteIdEnabled,
-                            sensorStatusByName["Remote ID"]
                         ),
                         HomeSensorToggle(
                             "aviation_adsb",
@@ -3034,8 +3025,10 @@ private fun AppSettingsPage(
     suppressedWifiRandomizedOneOffCount: Int,
     suppressedBleRandomizedOneOffCount: Int,
     sourceScanIntervals: Map<String, Long>,
+    sourceLastScanEpochs: Map<String, Long>,
     lastScanDurationMs: Long?,
     sourceScanTimings: List<ScanSettings.SourceScanTiming>,
+    sourceLastRawObservationEpochs: Map<String, Long>,
     scanIntervalChangeEvents: List<ScanSettings.IntervalChangeEvent>,
     appThemeMode: AppThemeMode,
     approachDetectionEnabled: Boolean,
@@ -3324,6 +3317,8 @@ private fun AppSettingsPage(
             val timingBySource = sourceScanTimings.associateBy { it.sourceType }
             items(ScanSettings.SOURCE_TYPES) { sourceType ->
                 val timing = timingBySource[sourceType]
+                val lastScanEpochMs = sourceLastScanEpochs[sourceType] ?: 0L
+                val lastRawObservationEpochMs = sourceLastRawObservationEpochs[sourceType] ?: 0L
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(12.dp),
@@ -3339,6 +3334,26 @@ private fun AppSettingsPage(
                             Text("Last: ${formatScanDuration(timing.lastDurationMs)} | Avg: ${formatScanDuration(timing.averageDurationMs)}")
                             Text("p50: ${formatScanDuration(timing.p50DurationMs)} | p95: ${formatScanDuration(timing.p95DurationMs)} | Max: ${formatScanDuration(timing.maxDurationMs)}")
                             Text("Suggested safe interval: ${ScanSettings.formatInterval(suggestedInterval)}")
+                        }
+                        if (sourceType == SourceCatalog.KEY_BT_CLASSIC) {
+                            val lastScanLabel = if (lastScanEpochMs > 0L) {
+                                "${formatEpoch(lastScanEpochMs)} (${formatMapPinAge(lastScanEpochMs)} ago)"
+                            } else {
+                                "Never"
+                            }
+                            val rawSightingLabel = if (lastRawObservationEpochMs > 0L) {
+                                "${formatEpoch(lastRawObservationEpochMs)} (${formatMapPinAge(lastRawObservationEpochMs)} ago)"
+                            } else {
+                                "Never"
+                            }
+                            Text("Classic scan attempt: $lastScanLabel")
+                            Text("Raw classic sighting (pre-pipeline): $rawSightingLabel")
+                            if (lastScanEpochMs > 0L && lastRawObservationEpochMs <= 0L) {
+                                Text(
+                                    "No ACTION_FOUND frames observed yet. Check Bluetooth scanning/location settings and test near discoverable Classic hardware.",
+                                    color = Color(0xFFE65100)
+                                )
+                            }
                         }
                     }
                 }
@@ -4368,11 +4383,26 @@ private fun DetectionPage(
                     .map { acc ->
                         val latest = acc.latest
                         val isLive = latest.timestampEpochMs >= aircraftLiveCutoffEpochMs
+                        val sourceLabel = listSourceLabel(latest.source.name, latest.secondaryId)
+                        val pinTitle = buildPinTitle(
+                            sourceLabel = sourceLabel,
+                            primaryId = latest.primaryId,
+                            secondaryId = latest.secondaryId,
+                            motionBadge = null
+                        )
                         val freshnessSnippet = if (isLive) {
                             "Live • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
                         } else {
                             "Recent • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
                         }
+                        val line1 = "Seen ${acc.seenCount}x"
+                        val line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}"
+                        val line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
+                        val pinSnippet = buildThreeLineSnippet(
+                            line1 = line1,
+                            line2 = line2,
+                            line3 = line3
+                        )
                         val derivedHeading = estimateHeadingFromEncounters(
                             previous = acc.previous,
                             latest = latest
@@ -4380,19 +4410,21 @@ private fun DetectionPage(
                         val visualHints = readAircraftVisualHints(latest.rawPayloadJson)
                         MapPin(
                             position = LatLng(latest.lat!!, latest.lon!!),
-                            title = buildPinTitle(
-                                sourceLabel = listSourceLabel(latest.source.name, latest.secondaryId),
+                            title = pinTitle,
+                            snippetBuilder = {
+                                pinSnippet
+                            },
+                            searchableMetadata = buildPinSearchableMetadata(
+                                source = latest.source.name,
                                 primaryId = latest.primaryId,
                                 secondaryId = latest.secondaryId,
-                                motionBadge = null
-                            ),
-                            snippetBuilder = {
-                                buildThreeLineSnippet(
-                                    line1 = "Seen ${acc.seenCount}x",
-                                    line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}",
-                                    line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
+                                title = pinTitle,
+                                snippet = pinSnippet,
+                                rawPayloads = listOfNotNull(
+                                    latest.rawPayloadJson,
+                                    acc.previous?.rawPayloadJson
                                 )
-                            },
+                            ),
                             timestampEpochMs = latest.timestampEpochMs,
                             source = latest.source.name,
                             primaryId = latest.primaryId,
@@ -4546,22 +4578,38 @@ private fun DetectionPage(
             } else {
                 "Recent • Seen ${formatMapPinAge(candidate.latestTimestampEpochMs)} ago"
             }
+            val sourceLabel = listSourceLabel(candidate.source, candidate.secondaryId)
+            val pinTitle = buildPinTitle(
+                sourceLabel = sourceLabel,
+                primaryId = candidate.primaryId,
+                secondaryId = candidate.secondaryId,
+                motionBadge = motionBadge
+            )
+            val line1 = "Seen ${candidate.seenCount}x"
+            val line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet"
+            val line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
+            val pinSnippet = buildThreeLineSnippet(
+                line1 = line1,
+                line2 = line2,
+                line3 = line3
+            )
 
             MapPin(
                 position = LatLng(location.lat, location.lon),
-                title = buildPinTitle(
-                    sourceLabel = listSourceLabel(candidate.source, candidate.secondaryId),
+                title = pinTitle,
+                snippetBuilder = {
+                    pinSnippet
+                },
+                searchableMetadata = buildPinSearchableMetadata(
+                    source = candidate.source,
                     primaryId = candidate.primaryId,
                     secondaryId = candidate.secondaryId,
-                    motionBadge = motionBadge
+                    title = pinTitle,
+                    snippet = pinSnippet,
+                    rawPayloads = candidate.encounters
+                        .sortedByDescending { it.timestampEpochMs }
+                        .map { it.rawPayloadJson }
                 ),
-                snippetBuilder = {
-                    buildThreeLineSnippet(
-                        line1 = "Seen ${candidate.seenCount}x",
-                        line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet",
-                        line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
-                    )
-                },
                 timestampEpochMs = candidate.latestTimestampEpochMs,
                 source = candidate.source,
                 primaryId = candidate.primaryId,
@@ -6135,6 +6183,7 @@ private fun DetectionMapPage(
     var mapError by remember { mutableStateOf<String?>(null) }
     var mapTouchInProgress by remember { mutableStateOf(false) }
     var hiddenLegendSources by remember { mutableStateOf(setOf<String>()) }
+    var metadataFilterQuery by rememberSaveable { mutableStateOf("") }
     val useScrollableLayout = enableVerticalScroll && controlsVisible
     var visiblePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     LaunchedEffect(pins, pinLimit) {
@@ -6145,12 +6194,12 @@ private fun DetectionMapPage(
     val legendItems = remember(visiblePins) { legendItemsForPins(visiblePins) }
     val legendSources = remember(legendItems) { legendItems.map { it.source }.toSet() }
     var filteredVisiblePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
-    LaunchedEffect(visiblePins, hiddenLegendSources) {
+    LaunchedEffect(visiblePins, hiddenLegendSources, metadataFilterQuery) {
+        val query = metadataFilterQuery.trim()
         filteredVisiblePins = withContext(Dispatchers.Default) {
-            if (hiddenLegendSources.isEmpty()) {
-                visiblePins
-            } else {
-                visiblePins.filter { pin -> pin.source !in hiddenLegendSources }
+            visiblePins.filter { pin ->
+                val sourceVisible = pin.source !in hiddenLegendSources
+                sourceVisible && pinMatchesMetadataQuery(pin, query)
             }
         }
     }
@@ -6693,6 +6742,20 @@ private fun DetectionMapPage(
                     }
 
                     Text(mapDescription, style = MaterialTheme.typography.bodySmall)
+
+                    OutlinedTextField(
+                        value = metadataFilterQuery,
+                        onValueChange = { metadataFilterQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Pin Metadata Search") },
+                        placeholder = { Text("Filter by ID, source, snippet, payload...") },
+                        singleLine = true
+                    )
+                    Text(
+                        "Matches ${filteredVisiblePins.size}/${visiblePins.size} visible pins",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     if (legendItems.isNotEmpty()) {
                         FlowRow(
@@ -7646,6 +7709,19 @@ private fun DetectionMapPage(
                             }
                             Text("Pin Color Legend", fontWeight = FontWeight.Bold)
                             if (legendItems.isNotEmpty()) {
+                                OutlinedTextField(
+                                    value = metadataFilterQuery,
+                                    onValueChange = { metadataFilterQuery = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Pin Metadata Search") },
+                                    placeholder = { Text("Filter by ID, source, snippet, payload...") },
+                                    singleLine = true
+                                )
+                                Text(
+                                    "Matches ${filteredVisiblePins.size}/${visiblePins.size} visible pins",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                                 FlowRow(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -7815,6 +7891,7 @@ private data class MapPin(
     val position: LatLng,
     val title: String,
     val snippetBuilder: (() -> String)? = null,
+    val searchableMetadata: String = "",
     val timestampEpochMs: Long,
     val source: String,
     val primaryId: String,
@@ -7843,6 +7920,58 @@ private sealed class MapRenderItem {
         val summary: String,
         val isLive: Boolean
     ) : MapRenderItem()
+}
+
+private fun pinMatchesMetadataQuery(pin: MapPin, query: String): Boolean {
+    val normalizedQuery = query.trim().lowercase(Locale.US)
+    if (normalizedQuery.isBlank()) return true
+
+    val searchable = if (pin.searchableMetadata.isNotBlank()) {
+        pin.searchableMetadata
+    } else {
+        buildPinSearchableMetadata(
+            source = pin.source,
+            primaryId = pin.primaryId,
+            secondaryId = pin.secondaryId,
+            title = pin.title,
+            snippet = pin.snippetBuilder?.invoke(),
+            rawPayloads = emptyList()
+        )
+    }
+
+    return searchable.contains(normalizedQuery)
+}
+
+private fun buildPinSearchableMetadata(
+    source: String,
+    primaryId: String,
+    secondaryId: String?,
+    title: String,
+    snippet: String?,
+    rawPayloads: List<String>,
+    maxPayloads: Int = 8,
+    maxPayloadCharsEach: Int = 900
+): String {
+    val payloadSection = rawPayloads
+        .asSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .take(maxPayloads)
+        .joinToString(separator = " ") { it.take(maxPayloadCharsEach) }
+
+    return buildString {
+        append(source)
+        append(' ')
+        append(primaryId)
+        append(' ')
+        append(secondaryId.orEmpty())
+        append(' ')
+        append(title)
+        append(' ')
+        append(snippet.orEmpty())
+        append(' ')
+        append(payloadSection)
+    }.lowercase(Locale.US)
 }
 
 private fun offsetLatLng(base: LatLng, distanceMeters: Double, bearingDegrees: Double): LatLng {
@@ -8175,22 +8304,38 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
         } else {
             "Recent • Seen ${formatMapPinAge(latest.timestampEpochMs)} ago"
         }
+        val sourceLabel = listSourceLabel(sourceName, latest.secondaryId)
+        val pinTitle = buildPinTitle(
+            sourceLabel = sourceLabel,
+            primaryId = latest.primaryId,
+            secondaryId = latest.secondaryId,
+            motionBadge = motionBadge
+        )
+        val line1 = "Seen ${deviceEncounters.size}x"
+        val line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}$approachSnippet"
+        val line3 = "Approx range ${resolved.approximateRangeMeters?.let { formatDistanceFeetMiles(it) } ?: "n/a"}$ownershipSnippet"
+        val pinSnippet = buildThreeLineSnippet(
+            line1 = line1,
+            line2 = line2,
+            line3 = line3
+        )
 
         pins += MapPin(
             position = LatLng(resolved.lat, resolved.lon),
-            title = buildPinTitle(
-                sourceLabel = listSourceLabel(sourceName, latest.secondaryId),
+            title = pinTitle,
+            snippetBuilder = {
+                pinSnippet
+            },
+            searchableMetadata = buildPinSearchableMetadata(
+                source = sourceName,
                 primaryId = latest.primaryId,
                 secondaryId = latest.secondaryId,
-                motionBadge = motionBadge
+                title = pinTitle,
+                snippet = pinSnippet,
+                rawPayloads = deviceEncounters
+                    .sortedByDescending { it.timestampEpochMs }
+                    .map { it.rawPayloadJson }
             ),
-            snippetBuilder = {
-                buildThreeLineSnippet(
-                    line1 = "Seen ${deviceEncounters.size}x",
-                    line2 = "$freshnessSnippet • Last ${formatEpoch(latest.timestampEpochMs)}$approachSnippet",
-                    line3 = "Approx range ${resolved.approximateRangeMeters?.let { formatDistanceFeetMiles(it) } ?: "n/a"}$ownershipSnippet"
-                )
-            },
             timestampEpochMs = latest.timestampEpochMs,
             source = sourceName,
             primaryId = latest.primaryId,
@@ -8368,9 +8513,9 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
     SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_BLUETOOTH_LE,
         scanType = SourceCatalog.KEY_BLE,
-        settingsLabel = "Bluetooth LE",
-        legendLabel = "BLUETOOTH LE",
-        listLabel = "BLUETOOTH LE",
+        settingsLabel = "Bluetooth (LE + Classic + Remote ID)",
+        legendLabel = "BLUETOOTH",
+        listLabel = "BLUETOOTH",
         glyph = "BLE",
         hue = BitmapDescriptorFactory.HUE_GREEN,
         color = Color(0xFF43A047),
@@ -8952,12 +9097,10 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
     }
     if (sensorGateSettings.bluetoothLeEnabled) {
         add(SourceCatalog.KEY_BLE)
-    }
-    if (sensorGateSettings.bluetoothClassicEnabled) {
         add(SourceCatalog.KEY_BT_CLASSIC)
+        add(SourceCatalog.KEY_REMOTE_ID)
     }
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
-    if (sensorGateSettings.remoteIdEnabled) add(SourceCatalog.KEY_REMOTE_ID)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
     if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)
     if (sensorGateSettings.uwbEnabled) add(SourceCatalog.KEY_UWB)

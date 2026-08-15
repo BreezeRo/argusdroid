@@ -61,19 +61,9 @@ object SensorStatusProvider {
                 factoredByArgus = ScanSettings.isWifiSensorEnabled(context)
             ),
             SensorStatus(
-                name = "Bluetooth LE",
+                name = "Bluetooth (LE + Classic + Remote ID)",
                 isOn = bleOn,
                 factoredByArgus = ScanSettings.isBleSensorEnabled(context)
-            ),
-            SensorStatus(
-                name = "Bluetooth Classic",
-                isOn = bleOn,
-                factoredByArgus = ScanSettings.isBluetoothClassicSensorEnabled(context)
-            ),
-            SensorStatus(
-                name = "Remote ID",
-                isOn = ScanSettings.isRemoteIdSensorEnabled(context),
-                factoredByArgus = ScanSettings.isRemoteIdSensorEnabled(context)
             ),
             SensorStatus(
                 name = "ADS-B (Aviation)",
