@@ -99,8 +99,8 @@ object ScanSettings {
     const val DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_BLE_AGGREGATE_ONLY_ENABLED = true
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
-    const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
-    const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 1800L
+    const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 900L
+    const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 100
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
@@ -108,7 +108,7 @@ object ScanSettings {
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     private val SHARED_ALLOWED_CADENCE_SECONDS: List<Long> =
-        (1L..60L).toList() + listOf(120L, 300L, 600L, 1800L, 3600L)
+        (1L..60L).toList() + listOf(120L, 300L, 600L, 900L, 1800L, 3600L)
     val ALLOWED_INTERVALS_SECONDS = SHARED_ALLOWED_CADENCE_SECONDS
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
@@ -285,7 +285,7 @@ object ScanSettings {
 
     fun isAviationAdsbSensorEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, false)
+            .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, true)
 
     fun setAviationAdsbSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_AVIATION_ADSB_ENABLED, enabled)
@@ -293,7 +293,7 @@ object ScanSettings {
 
     fun isAviationPublicSensorEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SENSOR_AVIATION_PUBLIC_ENABLED, false)
+            .getBoolean(KEY_SENSOR_AVIATION_PUBLIC_ENABLED, true)
 
     fun setAviationPublicSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_AVIATION_PUBLIC_ENABLED, enabled)
@@ -353,7 +353,7 @@ object ScanSettings {
 
     fun isApproachNotificationsEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, true)
+            .getBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, false)
 
     fun setApproachNotificationsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -408,7 +408,7 @@ object ScanSettings {
 
     fun isMeshConnectivityNotificationsEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, true)
+            .getBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, false)
 
     fun setMeshConnectivityNotificationsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

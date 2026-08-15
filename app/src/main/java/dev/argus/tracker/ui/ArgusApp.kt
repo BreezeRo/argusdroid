@@ -353,6 +353,7 @@ private data class ForeignSignalRiskSignal(
     val acousticProxyScore: Double,
     val magneticProxyScore: Double,
     val directAcousticObserved: Boolean,
+    val realtimeAcousticObserved: Boolean,
     val directMagneticObserved: Boolean,
     val unavailableSignals: List<String>
 )
@@ -756,7 +757,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var trackingObserverInitialized by remember { mutableStateOf(false) }
     var operationalObserverInitialized by remember { mutableStateOf(false) }
     var mapDataPrewarmReady by remember { mutableStateOf(false) }
-    var startupTrackingActiveAtLaunch by remember { mutableStateOf<Boolean?>(null) }
+    var startupBootstrapScanCompleted by remember { mutableStateOf(false) }
     var startupRuntimeGateReleased by remember { mutableStateOf(false) }
     var startupPrewarmedDevicePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     var startupPrewarmedNoFlyZones by remember { mutableStateOf<List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>(emptyList()) }
@@ -1006,9 +1007,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     LaunchedEffect(Unit) {
         viewModel.refreshSummary()
         trackingActive = WorkScheduler.isTrackingActive(context)
-        if (startupTrackingActiveAtLaunch == null) {
-            startupTrackingActiveAtLaunch = trackingActive
-        }
         sensorGateSettings = readSensorGateSettings(context)
         chainLinkEnabled = ScanSettings.isChainLinkEnabled(context)
         chainNodeId = ScanSettings.getChainNodeId(context)
@@ -1054,12 +1052,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         startupConfigLoaded = true
     }
 
-    LaunchedEffect(appRuntimeReady, startupTrackingActiveAtLaunch, startupRuntimeGateReleased) {
-        if (startupRuntimeGateReleased || !appRuntimeReady) return@LaunchedEffect
-        // If tracking was already active when app launched, hold briefly after readiness to stabilize startup state.
-        if (startupTrackingActiveAtLaunch == true) {
-            delay(7000L)
-        }
+    LaunchedEffect(appRuntimeReady, startupBootstrapScanCompleted, startupRuntimeGateReleased) {
+        if (startupRuntimeGateReleased || !appRuntimeReady || !startupBootstrapScanCompleted) return@LaunchedEffect
         startupRuntimeGateReleased = true
     }
 
@@ -1138,6 +1132,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         WorkScheduler.observeTrackingActive(context).collect { isActive ->
             trackingActive = isActive
             trackingObserverInitialized = true
+        }
+    }
+
+    LaunchedEffect(context) {
+        WorkScheduler.observeStartupBootstrapScanCompleted(context).collect { completed ->
+            startupBootstrapScanCompleted = completed
         }
     }
 
@@ -2056,8 +2056,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setWifiSensorEnabled(context, true)
                         ScanSettings.setBleSensorEnabled(context, true)
                         ScanSettings.setCellularSensorEnabled(context, true)
-                        ScanSettings.setAviationAdsbSensorEnabled(context, false)
-                        ScanSettings.setAviationPublicSensorEnabled(context, false)
+                        ScanSettings.setAviationAdsbSensorEnabled(context, true)
+                        ScanSettings.setAviationPublicSensorEnabled(context, true)
                         ScanSettings.setUwbSensorEnabled(context, true)
                         ScanSettings.setSdrSensorEnabled(context, true)
 
@@ -2085,12 +2085,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setBleAggregateOnlyEnabled(context, ScanSettings.DEFAULT_BLE_AGGREGATE_ONLY_ENABLED)
                         ScanSettings.setAppThemeMode(context, ScanSettings.DEFAULT_APP_THEME_MODE)
                         ScanSettings.setApproachDetectionEnabled(context, true)
-                        ScanSettings.setApproachNotificationsEnabled(context, true)
+                        ScanSettings.setApproachNotificationsEnabled(context, false)
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
                         ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
-                        ScanSettings.setMeshConnectivityNotificationsEnabled(context, true)
+                        ScanSettings.setMeshConnectivityNotificationsEnabled(context, false)
                         ScanSettings.setMeshWipeNotificationsEnabled(context, true)
                         ScanSettings.setForeignSignalRiskEnabled(context, true)
                         ScanSettings.setForeignSignalAlertsEnabled(context, true)
@@ -2126,12 +2126,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.DEFAULT_APP_THEME_MODE) }
                             .getOrDefault(AppThemeMode.DARK)
                         approachDetectionEnabled = true
-                        approachNotificationsEnabled = true
+                        approachNotificationsEnabled = false
                         trackerNotificationsEnabled = true
                         noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
-                        meshConnectivityNotificationsEnabled = true
+                        meshConnectivityNotificationsEnabled = false
                         meshWipeNotificationsEnabled = true
                         foreignSignalRiskEnabled = true
                         foreignSignalAlertsEnabled = true
@@ -2672,7 +2672,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         CircularProgressIndicator()
                         Text(
                             if (appRuntimeReady && !startupRuntimeGateReleased) {
-                                "Finalizing startup state..."
+                                "Waiting for first startup scan to complete..."
                             } else {
                                 "Preparing Argus runtime..."
                             }
@@ -2689,9 +2689,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 append(if (mapPrewarmReady) "ok" else "warming")
                                 append(" • Map data prewarm: ")
                                 append(if (mapDataPrewarmReady) "ok" else "warming")
-                                if (appRuntimeReady && !startupRuntimeGateReleased) {
-                                    append(" • Startup hold: active")
-                                }
+                                append(" • Startup scan: ")
+                                append(if (startupBootstrapScanCompleted) "complete" else "running")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2711,14 +2710,6 @@ private fun MapEnginePrewarmHost(
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 2f)
     }
     var completed by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        delay(6000)
-        if (!completed) {
-            completed = true
-            onReady()
-        }
-    }
 
     Box(
         modifier = Modifier
@@ -4834,6 +4825,7 @@ private fun DetectionPage(
                 .sortedByDescending { (latest, _) -> encounterFreshnessEpochMs(latest) }
                 .take(maxDeviceCandidatesToResolve)
                 .map { (latest, deviceEncounters) ->
+                    val preferredSecondaryId = bestSecondaryId(deviceEncounters)
                     val isCameraSource = latest.source == EncounterSource.CAMERA
                     val owned = OwnedDeviceRegistry.keyFor(latest.source.name, latest.primaryId) in ownedDeviceKeys
                     val approachSignal = if (approachDetectionEnabled && !isCameraSource) {
@@ -4845,7 +4837,7 @@ private fun DetectionPage(
                     DeviceLocationCandidate(
                         source = latest.source.name,
                         primaryId = latest.primaryId,
-                        secondaryId = latest.secondaryId,
+                        secondaryId = preferredSecondaryId,
                         latestTimestampEpochMs = encounterFreshnessEpochMs(latest),
                         seenCount = deviceEncounters.size,
                         encounters = deviceEncounters,
@@ -5016,13 +5008,14 @@ private fun DetectionPage(
                 latestByAircraft.values
                     .map { acc ->
                         val latest = acc.latest
+                        val preferredSecondaryId = bestSecondaryId(listOfNotNull(latest, acc.previous))
                         val latestFreshnessEpochMs = encounterFreshnessEpochMs(latest)
                         val isLive = latestFreshnessEpochMs >= aircraftLiveCutoffEpochMs
-                        val sourceLabel = listSourceLabel(latest.source.name, latest.secondaryId)
+                        val sourceLabel = listSourceLabel(latest.source.name, preferredSecondaryId)
                         val pinTitle = buildPinTitle(
                             sourceLabel = sourceLabel,
                             primaryId = latest.primaryId,
-                            secondaryId = latest.secondaryId,
+                            secondaryId = preferredSecondaryId,
                             motionBadge = null
                         )
                         val freshnessSnippet = if (isLive) {
@@ -5032,7 +5025,7 @@ private fun DetectionPage(
                         }
                         val line1 = "Seen ${acc.seenCount}x"
                         val line2 = "$freshnessSnippet • Last ${formatEpoch(latestFreshnessEpochMs)}"
-                        val line3 = latest.secondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
+                        val line3 = preferredSecondaryId?.let { "Callsign: $it" } ?: "Callsign: n/a"
                         val pinSnippet = buildThreeLineSnippet(
                             line1 = line1,
                             line2 = line2,
@@ -5052,7 +5045,7 @@ private fun DetectionPage(
                             searchableMetadata = buildPinSearchableMetadata(
                                 source = latest.source.name,
                                 primaryId = latest.primaryId,
-                                secondaryId = latest.secondaryId,
+                                secondaryId = preferredSecondaryId,
                                 title = pinTitle,
                                 snippet = pinSnippet,
                                 rawPayloads = listOfNotNull(
@@ -5063,7 +5056,7 @@ private fun DetectionPage(
                             timestampEpochMs = latestFreshnessEpochMs,
                             source = latest.source.name,
                             primaryId = latest.primaryId,
-                            secondaryId = latest.secondaryId,
+                            secondaryId = preferredSecondaryId,
                             encounterTimestampEpochMs = latest.timestampEpochMs,
                             aircraftIconType = visualHints.iconType,
                             headingDegrees = visualHints.headingDegrees ?: derivedHeading,
@@ -5353,7 +5346,11 @@ private fun DetectionPage(
                                         "RF Texture ${formatRiskScorePct(foreignSignalRisk.rfTextureScore)}"
                                 )
                                 Text(
-                                    "Acoustic ${if (foreignSignalRisk.directAcousticObserved) "direct" else "proxy"} ${formatRiskScorePct(foreignSignalRisk.acousticProxyScore)} | " +
+                                    "Acoustic ${when {
+                                        foreignSignalRisk.realtimeAcousticObserved -> "real-time"
+                                        foreignSignalRisk.directAcousticObserved -> "direct"
+                                        else -> "proxy"
+                                    }} ${formatRiskScorePct(foreignSignalRisk.acousticProxyScore)} | " +
                                         "Magnetic ${if (foreignSignalRisk.directMagneticObserved) "direct" else "proxy"} ${formatRiskScorePct(foreignSignalRisk.magneticProxyScore)}"
                                 )
                                 if (foreignSignalRisk.unavailableSignals.isNotEmpty()) {
@@ -5700,6 +5697,11 @@ private data class SignalIntelSnapshot(
     val acousticDirectSampleCount: Int,
     val acousticDirectTotalCount: Int,
     val lastAcousticRmsDbFs: Double?,
+    val acousticRealtimeSampleCount: Int,
+    val acousticRealtimeTotalCount: Int,
+    val acousticRealtimeGunshotCandidateCount: Int,
+    val acousticRealtimeGunshotCandidateTotalCount: Int,
+    val lastAcousticRealtimePeakDbFs: Double?,
     val magneticDirectSampleCount: Int,
     val magneticDirectTotalCount: Int,
     val lastMagneticMagnitudeMicroTesla: Double?,
@@ -5740,6 +5742,15 @@ private fun buildSignalIntelSnapshot(
     val lastAcousticRmsDbFs = lastAcousticPayload
         ?.optDouble("rmsDbFs", Double.NaN)
         ?.takeIf { it.isFinite() }
+    val acousticRealtime = acousticDirect.filter(::isRealtimeAcousticSignal)
+    val acousticRealtimeTotalCount = encounters.count(::isRealtimeAcousticSignal)
+    val lastAcousticRealtimePayload = acousticRealtime.maxByOrNull { it.timestampEpochMs }
+        ?.let(::parseEncounterPayload)
+    val lastAcousticRealtimePeakDbFs = lastAcousticRealtimePayload
+        ?.optDouble("peakDbFs", Double.NaN)
+        ?.takeIf { it.isFinite() }
+    val acousticRealtimeGunshotCandidates = acousticRealtime.count(::isAcousticGunshotCandidateEvent)
+    val acousticRealtimeGunshotCandidateTotalCount = encounters.count(::isAcousticGunshotCandidateEvent)
 
     val magneticDirect = window
         .asSequence()
@@ -5770,6 +5781,9 @@ private fun buildSignalIntelSnapshot(
         if (acousticDirect.isEmpty()) {
             add("No direct acoustic samples observed. Check microphone permission and direct acoustic toggle.")
         }
+        if (acousticRealtime.isEmpty()) {
+            add("No real-time acoustic events observed in recent window. Enable Real-time acoustic channel for continuous listening.")
+        }
         if (magneticDirect.isEmpty()) {
             add("No direct magnetometer samples observed. Check magnetometer availability and direct magnetic toggle.")
         }
@@ -5794,6 +5808,11 @@ private fun buildSignalIntelSnapshot(
         acousticDirectSampleCount = acousticDirect.size,
         acousticDirectTotalCount = acousticDirectTotalCount,
         lastAcousticRmsDbFs = lastAcousticRmsDbFs,
+        acousticRealtimeSampleCount = acousticRealtime.size,
+        acousticRealtimeTotalCount = acousticRealtimeTotalCount,
+        acousticRealtimeGunshotCandidateCount = acousticRealtimeGunshotCandidates,
+        acousticRealtimeGunshotCandidateTotalCount = acousticRealtimeGunshotCandidateTotalCount,
+        lastAcousticRealtimePeakDbFs = lastAcousticRealtimePeakDbFs,
         magneticDirectSampleCount = magneticDirect.size,
         magneticDirectTotalCount = magneticDirectTotalCount,
         lastMagneticMagnitudeMicroTesla = lastMagneticMagnitudeMicroTesla,
@@ -5863,6 +5882,25 @@ private fun DetectionSignalIntelPage(
                     Text("Encounters: ${intel.uwbEncounterCount}")
                     Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
                     Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Acoustic (Real-time)", fontWeight = FontWeight.Bold)
+                    Text("Events (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeSampleCount}")
+                    Text("Total stored: ${intel.acousticRealtimeTotalCount}")
+                    Text(
+                        "Gunshot candidates (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeGunshotCandidateCount}"
+                    )
+                    Text("Gunshot candidates total: ${intel.acousticRealtimeGunshotCandidateTotalCount}")
+                    Text(
+                        "Latest peak: ${intel.lastAcousticRealtimePeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                    )
                 }
             }
         }
@@ -6877,6 +6915,7 @@ private fun DetectionMapPage(
     var selectedNoFlyZoneId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
     var legendPanelVisible by rememberSaveable { mutableStateOf(false) }
+    var deviceTypeFiltersCollapsed by rememberSaveable { mutableStateOf(false) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
@@ -6917,6 +6956,7 @@ private fun DetectionMapPage(
                     pin
                 } else {
                     pin.copy(
+                        markerGlyphOverride = identityName,
                         title = buildPinTitle(
                             sourceLabel = identityName,
                             primaryId = pin.primaryId,
@@ -7139,12 +7179,12 @@ private fun DetectionMapPage(
         }
     }
     val cameraFocusPins by produceState(
-        initialValue = filteredVisiblePins,
+        initialValue = displayFilteredPins,
         key1 = nearbyVisiblePins,
-        key2 = filteredVisiblePins
+        key2 = displayFilteredPins
     ) {
         value = withContext(Dispatchers.Default) {
-            val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else filteredVisiblePins
+            val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else displayFilteredPins
             samplePinsForCamera(focusPins, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
         }
     }
@@ -7168,17 +7208,17 @@ private fun DetectionMapPage(
         }
     }
     val renderedPins by produceState(
-        initialValue = filteredVisiblePins,
-        key1 = filteredVisiblePins,
+        initialValue = displayFilteredPins,
+        key1 = displayFilteredPins,
         key2 = renderPinLimit
     ) {
         value = withContext(Dispatchers.Default) {
-            samplePinsForRender(filteredVisiblePins, renderPinLimit)
+            samplePinsForRender(displayFilteredPins, renderPinLimit)
         }
     }
-    val useDenseDotMarkers = remember(zoomBucket, filteredVisiblePins.size) {
+    val useDenseDotMarkers = remember(zoomBucket, displayFilteredPins.size) {
         val bucketZoom = zoomBucket / 2f
-        filteredVisiblePins.size > MAP_RENDER_PIN_LIMIT_MID || bucketZoom < 9.5f
+        displayFilteredPins.size > MAP_RENDER_PIN_LIMIT_MID || bucketZoom < 9.5f
     }
     val noFlyRenderAnchor = coverageAnchorLocation ?: currentLocation
     val noFlyQualityProfile = remember(noFlyRenderQualityLevel) {
@@ -7512,40 +7552,51 @@ private fun DetectionMapPage(
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        "Device Type Filters",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
-                        legendItems.forEach { item ->
-                            val sourceVisible = item.source !in hiddenLegendSources
-                            FilterChip(
-                                selected = sourceVisible,
-                                onClick = {
-                                    hiddenLegendSources = if (sourceVisible) {
-                                        hiddenLegendSources + item.source
-                                    } else {
-                                        hiddenLegendSources - item.source
+                        Text(
+                            "Device Type Filters",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { deviceTypeFiltersCollapsed = !deviceTypeFiltersCollapsed }) {
+                            Text(if (deviceTypeFiltersCollapsed) "[+]" else "[-]")
+                        }
+                    }
+                    if (!deviceTypeFiltersCollapsed) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            legendItems.forEach { item ->
+                                val sourceVisible = item.source !in hiddenLegendSources
+                                FilterChip(
+                                    selected = sourceVisible,
+                                    onClick = {
+                                        hiddenLegendSources = if (sourceVisible) {
+                                            hiddenLegendSources + item.source
+                                        } else {
+                                            hiddenLegendSources - item.source
+                                        }
+                                    },
+                                    label = {
+                                        Text(
+                                            item.label,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp)
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Text(
+                                            text = "●",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.sp),
+                                            color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                        )
                                     }
-                                },
-                                label = {
-                                    Text(
-                                        item.label,
-                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp)
-                                    )
-                                },
-                                leadingIcon = {
-                                    Text(
-                                        text = "●",
-                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.sp),
-                                        color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
-                                    )
-                                }
-                            )
+                                )
+                            }
                         }
                     }
                 }
@@ -7591,7 +7642,7 @@ private fun DetectionMapPage(
                         singleLine = true
                     )
                     Text(
-                        "Matches ${filteredVisiblePins.size}/${visiblePins.size} visible pins",
+                        "Matches ${displayFilteredPins.size}/${visiblePins.size} visible pins",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -8595,7 +8646,7 @@ private fun DetectionMapPage(
                                     singleLine = true
                                 )
                                 Text(
-                                    "Matches ${filteredVisiblePins.size}/${visiblePins.size} visible pins",
+                                    "Matches ${displayFilteredPins.size}/${visiblePins.size} visible pins",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -8773,6 +8824,7 @@ private data class MapPin(
     val source: String,
     val primaryId: String,
     val secondaryId: String?,
+    val markerGlyphOverride: String? = null,
     val encounterTimestampEpochMs: Long?,
     val aircraftIconType: String? = null,
     val headingDegrees: Double? = null,
@@ -8785,6 +8837,14 @@ private fun encounterFreshnessEpochMs(encounter: Encounter): Long {
     val observedEpochMs = encounter.timestampEpochMs
     val receivedEpochMs = encounter.provenanceReceivedAtEpochMs ?: 0L
     return maxOf(observedEpochMs, receivedEpochMs)
+}
+
+private fun bestSecondaryId(encounters: List<Encounter>): String? {
+    return encounters
+        .asSequence()
+        .sortedByDescending { encounter -> encounterFreshnessEpochMs(encounter) }
+        .mapNotNull { encounter -> encounter.secondaryId?.trim() }
+        .firstOrNull { value -> value.isNotBlank() }
 }
 
 private data class PinLegendItem(
@@ -9261,6 +9321,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
     topDeviceGroups.forEach { (latest, deviceEncounters) ->
         val sourceEnum = latest.source
         val sourceName = sourceEnum.name
+        val preferredSecondaryId = bestSecondaryId(deviceEncounters)
         val resolved = resolveDeviceLocation(sourceEnum, deviceEncounters) ?: return@forEach
         if (!isValidLatLon(resolved.lat, resolved.lon)) return@forEach
 
@@ -9298,11 +9359,11 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
         } else {
             "Recent • Seen ${formatMapPinAge(latestFreshnessEpochMs)} ago"
         }
-        val sourceLabel = listSourceLabel(sourceName, latest.secondaryId)
+        val sourceLabel = listSourceLabel(sourceName, preferredSecondaryId)
         val pinTitle = buildPinTitle(
             sourceLabel = sourceLabel,
             primaryId = latest.primaryId,
-            secondaryId = latest.secondaryId,
+            secondaryId = preferredSecondaryId,
             motionBadge = motionBadge
         )
         val line1 = "Seen ${deviceEncounters.size}x"
@@ -9323,7 +9384,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             searchableMetadata = buildPinSearchableMetadata(
                 source = sourceName,
                 primaryId = latest.primaryId,
-                secondaryId = latest.secondaryId,
+                secondaryId = preferredSecondaryId,
                 title = pinTitle,
                 snippet = pinSnippet,
                 rawPayloads = deviceEncounters
@@ -9333,7 +9394,7 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
             timestampEpochMs = latestFreshnessEpochMs,
             source = sourceName,
             primaryId = latest.primaryId,
-            secondaryId = latest.secondaryId,
+            secondaryId = preferredSecondaryId,
             encounterTimestampEpochMs = latest.timestampEpochMs,
             aircraftIconType = null,
             headingDegrees = null,
@@ -9892,7 +9953,7 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
     if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
         return markerAircraftIconForPin(pin, useSourceOnlyPinColors)
     }
-    val glyph = deviceGlyphForSource(pin.source)
+    val glyph = markerGlyphForPin(pin)
     val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
     val key = "${pin.source}|${glyph}|${bgColor.toArgb()}"
     deviceMarkerIconCache[key]?.let { return it }
@@ -10073,6 +10134,15 @@ private fun markerDotIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = f
     return descriptor
 }
 
+private fun markerGlyphForPin(pin: MapPin): String {
+    val raw = pin.markerGlyphOverride
+        ?.trim()
+        ?.takeIf { value -> value.isNotBlank() }
+        ?: deviceGlyphForSource(pin.source)
+    val normalized = raw.replace(Regex("\\s+"), " ")
+    return if (normalized.length <= 14) normalized else normalized.take(11).trimEnd() + "..."
+}
+
 private fun markerBackgroundColorForPin(pin: MapPin, useSourceOnlyPinColors: Boolean): Color {
     val baseColor = if (!useSourceOnlyPinColors && pin.motionBadge == "MOVING") {
         Color(0xFF43A047)
@@ -10103,6 +10173,7 @@ private fun formatLiveMapIntervalLabel(seconds: Long): String = when (seconds) {
     30L -> "30s"
     60L -> "1 minute"
     300L -> "5 minutes"
+    900L -> "15 minutes"
     1800L -> "30 minutes"
     3600L -> "hourly"
     else -> ScanSettings.formatInterval(seconds)
@@ -11493,6 +11564,7 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
     val rfTextureScore = computeRfTextureScore(ordered)
 
     val directAcousticObserved = ordered.any { isDirectSignalChannel(it, "acoustic") }
+    val realtimeAcousticObserved = ordered.any(::isRealtimeAcousticSignal)
     val directMagneticObserved = ordered.any { isDirectSignalChannel(it, "magnetic") }
     val directAcousticScore = computeDirectAcousticScore(ordered)
     val directMagneticScore = computeDirectMagneticScore(ordered)
@@ -11585,6 +11657,7 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
         acousticProxyScore = acousticProxyScore,
         magneticProxyScore = magneticProxyScore,
         directAcousticObserved = directAcousticObserved,
+        realtimeAcousticObserved = realtimeAcousticObserved,
         directMagneticObserved = directMagneticObserved,
         unavailableSignals = unavailable
     )
@@ -11630,6 +11703,22 @@ private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolea
     val signalChannel = payload.optString("signalChannel", "").trim().lowercase(Locale.US)
     val direct = payload.optBoolean("directChannel", false)
     return direct && signalChannel == normalizedChannel
+}
+
+private fun isRealtimeAcousticSignal(encounter: Encounter): Boolean {
+    if (!isDirectSignalChannel(encounter, "acoustic")) return false
+    val secondary = encounter.secondaryId?.trim()?.lowercase(Locale.US)
+    if (secondary?.contains("direct-acoustic-realtime") == true) return true
+    val payload = parseEncounterPayload(encounter) ?: return false
+    return payload.optBoolean("realtimeChannel", false)
+}
+
+private fun isAcousticGunshotCandidateEvent(encounter: Encounter): Boolean {
+    if (!isRealtimeAcousticSignal(encounter)) return false
+    val secondary = encounter.secondaryId?.trim()?.lowercase(Locale.US)
+    if (secondary?.contains("gunshot") == true) return true
+    val payload = parseEncounterPayload(encounter) ?: return false
+    return payload.optString("eventType", "").trim().lowercase(Locale.US) == "gunshot_candidate"
 }
 
 private fun selectRecentEncounterWindow(

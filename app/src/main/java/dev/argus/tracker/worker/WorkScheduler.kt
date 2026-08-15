@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit
 object WorkScheduler {
     private const val PERIODIC_WORK_NAME = "argus-periodic-scan"
     private const val ONE_TIME_WORK_NAME = "argus-one-time-scan"
+    private const val STARTUP_BOOTSTRAP_WORK_NAME = "argus-startup-bootstrap-scan"
 
     data class StartResult(
         val success: Boolean,
@@ -34,6 +35,14 @@ object WorkScheduler {
         enqueueAccordingToInterval(context)
         RemoteIdForegroundServiceController.ensureState(context)
         AcousticRealtimeForegroundServiceController.ensureState(context)
+    }
+
+    fun enqueueStartupBootstrapScan(context: Context) {
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            STARTUP_BOOTSTRAP_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            OneTimeWorkRequestBuilder<ArgusWorker>().build()
+        )
     }
 
     suspend fun startAndVerify(context: Context): StartResult = withContext(Dispatchers.IO) {
@@ -178,6 +187,31 @@ object WorkScheduler {
         awaitClose {
             periodicLiveData.removeObserver(periodicObserver)
             oneTimeLiveData.removeObserver(oneTimeObserver)
+        }
+    }.conflate()
+
+    fun observeStartupBootstrapScanCompleted(context: Context): Flow<Boolean> = callbackFlow {
+        val workManager = WorkManager.getInstance(context)
+        val startupLiveData = workManager.getWorkInfosForUniqueWorkLiveData(STARTUP_BOOTSTRAP_WORK_NAME)
+
+        fun isCompleted(infos: List<WorkInfo>): Boolean {
+            if (infos.isEmpty()) return false
+            return infos.any { info ->
+                info.state == WorkInfo.State.SUCCEEDED ||
+                    info.state == WorkInfo.State.FAILED ||
+                    info.state == WorkInfo.State.CANCELLED
+            }
+        }
+
+        val observer = Observer<List<WorkInfo>> { infos ->
+            trySend(isCompleted(infos.orEmpty()))
+        }
+
+        startupLiveData.observeForever(observer)
+        trySend(isCompleted(startupLiveData.value.orEmpty()))
+
+        awaitClose {
+            startupLiveData.removeObserver(observer)
         }
     }.conflate()
 }
