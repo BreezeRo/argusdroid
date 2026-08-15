@@ -13,6 +13,11 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -81,6 +86,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -707,6 +713,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var startupRuntimeGateReleased by remember { mutableStateOf(false) }
     var startupPrewarmedDevicePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     var startupPrewarmedNoFlyZones by remember { mutableStateOf<List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>(emptyList()) }
+    val intervalManagedSourceTypes = remember {
+        ScanSettings.SOURCE_TYPES.filterNot {
+            it == SourceCatalog.KEY_WIFI_DIRECT ||
+                it == SourceCatalog.KEY_BT_CLASSIC ||
+                it == SourceCatalog.KEY_REMOTE_ID
+        }
+    }
     var mapResetGeneration by remember { mutableStateOf(0L) }
     var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -900,7 +913,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
 
     fun minimumEnabledSourceIntervalSeconds(): Long {
-        val enabled = enabledSourceTypes(sensorGateSettings)
+        val enabled = enabledIntervalSourceTypes(sensorGateSettings)
         if (enabled.isEmpty()) return scanIntervalSeconds
         return enabled
             .map { source -> sourceScanIntervals[source] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS }
@@ -987,14 +1000,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     app.container.repository.observeRecent(limit = 5000).first()
                 }
                 withContext(Dispatchers.Default) {
-                    val liveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
-                    val aircraftLiveWindowMs = maxOf(300_000L, liveWindowMs)
                     buildStartupPrewarmedDeviceMapPins(
                         encounters = startupEncounters,
                         ownedDeviceKeys = ownedDeviceKeys,
                         approachDetectionEnabled = approachDetectionEnabled,
-                        deviceMapLiveWindowMs = liveWindowMs,
-                        deviceMapAircraftLiveWindowMs = aircraftLiveWindowMs,
+                        sourceScanIntervals = sourceScanIntervals,
+                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                         maxDeviceCandidates = 1200,
                         suppressLikelyRandomizedWifiOneOffs = wifiRandomizedOneOffSuppressionEnabled,
                         suppressLikelyRandomizedBleOneOffs = bleRandomizedOneOffSuppressionEnabled
@@ -1515,7 +1526,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     },
                     onAllSourceScanIntervalsSelected = { seconds ->
                         var hasChanges = false
-                        ScanSettings.SOURCE_TYPES.forEach { sourceType ->
+                        intervalManagedSourceTypes.forEach { sourceType ->
                             val previous = sourceScanIntervals[sourceType]
                                 ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
                             val updated = seconds.coerceIn(
@@ -1747,6 +1758,93 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         viewModel.refreshSummary()
                         "Encrypted backup imported from $fileName"
                     },
+                    onResetDefaults = {
+                        ScanSettings.setWifiSensorEnabled(context, true)
+                        ScanSettings.setBleSensorEnabled(context, true)
+                        ScanSettings.setCellularSensorEnabled(context, true)
+                        ScanSettings.setAviationAdsbSensorEnabled(context, false)
+                        ScanSettings.setAviationPublicSensorEnabled(context, false)
+                        ScanSettings.setUwbSensorEnabled(context, true)
+                        ScanSettings.setSdrSensorEnabled(context, true)
+
+                        ScanSettings.setLiveMapUpdateIntervalSeconds(
+                            context,
+                            ScanSettings.DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
+                        )
+                        ScanSettings.setMapClusteringEnabled(context, ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED)
+                        ScanSettings.setMapClusterRangeLevel(context, ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
+                        ScanSettings.setMapNoFlyZonesEnabled(context, ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED)
+                        ScanSettings.setMapScannerSweepAnimationEnabled(
+                            context,
+                            ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
+                        )
+                        ScanSettings.setWifiRandomizedOneOffSuppressionEnabled(
+                            context,
+                            ScanSettings.DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+                        )
+                        ScanSettings.setWifiAggregateOnlyEnabled(context, ScanSettings.DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED)
+                        ScanSettings.setBleRandomizedOneOffSuppressionEnabled(
+                            context,
+                            ScanSettings.DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+                        )
+                        ScanSettings.setBleAggregateOnlyEnabled(context, ScanSettings.DEFAULT_BLE_AGGREGATE_ONLY_ENABLED)
+                        ScanSettings.setAppThemeMode(context, ScanSettings.DEFAULT_APP_THEME_MODE)
+                        ScanSettings.setApproachDetectionEnabled(context, true)
+                        ScanSettings.setApproachNotificationsEnabled(context, true)
+                        ScanSettings.setTrackerNotificationsEnabled(context, true)
+                        ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
+                        ScanSettings.setMeshConnectivityNotificationsEnabled(context, true)
+                        ScanSettings.setMeshWipeNotificationsEnabled(context, true)
+                        ScanSettings.setForeignSignalRiskEnabled(context, true)
+                        ScanSettings.setForeignSignalAlertsEnabled(context, true)
+                        ScanSettings.setForeignSignalAlertThreshold(
+                            context,
+                            ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
+                        )
+                        ScanSettings.setForeignDirectAcousticEnabled(context, false)
+                        ScanSettings.setForeignDirectMagneticEnabled(context, false)
+
+                        intervalManagedSourceTypes.forEach { sourceType ->
+                            val defaultSeconds = when (sourceType) {
+                                SourceCatalog.KEY_AIRCRAFT -> ScanSettings.DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
+                                SourceCatalog.KEY_CAMERA -> ScanSettings.DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+                                else -> ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+                            }
+                            ScanSettings.setSourceScanIntervalSeconds(context, sourceType, defaultSeconds)
+                        }
+
+                        liveMapUpdateIntervalSeconds = ScanSettings.DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
+                        mapClusteringEnabled = ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED
+                        mapClusterRangeLevel = ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL
+                        mapNoFlyZonesEnabled = ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED
+                        mapScannerSweepAnimationEnabled = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
+                        wifiRandomizedOneOffSuppressionEnabled = ScanSettings.DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+                        wifiAggregateOnlyEnabled = ScanSettings.DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED
+                        bleRandomizedOneOffSuppressionEnabled = ScanSettings.DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+                        bleAggregateOnlyEnabled = ScanSettings.DEFAULT_BLE_AGGREGATE_ONLY_ENABLED
+                        sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
+                        appThemeMode = runCatching { AppThemeMode.valueOf(ScanSettings.DEFAULT_APP_THEME_MODE) }
+                            .getOrDefault(AppThemeMode.DARK)
+                        approachDetectionEnabled = true
+                        approachNotificationsEnabled = true
+                        trackerNotificationsEnabled = true
+                        magneticIncreaseNotificationsEnabled = true
+                        meshConnectivityNotificationsEnabled = true
+                        meshWipeNotificationsEnabled = true
+                        foreignSignalRiskEnabled = true
+                        foreignSignalAlertsEnabled = true
+                        foreignSignalAlertThreshold = ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
+                        foreignDirectAcousticEnabled = false
+                        foreignDirectMagneticEnabled = false
+                        sensorGateSettings = readSensorGateSettings(context)
+                        sensorStatuses = SensorStatusProvider.read(context)
+
+                        scope.launch {
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-defaults-reset")
+                        }
+
+                        "Settings reset to defaults."
+                    },
                     onSoftReset = {
                         app.container.repository.clearEncounters()
                         app.container.repository.clearDevices()
@@ -1828,6 +1926,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
                     chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
+                    sourceScanIntervals = sourceScanIntervals,
                     startupPrewarmedDevicePins = startupPrewarmedDevicePins,
                     startupPrewarmedNoFlyZones = startupPrewarmedNoFlyZones,
                     mapResetGeneration = mapResetGeneration,
@@ -3069,6 +3168,7 @@ private fun AppSettingsPage(
     onExportEncryptedBackup: suspend (String) -> String,
     onImportLatestBackup: suspend () -> String,
     onImportLatestEncryptedBackup: suspend (String) -> String,
+    onResetDefaults: suspend () -> String,
     onSoftReset: suspend () -> String,
     onHardReset: suspend () -> String
 ) {
@@ -3083,12 +3183,19 @@ private fun AppSettingsPage(
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
     var backupPassphrase by rememberSaveable { mutableStateOf("") }
     var resetDialogTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var defaultsResetDialogVisible by rememberSaveable { mutableStateOf(false) }
     var resetActionInProgress by remember { mutableStateOf(false) }
     var resetStatusMessage by remember { mutableStateOf<String?>(null) }
     var resetStatusIsError by remember { mutableStateOf(false) }
+    var defaultsResetInProgress by remember { mutableStateOf(false) }
     var selectedSettingsTab by rememberSaveable { mutableStateOf(0) }
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
     val settingsTabs = listOf("Appearance", "Scheduling", "Detection", "Notifications", "Data")
+    val intervalSourceTypes = ScanSettings.SOURCE_TYPES.filterNot {
+        it == SourceCatalog.KEY_WIFI_DIRECT ||
+            it == SourceCatalog.KEY_BT_CLASSIC ||
+            it == SourceCatalog.KEY_REMOTE_ID
+    }
     val intervalOverrun = (lastScanDurationMs ?: 0L) > (scanIntervalSeconds * 1000L)
 
     LazyColumn(
@@ -3096,7 +3203,32 @@ private fun AppSettingsPage(
         contentPadding = PaddingValues(bottom = 16.dp)
     ) {
         item {
-            Text("Settings", style = MaterialTheme.typography.headlineMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text("Settings", style = MaterialTheme.typography.headlineMedium)
+                Button(
+                    enabled = !defaultsResetInProgress,
+                    onClick = {
+                        defaultsResetDialogVisible = true
+                        resetStatusMessage = null
+                        resetStatusIsError = false
+                    }
+                ) {
+                    Text(if (defaultsResetInProgress) "Resetting..." else "Defaults")
+                }
+            }
+        }
+        if (resetStatusMessage != null) {
+            item {
+                Text(
+                    text = resetStatusMessage!!,
+                    color = if (resetStatusIsError) Color(0xFFB3261E) else Color(0xFF2E7D32),
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
         item {
             TabRow(selectedTabIndex = selectedSettingsTab) {
@@ -3198,7 +3330,7 @@ private fun AppSettingsPage(
                                 onCheckedChange = onMapNoFlyZonesEnabledChanged
                             )
                         }
-                        Text("Disable this to remove no-fly overlays from maps and skip their background loading.")
+                        Text("Warning: no-fly overlays can be slow to load/render and may impact map performance. Enable only when needed.")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -3264,7 +3396,7 @@ private fun AppSettingsPage(
                     }
                 }
             }
-            items(ScanSettings.SOURCE_TYPES) { sourceType ->
+            items(intervalSourceTypes) { sourceType ->
                 val currentInterval = sourceScanIntervals[sourceType]
                     ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
                 Card(modifier = Modifier.fillMaxWidth()) {
@@ -3829,6 +3961,58 @@ private fun AppSettingsPage(
     }
 
     val dialogTarget = resetDialogTarget
+    if (defaultsResetDialogVisible) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!defaultsResetInProgress) {
+                    defaultsResetDialogVisible = false
+                }
+            },
+            title = {
+                Text("Reset Settings to Defaults")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This will overwrite your current settings values with app defaults. Logs and collected encounters are not deleted. Continue?")
+                    if (defaultsResetInProgress) {
+                        Text("Applying defaults...")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !defaultsResetInProgress,
+                    onClick = {
+                        scope.launch {
+                            defaultsResetInProgress = true
+                            resetStatusIsError = false
+                            resetStatusMessage = runCatching {
+                                onResetDefaults()
+                            }.getOrElse { error ->
+                                resetStatusIsError = true
+                                "Failed to reset defaults: ${error.message ?: "unknown error"}"
+                            }
+                            defaultsResetInProgress = false
+                            defaultsResetDialogVisible = false
+                        }
+                    }
+                ) {
+                    Text(if (defaultsResetInProgress) "Working..." else "Confirm")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !defaultsResetInProgress,
+                    onClick = {
+                        defaultsResetDialogVisible = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (dialogTarget != null) {
         val isHardReset = dialogTarget == "hard"
         AlertDialog(
@@ -4068,6 +4252,7 @@ private fun DetectionPage(
     chainHeartbeatIntervalSeconds: Long,
     chainSharePreciseLocationEnabled: Boolean,
     liveMapUpdateIntervalSeconds: Long,
+    sourceScanIntervals: Map<String, Long>,
     startupPrewarmedDevicePins: List<MapPin>,
     startupPrewarmedNoFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>,
     mapResetGeneration: Long,
@@ -4115,10 +4300,6 @@ private fun DetectionPage(
     var flightMapRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
-    val deviceMapLiveWindowMs = maxOf(15_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 2_000L)
-    val deviceMapRecentWindowMs = maxOf(120_000L, liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 20_000L)
-    val deviceMapAircraftRecentWindowMs = maxOf(600_000L, deviceMapRecentWindowMs)
-    val deviceMapAircraftLiveWindowMs = maxOf(300_000L, deviceMapLiveWindowMs)
     val tabs = listOf("Status", "Devices", "Signal", "Map", "Mesh")
 
     LaunchedEffect(initialTabRequest) {
@@ -4157,8 +4338,8 @@ private fun DetectionPage(
         ownedDeviceKeys,
         wifiRandomizedOneOffSuppressionEnabled,
         bleRandomizedOneOffSuppressionEnabled,
-        deviceMapRecentWindowMs,
-        deviceMapAircraftRecentWindowMs,
+        sourceScanIntervals,
+        liveMapUpdateIntervalSeconds,
         maxDeviceCandidatesToResolve
     ) {
         if (!isDeviceLocationTabActive) {
@@ -4172,13 +4353,15 @@ private fun DetectionPage(
 
         allDeviceCandidates = withContext(Dispatchers.Default) {
             val latestSnapshotEpochMs = meshInsightEncounters.maxOfOrNull { it.timestampEpochMs }
-            val snapshotCutoffEpochMs = latestSnapshotEpochMs?.minus(deviceMapRecentWindowMs) ?: Long.MIN_VALUE
-            val aircraftCutoffEpochMs = latestSnapshotEpochMs?.minus(deviceMapAircraftRecentWindowMs) ?: Long.MIN_VALUE
+            val latestSnapshot = latestSnapshotEpochMs ?: Long.MIN_VALUE
             val recentSnapshotEncounters = meshInsightEncounters.filter { encounter ->
-                when (encounter.source) {
-                    EncounterSource.AIRCRAFT -> encounter.timestampEpochMs >= aircraftCutoffEpochMs
-                    else -> encounter.timestampEpochMs >= snapshotCutoffEpochMs
-                }
+                val sourceType = scanTypeKeyForSourceName(encounter.source.name)
+                val recentWindowMs = mapRecentWindowMsForSource(
+                    sourceType = sourceType,
+                    sourceScanIntervals = sourceScanIntervals,
+                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                )
+                encounter.timestampEpochMs >= latestSnapshot - recentWindowMs
             }
 
             val groupedByDevice = recentSnapshotEncounters
@@ -4328,7 +4511,7 @@ private fun DetectionPage(
         noFlyZoneOverlays = overlays
     }
 
-    LaunchedEffect(meshInsightEncounters, deviceMapAircraftLiveWindowMs, isFlightMapActive) {
+    LaunchedEffect(meshInsightEncounters, sourceScanIntervals, liveMapUpdateIntervalSeconds, isFlightMapActive) {
         if (!isFlightMapActive) {
             allTrackedAircraftPins = emptyList()
             return@LaunchedEffect
@@ -4378,7 +4561,12 @@ private fun DetectionPage(
             if (latestByAircraft.isEmpty()) {
                 emptyList()
             } else {
-                val aircraftLiveCutoffEpochMs = (latestAircraftEpochMs ?: Long.MIN_VALUE) - deviceMapAircraftLiveWindowMs
+                val aircraftLiveWindowMs = mapLiveWindowMsForSource(
+                    sourceType = SourceCatalog.KEY_AIRCRAFT,
+                    sourceScanIntervals = sourceScanIntervals,
+                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                )
+                val aircraftLiveCutoffEpochMs = (latestAircraftEpochMs ?: Long.MIN_VALUE) - aircraftLiveWindowMs
                 latestByAircraft.values
                     .map { acc ->
                         val latest = acc.latest
@@ -4490,8 +4678,7 @@ private fun DetectionPage(
         }
 
         val latestResolvedEpochMs = resolvedCandidates.maxOfOrNull { it.latestTimestampEpochMs }
-        val defaultLiveCutoffEpochMs = (latestResolvedEpochMs ?: Long.MIN_VALUE) - deviceMapLiveWindowMs
-        val aircraftLiveCutoffEpochMs = (latestResolvedEpochMs ?: Long.MIN_VALUE) - deviceMapAircraftLiveWindowMs
+        val latestResolved = latestResolvedEpochMs ?: Long.MIN_VALUE
 
         val resolvedPins = resolvedCandidates.mapNotNull { candidate ->
             val location = candidate.approximateLocation ?: return@mapNotNull null
@@ -4509,11 +4696,13 @@ private fun DetectionPage(
             } else {
                 null
             }
-            val liveCutoffForSource = if (candidate.source == EncounterSource.AIRCRAFT.name) {
-                aircraftLiveCutoffEpochMs
-            } else {
-                defaultLiveCutoffEpochMs
-            }
+            val sourceType = scanTypeKeyForSourceName(candidate.source)
+            val liveWindowMs = mapLiveWindowMsForSource(
+                sourceType = sourceType,
+                sourceScanIntervals = sourceScanIntervals,
+                liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+            )
+            val liveCutoffForSource = latestResolved - liveWindowMs
             val isLive = candidate.latestTimestampEpochMs >= liveCutoffForSource
 
             val rangeSnippet = candidate.approximateRangeMeters
@@ -6175,6 +6364,7 @@ private fun DetectionMapPage(
     var noFlyZonesVisible by rememberSaveable { mutableStateOf(true) }
     var selectedNoFlyZoneId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
+    var legendPanelVisible by rememberSaveable { mutableStateOf(false) }
     var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var liveCollectInProgress by remember { mutableStateOf(false) }
@@ -6670,6 +6860,72 @@ private fun DetectionMapPage(
         },
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text(mapTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            AssistChip(
+                onClick = { legendPanelVisible = !legendPanelVisible },
+                label = {
+                    Text(
+                        if (legendPanelVisible) "Hide Legend" else "Show Legend",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            )
+        }
+        if (!legendPanelVisible && legendItems.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        "Device Type Filters",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        legendItems.forEach { item ->
+                            val sourceVisible = item.source !in hiddenLegendSources
+                            FilterChip(
+                                selected = sourceVisible,
+                                onClick = {
+                                    hiddenLegendSources = if (sourceVisible) {
+                                        hiddenLegendSources + item.source
+                                    } else {
+                                        hiddenLegendSources - item.source
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        item.label,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp)
+                                    )
+                                },
+                                leadingIcon = {
+                                    Text(
+                                        text = "●",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.sp),
+                                        color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        AnimatedVisibility(
+            visible = legendPanelVisible,
+            enter = slideInHorizontally(initialOffsetX = { -it / 2 }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { -it / 2 }) + fadeOut()
+        ) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (compactMapLayout) {
@@ -6788,6 +7044,7 @@ private fun DetectionMapPage(
                     }
                 }
             }
+        }
         }
         if (!hasMapsApiKey) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -8217,8 +8474,8 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
     encounters: List<Encounter>,
     ownedDeviceKeys: Set<String>,
     approachDetectionEnabled: Boolean,
-    deviceMapLiveWindowMs: Long,
-    deviceMapAircraftLiveWindowMs: Long,
+    sourceScanIntervals: Map<String, Long>,
+    liveMapUpdateIntervalSeconds: Long,
     maxDeviceCandidates: Int,
     suppressLikelyRandomizedWifiOneOffs: Boolean = true,
     suppressLikelyRandomizedBleOneOffs: Boolean = true
@@ -8226,14 +8483,14 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
     if (encounters.isEmpty()) return emptyList()
 
     val latestSnapshotEpochMs = encounters.maxOfOrNull { it.timestampEpochMs } ?: return emptyList()
-    val snapshotCutoffEpochMs = latestSnapshotEpochMs - maxOf(deviceMapLiveWindowMs, 120_000L)
-    val aircraftCutoffEpochMs = latestSnapshotEpochMs - maxOf(deviceMapAircraftLiveWindowMs, 600_000L)
-
     val recentSnapshotEncounters = encounters.filter { encounter ->
-        when (encounter.source) {
-            EncounterSource.AIRCRAFT -> encounter.timestampEpochMs >= aircraftCutoffEpochMs
-            else -> encounter.timestampEpochMs >= snapshotCutoffEpochMs
-        }
+        val sourceType = scanTypeKeyForSourceName(encounter.source.name)
+        val recentWindowMs = mapRecentWindowMsForSource(
+            sourceType = sourceType,
+            sourceScanIntervals = sourceScanIntervals,
+            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+        )
+        encounter.timestampEpochMs >= latestSnapshotEpochMs - recentWindowMs
     }
 
     if (recentSnapshotEncounters.isEmpty()) return emptyList()
@@ -8263,9 +8520,6 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
         .sortedByDescending { (latest, _) -> latest.timestampEpochMs }
         .take(maxDeviceCandidates.coerceAtLeast(100))
 
-    val defaultLiveCutoffEpochMs = latestSnapshotEpochMs - deviceMapLiveWindowMs
-    val aircraftLiveCutoffEpochMs = latestSnapshotEpochMs - deviceMapAircraftLiveWindowMs
-
     val pins = mutableListOf<MapPin>()
     topDeviceGroups.forEach { (latest, deviceEncounters) ->
         val sourceEnum = latest.source
@@ -8280,11 +8534,13 @@ private suspend fun buildStartupPrewarmedDeviceMapPins(
         } else {
             null
         }
-        val isLive = latest.timestampEpochMs >= if (sourceEnum == EncounterSource.AIRCRAFT) {
-            aircraftLiveCutoffEpochMs
-        } else {
-            defaultLiveCutoffEpochMs
-        }
+        val sourceType = scanTypeKeyForSourceName(sourceName)
+        val liveWindowMs = mapLiveWindowMsForSource(
+            sourceType = sourceType,
+            sourceScanIntervals = sourceScanIntervals,
+            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+        )
+        val isLive = latest.timestampEpochMs >= (latestSnapshotEpochMs - liveWindowMs)
         val motionBadge = if (isCameraSource) {
             null
         } else {
@@ -8599,7 +8855,9 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
 )
 
 private val SOURCE_TYPE_UI_META_BY_SOURCE = SOURCE_TYPE_UI_META_ORDERED.associateBy { it.source }
-private val SOURCE_TYPE_UI_META_BY_SCAN_TYPE = SOURCE_TYPE_UI_META_ORDERED.associateBy { it.scanType }
+private val SOURCE_TYPE_UI_META_BY_SCAN_TYPE = SOURCE_TYPE_UI_META_ORDERED
+    .groupBy { it.scanType }
+    .mapValues { (_, entries) -> entries.first() }
 
 private val EXTRA_SCAN_SOURCE_LABELS = mapOf(
     SourceCatalog.KEY_ACOUSTIC to "Acoustic",
@@ -9072,6 +9330,50 @@ private fun formatSourceTypeLabel(sourceType: String): String {
         ?: sourceType.replace('_', ' ').uppercase()
 }
 
+private fun scanTypeKeyForSourceName(sourceName: String): String {
+    return SOURCE_TYPE_UI_META_BY_SOURCE[sourceName]?.scanType ?: sourceName.lowercase(Locale.US)
+}
+
+private fun mapSourceIntervalSeconds(
+    sourceType: String,
+    sourceScanIntervals: Map<String, Long>
+): Long {
+    val canonicalType = when (sourceType) {
+        SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
+        SourceCatalog.KEY_BT_CLASSIC,
+        SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
+        else -> sourceType
+    }
+    return sourceScanIntervals[canonicalType]
+        ?: sourceScanIntervals[sourceType]
+        ?: when (canonicalType) {
+            SourceCatalog.KEY_AIRCRAFT -> ScanSettings.DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
+            SourceCatalog.KEY_CAMERA -> ScanSettings.DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+            else -> ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+        }
+}
+
+private fun mapLiveWindowMsForSource(
+    sourceType: String,
+    sourceScanIntervals: Map<String, Long>,
+    liveMapUpdateIntervalSeconds: Long
+): Long {
+    val intervalMs = mapSourceIntervalSeconds(sourceType, sourceScanIntervals).coerceAtLeast(1L) * 1000L
+    val mapTickMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L
+    val minimumMs = if (sourceType == SourceCatalog.KEY_AIRCRAFT) 300_000L else 15_000L
+    return maxOf(minimumMs, intervalMs * 2L, mapTickMs * 2L)
+}
+
+private fun mapRecentWindowMsForSource(
+    sourceType: String,
+    sourceScanIntervals: Map<String, Long>,
+    liveMapUpdateIntervalSeconds: Long
+): Long {
+    val liveWindowMs = mapLiveWindowMsForSource(sourceType, sourceScanIntervals, liveMapUpdateIntervalSeconds)
+    val minimumRecentMs = if (sourceType == SourceCatalog.KEY_AIRCRAFT) 600_000L else 120_000L
+    return maxOf(minimumRecentMs, liveWindowMs * 2L)
+}
+
 private fun suggestSafeIntervalSeconds(referenceDurationMs: Long): Long {
     val targetMs = (referenceDurationMs.coerceAtLeast(0L) * 1.25).toLong().coerceAtLeast(1000L)
     val targetSeconds = (targetMs + 999L) / 1000L
@@ -9100,6 +9402,18 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
         add(SourceCatalog.KEY_BT_CLASSIC)
         add(SourceCatalog.KEY_REMOTE_ID)
     }
+    if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
+    if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
+    if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)
+    if (sensorGateSettings.uwbEnabled) add(SourceCatalog.KEY_UWB)
+    if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_SDR)
+    if (sensorGateSettings.directAcousticEnabled) add(SourceCatalog.KEY_ACOUSTIC)
+    if (sensorGateSettings.directMagneticEnabled) add(SourceCatalog.KEY_MAGNETIC)
+}
+
+private fun enabledIntervalSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
+    if (sensorGateSettings.wifiEnabled) add(SourceCatalog.KEY_WIFI)
+    if (sensorGateSettings.bluetoothLeEnabled) add(SourceCatalog.KEY_BLE)
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
     if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)
