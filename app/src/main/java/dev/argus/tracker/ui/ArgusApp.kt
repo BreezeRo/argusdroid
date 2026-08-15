@@ -202,6 +202,8 @@ private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID = "argus_no_fly_pass_through_alerts"
+private const val NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
 private const val NFC_ALERT_COOLDOWN_MS = 30 * 1000L
 private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
@@ -231,6 +233,12 @@ private const val MAP_RENDER_PIN_LIMIT_MID = 420
 private const val MAP_SWEEP_ANIMATION_STEP_DEGREES = 8f
 private const val MAP_SWEEP_ANIMATION_FRAME_MS = 90L
 private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 650
+private const val NO_FLY_ZONE_RENDER_COUNT_LOW = 60
+private const val NO_FLY_ZONE_RENDER_COUNT_BALANCED = 120
+private const val NO_FLY_ZONE_RENDER_COUNT_HIGH = 220
+private const val NO_FLY_ZONE_MARKER_COUNT_LOW = 24
+private const val NO_FLY_ZONE_MARKER_COUNT_BALANCED = 48
+private const val NO_FLY_ZONE_MARKER_COUNT_HIGH = 96
 private const val DETECTION_TAB_MESH_INDEX = 4
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
@@ -290,6 +298,7 @@ private fun rememberMapStyleOptionsForTheme(): MapStyleOptions? {
 private enum class AlertLogType {
     APPROACH,
     TRACKER,
+    NO_FLY_PASS_THROUGH,
     NFC,
     FOREIGN_SIGNAL
 }
@@ -456,6 +465,13 @@ private data class DeviceLocationCandidate(
     val motionSignal: MotionSignal? = null,
     val trackerRisk: TrackerRiskSignal? = null,
     val isOwned: Boolean = false
+)
+
+private data class AircraftNoFlyTrackSnapshot(
+    val primaryId: String,
+    val secondaryId: String?,
+    val latest: Encounter,
+    val previous: Encounter?
 )
 
 private data class MeshCoverageNodeInsight(
@@ -644,6 +660,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var mapClusteringEnabled by remember { mutableStateOf(ScanSettings.isMapClusteringEnabled(context)) }
     var mapClusterRangeLevel by remember { mutableStateOf(ScanSettings.getMapClusterRangeLevel(context)) }
     var mapNoFlyZonesEnabled by remember { mutableStateOf(ScanSettings.isMapNoFlyZonesEnabled(context)) }
+    var mapNoFlyRenderQualityLevel by remember {
+        mutableStateOf(ScanSettings.getMapNoFlyRenderQualityLevel(context))
+    }
     var mapScannerSweepAnimationEnabled by remember {
         mutableStateOf(ScanSettings.isMapScannerSweepAnimationEnabled(context))
     }
@@ -668,6 +687,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var noFlyPassThroughNotificationsEnabled by remember {
+        mutableStateOf(ScanSettings.isNoFlyPassThroughNotificationsEnabled(context))
+    }
     var nfcNotificationsEnabled by remember { mutableStateOf(ScanSettings.isNfcNotificationsEnabled(context)) }
     var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
     var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
@@ -705,6 +727,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
+    val noFlyZoneStateByAircraft = remember { mutableMapOf<String, Set<String>>() }
+    val lastNoFlyZoneNotificationEpochByAircraftZone = remember { mutableMapOf<String, Long>() }
+    val noFlyZoneDetectionCache = remember { mutableMapOf<String, List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>() }
     var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcAlertEpochMs by remember { mutableStateOf(0L) }
@@ -973,6 +998,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
+        mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
@@ -1220,6 +1246,133 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         staleKeys.forEach { staleKey ->
             trackerStateByDevice.remove(staleKey)
             lastTrackerNotificationEpochByDevice.remove(staleKey)
+        }
+    }
+
+    LaunchedEffect(operationalAnalysisWindow, noFlyPassThroughNotificationsEnabled) {
+        val now = System.currentTimeMillis()
+        val aircraftTracks = withContext(Dispatchers.Default) {
+            operationalAnalysisWindow
+                .asSequence()
+                .filter { encounter ->
+                    encounter.source == EncounterSource.AIRCRAFT &&
+                        isValidLatLon(encounter.lat, encounter.lon)
+                }
+                .groupBy { encounter -> encounter.primaryId }
+                .values
+                .mapNotNull { encountersForAircraft ->
+                    val sorted = encountersForAircraft.sortedByDescending { encounter -> encounter.timestampEpochMs }
+                    val latest = sorted.firstOrNull() ?: return@mapNotNull null
+                    AircraftNoFlyTrackSnapshot(
+                        primaryId = latest.primaryId,
+                        secondaryId = latest.secondaryId,
+                        latest = latest,
+                        previous = sorted.getOrNull(1)
+                    )
+                }
+        }
+
+        val seenAircraftKeys = mutableSetOf<String>()
+        val noFlyLogsToAppend = mutableListOf<AlertLogEntry>()
+
+        for (track in aircraftTracks) {
+            val aircraftKey = "${track.latest.source.name}|${track.primaryId}"
+            seenAircraftKeys += aircraftKey
+
+            val latestLat = track.latest.lat ?: continue
+            val latestLon = track.latest.lon ?: continue
+
+            val location = DetectionLocation(lat = latestLat, lon = latestLon)
+            val zoneCacheKey = noFlyDetectionCacheKey(location)
+            val zones = noFlyZoneDetectionCache[zoneCacheKey] ?: withContext(Dispatchers.IO) {
+                NoFlyZoneOverlayProvider.read(context, near = location)
+            }.also { loaded ->
+                noFlyZoneDetectionCache[zoneCacheKey] = loaded
+            }
+
+            if (zones.isEmpty()) {
+                noFlyZoneStateByAircraft[aircraftKey] = emptySet()
+                continue
+            }
+
+            val currentZoneIds = zones
+                .asSequence()
+                .filter { zone -> noFlyZoneContainsPoint(zone, latestLat, latestLon) }
+                .map { zone -> zone.id }
+                .toSet()
+
+            val previousZoneIds = run {
+                val prevLat = track.previous?.lat
+                val prevLon = track.previous?.lon
+                if (isValidLatLon(prevLat, prevLon)) {
+                    zones
+                        .asSequence()
+                        .filter { zone -> noFlyZoneContainsPoint(zone, prevLat!!, prevLon!!) }
+                        .map { zone -> zone.id }
+                        .toSet()
+                } else {
+                    noFlyZoneStateByAircraft[aircraftKey] ?: emptySet()
+                }
+            }
+
+            val enteredZoneIds = currentZoneIds - previousZoneIds
+            if (enteredZoneIds.isNotEmpty()) {
+                val enteredZones = zones.filter { zone -> zone.id in enteredZoneIds }
+                val zoneHeadline = enteredZones
+                    .take(2)
+                    .joinToString(" / ") { zone ->
+                        zone.label.takeIf { it.isNotBlank() } ?: "Unnamed zone"
+                    }
+                val overflowSuffix = if (enteredZones.size > 2) {
+                    " +${enteredZones.size - 2} more"
+                } else {
+                    ""
+                }
+                val sourceLabel = listSourceLabel(track.latest.source.name, track.secondaryId)
+                val message = "Aircraft $sourceLabel ${track.primaryId} entered no-fly zone: $zoneHeadline$overflowSuffix"
+
+                noFlyLogsToAppend += AlertLogEntry(
+                    timestampEpochMs = now,
+                    type = AlertLogType.NO_FLY_PASS_THROUGH,
+                    source = track.latest.source.name,
+                    primaryId = track.primaryId,
+                    message = message,
+                    confidence = null
+                )
+
+                val zoneNotificationKey = "$aircraftKey|${enteredZoneIds.sorted().joinToString(",")}"
+                val lastNotifiedEpochMs = lastNoFlyZoneNotificationEpochByAircraftZone[zoneNotificationKey] ?: 0L
+                if (noFlyPassThroughNotificationsEnabled &&
+                    hasPostNotificationsPermission(context) &&
+                    now - lastNotifiedEpochMs >= NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS
+                ) {
+                    ensureNoFlyPassThroughNotificationChannel(context)
+                    sendNoFlyPassThroughNotification(
+                        context = context,
+                        primaryId = track.primaryId,
+                        sourceLabel = sourceLabel,
+                        zones = enteredZones
+                    )
+                    lastNoFlyZoneNotificationEpochByAircraftZone[zoneNotificationKey] = now
+                }
+            }
+
+            noFlyZoneStateByAircraft[aircraftKey] = currentZoneIds
+        }
+
+        if (noFlyLogsToAppend.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                AlertLogStore.appendAll(context, noFlyLogsToAppend)
+            }
+            alertLogs = AlertLogStore.read(context)
+        }
+
+        val staleAircraftKeys = noFlyZoneStateByAircraft.keys.filter { key -> key !in seenAircraftKeys }
+        staleAircraftKeys.forEach { staleKey ->
+            noFlyZoneStateByAircraft.remove(staleKey)
+            lastNoFlyZoneNotificationEpochByAircraftZone.keys
+                .filter { key -> key.startsWith("$staleKey|") }
+                .forEach { key -> lastNoFlyZoneNotificationEpochByAircraftZone.remove(key) }
         }
     }
 
@@ -1520,6 +1673,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     mapClusteringEnabled = mapClusteringEnabled,
                     mapClusterRangeLevel = mapClusterRangeLevel,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
+                    mapNoFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
                     wifiAggregateOnlyEnabled = wifiAggregateOnlyEnabled,
@@ -1537,6 +1691,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    noFlyPassThroughNotificationsEnabled = noFlyPassThroughNotificationsEnabled,
                     nfcNotificationsEnabled = nfcNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
                     meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
@@ -1610,6 +1765,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
                     },
+                    onNoFlyPassThroughNotificationsChanged = { enabled ->
+                        noFlyPassThroughNotificationsEnabled = enabled
+                        ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, enabled)
+                    },
                     onNfcNotificationsChanged = { enabled ->
                         nfcNotificationsEnabled = enabled
                         ScanSettings.setNfcNotificationsEnabled(context, enabled)
@@ -1670,6 +1829,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapNoFlyZonesEnabled = enabled
                         ScanSettings.setMapNoFlyZonesEnabled(context, enabled)
                     },
+                    onMapNoFlyRenderQualityLevelSelected = { level ->
+                        mapNoFlyRenderQualityLevel = level
+                        ScanSettings.setMapNoFlyRenderQualityLevel(context, level)
+                    },
                     onMapScannerSweepAnimationEnabledChanged = { enabled ->
                         mapScannerSweepAnimationEnabled = enabled
                         ScanSettings.setMapScannerSweepAnimationEnabled(context, enabled)
@@ -1726,6 +1889,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
+                        mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
@@ -1738,6 +1902,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
@@ -1776,6 +1941,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
+                        mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
@@ -1788,6 +1954,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
@@ -1822,6 +1989,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setMapClusteringEnabled(context, ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED)
                         ScanSettings.setMapClusterRangeLevel(context, ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
                         ScanSettings.setMapNoFlyZonesEnabled(context, ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED)
+                        ScanSettings.setMapNoFlyRenderQualityLevel(context, ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL)
                         ScanSettings.setMapScannerSweepAnimationEnabled(
                             context,
                             ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
@@ -1840,6 +2008,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setApproachDetectionEnabled(context, true)
                         ScanSettings.setApproachNotificationsEnabled(context, true)
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
+                        ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
                         ScanSettings.setMeshConnectivityNotificationsEnabled(context, true)
@@ -1866,6 +2035,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapClusteringEnabled = ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED
                         mapClusterRangeLevel = ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL
                         mapNoFlyZonesEnabled = ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED
+                        mapNoFlyRenderQualityLevel = ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
                         mapScannerSweepAnimationEnabled = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
                         wifiAggregateOnlyEnabled = ScanSettings.DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED
@@ -1877,6 +2047,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachDetectionEnabled = true
                         approachNotificationsEnabled = true
                         trackerNotificationsEnabled = true
+                        noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
                         meshConnectivityNotificationsEnabled = true
@@ -1934,6 +2105,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
@@ -1946,6 +2118,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
+                        mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
                         wifiRandomizedOneOffSuppressionEnabled = ScanSettings.isWifiRandomizedOneOffSuppressionEnabled(context)
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
@@ -1984,6 +2157,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     wifiRandomizedOneOffSuppressionEnabled = wifiRandomizedOneOffSuppressionEnabled,
                     bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
+                    mapNoFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                     mapClusteringEnabled = mapClusteringEnabled,
                     onMapClusteringEnabledChanged = { enabled ->
                         mapClusteringEnabled = enabled
@@ -3174,6 +3348,7 @@ private fun AppSettingsPage(
     mapClusteringEnabled: Boolean,
     mapClusterRangeLevel: Int,
     mapNoFlyZonesEnabled: Boolean,
+    mapNoFlyRenderQualityLevel: Int,
     mapScannerSweepAnimationEnabled: Boolean,
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
     wifiAggregateOnlyEnabled: Boolean,
@@ -3191,6 +3366,7 @@ private fun AppSettingsPage(
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    noFlyPassThroughNotificationsEnabled: Boolean,
     nfcNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
     meshConnectivityNotificationsEnabled: Boolean,
@@ -3206,6 +3382,7 @@ private fun AppSettingsPage(
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onNoFlyPassThroughNotificationsChanged: (Boolean) -> Unit,
     onNfcNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
     onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
@@ -3219,6 +3396,7 @@ private fun AppSettingsPage(
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     onMapClusterRangeLevelSelected: (Int) -> Unit,
     onMapNoFlyZonesEnabledChanged: (Boolean) -> Unit,
+    onMapNoFlyRenderQualityLevelSelected: (Int) -> Unit,
     onMapScannerSweepAnimationEnabledChanged: (Boolean) -> Unit,
     onWifiRandomizedOneOffSuppressionEnabledChanged: (Boolean) -> Unit,
     onWifiAggregateOnlyEnabledChanged: (Boolean) -> Unit,
@@ -3239,6 +3417,7 @@ private fun AppSettingsPage(
     var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
     var themeModeExpanded by remember { mutableStateOf(false) }
     var mapClusterRangeExpanded by remember { mutableStateOf(false) }
+    var noFlyRenderQualityExpanded by remember { mutableStateOf(false) }
     var backupActionInProgress by remember { mutableStateOf(false) }
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
     var backupPassphrase by rememberSaveable { mutableStateOf("") }
@@ -3391,6 +3570,33 @@ private fun AppSettingsPage(
                                 checked = mapNoFlyZonesEnabled,
                                 onCheckedChange = onMapNoFlyZonesEnabledChanged
                             )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("No-fly render quality")
+                            Button(
+                                onClick = { noFlyRenderQualityExpanded = true },
+                                enabled = mapNoFlyZonesEnabled
+                            ) {
+                                Text(mapNoFlyRenderQualityLabel(mapNoFlyRenderQualityLevel))
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = noFlyRenderQualityExpanded,
+                            onDismissRequest = { noFlyRenderQualityExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS.forEach { level ->
+                                DropdownMenuItem(
+                                    text = { Text(mapNoFlyRenderQualityLabel(level)) },
+                                    onClick = {
+                                        onMapNoFlyRenderQualityLevelSelected(level)
+                                        noFlyRenderQualityExpanded = false
+                                    }
+                                )
+                            }
                         }
                         Text("Warning: no-fly overlays can be slow to load/render and may impact map performance. Enable only when needed.")
                         Row(
@@ -3839,6 +4045,16 @@ private fun AppSettingsPage(
                                 checked = trackerNotificationsEnabled,
                                 onCheckedChange = onTrackerNotificationsChanged,
                                 enabled = approachDetectionEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("No-fly pass-through alerts")
+                            Switch(
+                                checked = noFlyPassThroughNotificationsEnabled,
+                                onCheckedChange = onNoFlyPassThroughNotificationsChanged
                             )
                         }
                         Row(
@@ -4361,6 +4577,7 @@ private fun DetectionPage(
     wifiRandomizedOneOffSuppressionEnabled: Boolean,
     bleRandomizedOneOffSuppressionEnabled: Boolean,
     mapNoFlyZonesEnabled: Boolean,
+    mapNoFlyRenderQualityLevel: Int,
     mapClusteringEnabled: Boolean,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     mapClusterRangeLevel: Int,
@@ -5137,6 +5354,7 @@ private fun DetectionPage(
                         currentLocationOverride = deviceMapCurrentLocation,
                         noFlyZones = noFlyZoneOverlays,
                         showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                         pins = deviceMapPins,
                         pinLimit = cellDevicePinLimit,
                         onPinLimitChange = { cellDevicePinLimit = it },
@@ -5255,6 +5473,7 @@ private fun DetectionPage(
                             currentLocationOverride = flightMapCurrentLocation,
                             noFlyZones = noFlyZoneOverlays,
                             showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                            noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                             pins = flightMapPins,
                             pinLimit = flightMapPinLimit,
                             onPinLimitChange = { flightMapPinLimit = it },
@@ -5644,11 +5863,13 @@ private fun DetectionLogsPage(
 
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
+    val noFlyCount = remember(logs) { logs.count { it.type == AlertLogType.NO_FLY_PASS_THROUGH } }
     val foreignCount = remember(logs) { logs.count { it.type == AlertLogType.FOREIGN_SIGNAL } }
     val tabLabels = listOf(
         "All (${logs.size})",
         "Approach ($approachCount)",
         "Tracker ($trackerCount)",
+        "No-Fly ($noFlyCount)",
         "Foreign ($foreignCount)"
     )
 
@@ -5658,7 +5879,8 @@ private fun DetectionLogsPage(
                 when (selectedLogTab) {
                     1 -> entry.type == AlertLogType.APPROACH
                     2 -> entry.type == AlertLogType.TRACKER
-                    3 -> entry.type == AlertLogType.FOREIGN_SIGNAL
+                    3 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
+                    4 -> entry.type == AlertLogType.FOREIGN_SIGNAL
                     else -> true
                 }
             }
@@ -5705,6 +5927,7 @@ private fun DetectionLogsPage(
                 AssistChip(onClick = { }, label = { Text("Total ${logs.size}") })
                 AssistChip(onClick = { }, label = { Text("Approach $approachCount") })
                 AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
+                AssistChip(onClick = { }, label = { Text("No-Fly $noFlyCount") })
                 AssistChip(onClick = { }, label = { Text("Foreign $foreignCount") })
             }
         }
@@ -5737,12 +5960,14 @@ private fun DetectionLogsPage(
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
+                AlertLogType.NO_FLY_PASS_THROUGH -> Color(0xFFEF6C00)
                 AlertLogType.NFC -> Color(0xFF2E7D32)
                 AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
             }
             val typeLabel = when (entry.type) {
                 AlertLogType.APPROACH -> "Approach"
                 AlertLogType.TRACKER -> "Tracker"
+                AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
                 AlertLogType.NFC -> "NFC"
                 AlertLogType.FOREIGN_SIGNAL -> "Foreign Signal"
             }
@@ -6465,6 +6690,7 @@ private fun DetectionMapPage(
     showCoverageRadiusCircle: Boolean = true,
     noFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon> = emptyList(),
     showNoFlyZoneControl: Boolean = false,
+    noFlyRenderQualityLevel: Int = ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL,
     pins: List<MapPin>,
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
@@ -6797,22 +7023,57 @@ private fun DetectionMapPage(
         val bucketZoom = zoomBucket / 2f
         filteredVisiblePins.size > MAP_RENDER_PIN_LIMIT_MID || bucketZoom < 9.5f
     }
-    val renderedNoFlyZones = remember(noFlyZones, showNoFlyZoneControl, noFlyZonesVisible) {
-        if (!showNoFlyZoneControl || !noFlyZonesVisible) {
-            emptyList()
+    val noFlyRenderAnchor = coverageAnchorLocation ?: currentLocation
+    val noFlyQualityProfile = remember(noFlyRenderQualityLevel) {
+        noFlyRenderQualityProfile(noFlyRenderQualityLevel)
+    }
+    val noFlyRenderRadiusMeters = remember(showRadiusControl, radiusMiles) {
+        if (showRadiusControl) {
+            radiusMiles.coerceAtLeast(1) * 1609.344
         } else {
-            noFlyZones.filter { zone -> zone.boundary.size >= 3 }
+            null
         }
     }
-    val noFlyZonePoints = remember(renderedNoFlyZones) {
-        renderedNoFlyZones.mapNotNull { zone ->
-            val centroid = centroidOfDetectionPolygon(zone.boundary) ?: return@mapNotNull null
-            zone to LatLng(centroid.lat, centroid.lon)
+    val renderedNoFlyZones by produceState(
+        emptyList<NoFlyZoneRenderShape>(),
+        noFlyZones,
+        showNoFlyZoneControl,
+        noFlyZonesVisible,
+        zoomBucket,
+        noFlyRenderAnchor,
+        selectedNoFlyZoneId,
+        noFlyRenderQualityLevel,
+        noFlyRenderRadiusMeters
+    ) {
+        value = withContext(Dispatchers.Default) {
+            buildNoFlyZoneRenderShapes(
+                noFlyZones = noFlyZones,
+                showNoFlyZoneControl = showNoFlyZoneControl,
+                noFlyZonesVisible = noFlyZonesVisible,
+                zoomBucket = zoomBucket,
+                anchor = noFlyRenderAnchor,
+                renderRadiusMeters = noFlyRenderRadiusMeters,
+                selectedZoneId = selectedNoFlyZoneId,
+                qualityLevel = noFlyRenderQualityLevel,
+                maxRenderCount = noFlyQualityProfile.maxRenderCount
+            )
         }
+    }
+    val renderedNoFlyZoneMarkers = remember(renderedNoFlyZones, selectedNoFlyZoneId) {
+        val selected = selectedNoFlyZoneId
+        val selectedMarker = renderedNoFlyZones.firstOrNull {
+            it.zone.id == selected && it.centroid != null
+        }
+        val base = renderedNoFlyZones
+            .asSequence()
+            .filter { it.centroid != null && it.zone.id != selected }
+            .take(noFlyQualityProfile.maxMarkerCount)
+            .toList()
+        if (selectedMarker != null) listOf(selectedMarker) + base else base
     }
     val selectedNoFlyZone = remember(renderedNoFlyZones, selectedNoFlyZoneId) {
         val selectedId = selectedNoFlyZoneId ?: return@remember null
-        renderedNoFlyZones.firstOrNull { it.id == selectedId }
+        renderedNoFlyZones.firstOrNull { it.zone.id == selectedId }?.zone
     }
     val shouldClusterPins = remember(useDenseDotMarkers, mapClusteringEnabled) {
         useDenseDotMarkers && mapClusteringEnabled
@@ -6986,7 +7247,7 @@ private fun DetectionMapPage(
 
     LaunchedEffect(renderedNoFlyZones, selectedNoFlyZoneId) {
         if (selectedNoFlyZoneId == null) return@LaunchedEffect
-        if (renderedNoFlyZones.none { it.id == selectedNoFlyZoneId }) {
+        if (renderedNoFlyZones.none { it.zone.id == selectedNoFlyZoneId }) {
             selectedNoFlyZoneId = null
         }
     }
@@ -7616,7 +7877,7 @@ private fun DetectionMapPage(
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
                             Text("Pins rendered: ${renderedPins.size}/${pins.size}")
                             if (showNoFlyZoneControl) {
-                                Text("No-fly zones: ${noFlyZones.size} (${if (noFlyZonesVisible) "visible" else "hidden"})")
+                                Text("No-fly zones: ${renderedNoFlyZones.size}/${noFlyZones.size} (${if (noFlyZonesVisible) "visible" else "hidden"})")
                             }
                             if (showCoverageRadiusCircle && stableCoverageRadiusMeters > 10.0) {
                                 Text("Proximity coverage radius (orange): ${formatDistanceFeetMiles(stableCoverageRadiusMeters)}")
@@ -7700,9 +7961,10 @@ private fun DetectionMapPage(
                     )
                 ) {
                     if (renderedNoFlyZones.isNotEmpty()) {
-                        renderedNoFlyZones.forEach { zone ->
+                        renderedNoFlyZones.forEach { zoneRender ->
+                            val zone = zoneRender.zone
                             Polygon(
-                                points = zone.boundary.map { point -> LatLng(point.lat, point.lon) },
+                                points = zoneRender.polygonPoints,
                                 fillColor = Color(0x30E53935),
                                 strokeColor = Color(0xFFE53935),
                                 strokeWidth = 2f,
@@ -7712,7 +7974,9 @@ private fun DetectionMapPage(
                                 }
                             )
                         }
-                        noFlyZonePoints.forEach { (zone, point) ->
+                        renderedNoFlyZoneMarkers.forEach { zoneRender ->
+                            val zone = zoneRender.zone
+                            val point = zoneRender.centroid ?: return@forEach
                             val markerState = remember(point) { MarkerState(position = point) }
                             Marker(
                                 state = markerState,
@@ -8534,6 +8798,113 @@ private fun centroidOfDetectionPolygon(points: List<DetectionLocation>): Detecti
     )
 }
 
+private data class NoFlyZoneRenderShape(
+    val zone: NoFlyZoneOverlayProvider.NoFlyZonePolygon,
+    val polygonPoints: List<LatLng>,
+    val centroid: LatLng?
+)
+
+private fun buildNoFlyZoneRenderShapes(
+    noFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>,
+    showNoFlyZoneControl: Boolean,
+    noFlyZonesVisible: Boolean,
+    zoomBucket: Int,
+    anchor: DetectionLocation?,
+    renderRadiusMeters: Double?,
+    selectedZoneId: String?,
+    qualityLevel: Int,
+    maxRenderCount: Int
+): List<NoFlyZoneRenderShape> {
+    if (!showNoFlyZoneControl || !noFlyZonesVisible || noFlyZones.isEmpty()) return emptyList()
+
+    val valid = noFlyZones.filter { zone -> zone.boundary.size >= 3 }
+    if (valid.isEmpty()) return emptyList()
+
+    val safeLimit = maxRenderCount.coerceAtLeast(1)
+    val prioritized = if (anchor != null) {
+        val byDistance = valid
+            .mapNotNull { zone ->
+                val centroid = centroidOfDetectionPolygon(zone.boundary) ?: return@mapNotNull null
+                val distance = distanceFromLocationMeters(
+                    fromLat = anchor.lat,
+                    fromLon = anchor.lon,
+                    toLat = centroid.lat,
+                    toLon = centroid.lon
+                ) ?: Double.MAX_VALUE
+                zone to distance
+            }
+            .sortedBy { it.second }
+
+        if (renderRadiusMeters != null && renderRadiusMeters > 0.0) {
+            val inRadius = byDistance
+                .filter { (_, distance) -> distance <= renderRadiusMeters }
+                .map { it.first }
+            val outOfRadius = byDistance
+                .filter { (_, distance) -> distance > renderRadiusMeters }
+                .map { it.first }
+                .take((safeLimit - inRadius.size).coerceAtLeast(0))
+            (inRadius + outOfRadius).toMutableList()
+        } else {
+            byDistance
+                .take(safeLimit)
+                .map { it.first }
+                .toMutableList()
+        }
+    } else {
+        valid.take(safeLimit).toMutableList()
+    }
+
+    if (!selectedZoneId.isNullOrBlank() && prioritized.none { it.id == selectedZoneId }) {
+        valid.firstOrNull { it.id == selectedZoneId }?.let { prioritized += it }
+    }
+
+    val baseBoundaryPointLimit = when {
+        zoomBucket < 18 -> 60
+        zoomBucket < 24 -> 100
+        else -> 160
+    }
+    val pointScale = noFlyRenderQualityProfile(qualityLevel).pointScale
+    val boundaryPointLimit = (baseBoundaryPointLimit * pointScale)
+        .roundToInt()
+        .coerceAtLeast(24)
+
+    return prioritized.distinctBy { it.id }.mapNotNull { zone ->
+        val simplifiedBoundary = simplifyNoFlyBoundary(zone.boundary, boundaryPointLimit)
+        if (simplifiedBoundary.size < 3) return@mapNotNull null
+        val polygonPoints = simplifiedBoundary.map { point -> LatLng(point.lat, point.lon) }
+        val centroid = centroidOfDetectionPolygon(simplifiedBoundary)?.let { LatLng(it.lat, it.lon) }
+        NoFlyZoneRenderShape(
+            zone = zone,
+            polygonPoints = polygonPoints,
+            centroid = centroid
+        )
+    }
+}
+
+private fun simplifyNoFlyBoundary(
+    boundary: List<DetectionLocation>,
+    maxPoints: Int
+): List<DetectionLocation> {
+    if (boundary.size <= maxPoints || maxPoints < 3) return boundary
+
+    val safeLimit = maxPoints.coerceAtLeast(3)
+    val lastIndex = boundary.lastIndex
+    val sampled = ArrayList<DetectionLocation>(safeLimit)
+    val step = lastIndex.toDouble() / (safeLimit - 1).toDouble()
+    var previousIndex = -1
+
+    for (sampleIndex in 0 until safeLimit) {
+        val boundaryIndex = (sampleIndex * step).roundToInt().coerceIn(0, lastIndex)
+        if (boundaryIndex != previousIndex) {
+            sampled += boundary[boundaryIndex]
+            previousIndex = boundaryIndex
+        }
+    }
+
+    if (sampled.size < 3) return boundary.take(3)
+    return sampled
+}
+
 private fun noFlyZoneSnippet(zone: NoFlyZoneOverlayProvider.NoFlyZonePolygon): String {
     val altitudeLabel = noFlyZoneAltitudeLabel(zone)
     val ruleLabel = zone.regulationHint?.takeIf { it.isNotBlank() } ?: "Unspecified"
@@ -9163,6 +9534,37 @@ private fun mapClusterRangeLabel(level: Int): String = when (level) {
     4 -> "Wide"
     5 -> "Very Wide"
     else -> "Balanced"
+}
+
+private fun mapNoFlyRenderQualityLabel(level: Int): String = when (level) {
+    1 -> "Speed"
+    2 -> "Balanced"
+    3 -> "Detail"
+    else -> "Balanced"
+}
+
+private data class NoFlyRenderQualityProfile(
+    val maxRenderCount: Int,
+    val maxMarkerCount: Int,
+    val pointScale: Double
+)
+
+private fun noFlyRenderQualityProfile(level: Int): NoFlyRenderQualityProfile = when (level) {
+    1 -> NoFlyRenderQualityProfile(
+        maxRenderCount = NO_FLY_ZONE_RENDER_COUNT_LOW,
+        maxMarkerCount = NO_FLY_ZONE_MARKER_COUNT_LOW,
+        pointScale = 0.60
+    )
+    3 -> NoFlyRenderQualityProfile(
+        maxRenderCount = NO_FLY_ZONE_RENDER_COUNT_HIGH,
+        maxMarkerCount = NO_FLY_ZONE_MARKER_COUNT_HIGH,
+        pointScale = 1.55
+    )
+    else -> NoFlyRenderQualityProfile(
+        maxRenderCount = NO_FLY_ZONE_RENDER_COUNT_BALANCED,
+        maxMarkerCount = NO_FLY_ZONE_MARKER_COUNT_BALANCED,
+        pointScale = 1.00
+    )
 }
 
 private fun mapClusterRangeScale(level: Int): Double = when (level) {
@@ -11484,6 +11886,44 @@ private fun hasNetworkConnectivity(context: android.content.Context): Boolean {
     return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 }
 
+private fun noFlyDetectionCacheKey(location: DetectionLocation): String {
+    val latBucket = (location.lat * 2.0).roundToInt()
+    val lonBucket = (location.lon * 2.0).roundToInt()
+    return "$latBucket:$lonBucket"
+}
+
+private fun noFlyZoneContainsPoint(
+    zone: NoFlyZoneOverlayProvider.NoFlyZonePolygon,
+    lat: Double,
+    lon: Double
+): Boolean {
+    val boundary = zone.boundary
+    if (boundary.size < 3) return false
+    return polygonContainsPoint(boundary, lat, lon)
+}
+
+private fun polygonContainsPoint(boundary: List<DetectionLocation>, lat: Double, lon: Double): Boolean {
+    var inside = false
+    var previousIndex = boundary.size - 1
+    for (index in boundary.indices) {
+        val currentPoint = boundary[index]
+        val previousPoint = boundary[previousIndex]
+
+        val currentLon = currentPoint.lon
+        val currentLat = currentPoint.lat
+        val previousLon = previousPoint.lon
+        val previousLat = previousPoint.lat
+
+        val intersects =
+            ((currentLat > lat) != (previousLat > lat)) &&
+                (lon < (previousLon - currentLon) * (lat - currentLat) / ((previousLat - currentLat) + 1e-12) + currentLon)
+
+        if (intersects) inside = !inside
+        previousIndex = index
+    }
+    return inside
+}
+
 private fun hasPostNotificationsPermission(context: android.content.Context): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
     return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
@@ -11518,6 +11958,22 @@ private fun ensureTrackerNotificationChannel(context: android.content.Context) {
         NotificationManager.IMPORTANCE_HIGH
     ).apply {
         description = "Alerts when unknown devices repeatedly co-move across locations"
+    }
+    manager.createNotificationChannel(channel)
+}
+
+private fun ensureNoFlyPassThroughNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID,
+        "No-Fly Zone Pass-Through Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when tracked aircraft enter a configured no-fly zone"
     }
     manager.createNotificationChannel(channel)
 }
@@ -11630,6 +12086,39 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
         .build()
 
     val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun sendNoFlyPassThroughNotification(
+    context: android.content.Context,
+    primaryId: String,
+    sourceLabel: String,
+    zones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>
+) {
+    if (zones.isEmpty()) return
+
+    val title = "Aircraft entered no-fly zone"
+    val zoneHeadline = zones
+        .take(2)
+        .joinToString(" / ") { zone -> zone.label.takeIf { it.isNotBlank() } ?: "Unnamed zone" }
+    val overflowSuffix = if (zones.size > 2) " +${zones.size - 2} more" else ""
+    val content = "$sourceLabel $primaryId • $zoneHeadline$overflowSuffix"
+
+    val notification = NotificationCompat.Builder(context, NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_error)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val zoneIdSignature = zones
+        .asSequence()
+        .map { zone -> zone.id }
+        .sorted()
+        .joinToString(",")
+    val notificationId = ("no-fly:$primaryId:$zoneIdSignature").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
