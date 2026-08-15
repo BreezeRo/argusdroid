@@ -22,7 +22,6 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - UWB ingest.
 - SDR ingest.
 - Direct acoustic channel.
-- Real-time acoustic channel (continuous foreground listening path).
 - Direct magnetometer channel.
 - Camera events via SDR-style camera payloads and public camera POI fallback.
 
@@ -39,7 +38,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Approach detection with confidence and trend outputs.
 - Tracker suspicion scoring for repeated co-movement behavior.
 - Foreign signal risk scoring across channel indicators with configurable threshold.
-- Signal Intel includes direct plus real-time acoustic visibility and gunshot-candidate event counters.
+- Signal Intel includes direct acoustic and direct magnetometer diagnostics.
 - NFC alert surfacing for newly observed NFC encounters.
 - Magnetometer disturbance increase alerts.
 - Aircraft no-fly zone pass-through detection:
@@ -125,11 +124,6 @@ Disabled source gates prevent that source from participating in both scheduled a
 - Enabled ADS-B and Public Flight Radar by default.
 - Set approach notifications and mesh connectivity notifications off by default.
 - Removed artificial startup loader holds and now release after first startup scan completion.
-- Added Detection Signal Intel breakdown for real-time acoustic and gunshot-candidate counts.
-- Added Settings -> Notifications toggle for gunshot detected alerts.
-- Added real-time acoustic log enhancements:
-	- Immediate loud-spike log events (not only periodic telemetry cadence).
-	- Per-entry RMS/Peak progress meters normalized to historical ranges.
 - Added startup loader progress bar tied to runtime/bootstrap readiness checkpoints.
 - Added no-fly incident deep-link flow:
 	- No-fly notifications are now clickable and open a dedicated incident map route.

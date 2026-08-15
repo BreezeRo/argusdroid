@@ -126,7 +126,6 @@ import dev.argus.tracker.sensing.CellTowerLookupService
 import dev.argus.tracker.sensing.DetectionLocation
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.NoFlyZoneOverlayProvider
-import dev.argus.tracker.sensing.AcousticRealtimeForegroundServiceController
 import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
 import dev.argus.tracker.sensing.SensorStatus
 import dev.argus.tracker.sensing.SensorStatusProvider
@@ -210,15 +209,8 @@ private const val NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID = "argus_no_fly_pass_thro
 private const val NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
 private const val NFC_ALERT_COOLDOWN_MS = 30 * 1000L
-private const val GUNSHOT_ALERT_CHANNEL_ID = "argus_gunshot_alerts"
-private const val GUNSHOT_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
 private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
-private const val ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS = 15_000L
-private const val ACOUSTIC_REALTIME_SPIKE_LOG_COOLDOWN_MS = 3_000L
-private const val ACOUSTIC_REALTIME_SPIKE_PEAK_DBFS_THRESHOLD = -24.0
-private const val ACOUSTIC_REALTIME_SPIKE_RMS_DBFS_THRESHOLD = -32.0
-private const val ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS = 5L * 60L * 1000L
 private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
 private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
@@ -312,17 +304,6 @@ private fun parseNoFlyZoneSummaryFromLogMessage(message: String): String? {
         .takeIf { it.isNotBlank() }
 }
 
-private fun parseAcousticMetricDbFs(message: String, metric: String): Double? {
-    val marker = "$metric "
-    val start = message.indexOf(marker, ignoreCase = true)
-    if (start < 0) return null
-    val valueStart = start + marker.length
-    val valueEnd = message.indexOf(" dBFS", startIndex = valueStart, ignoreCase = true)
-        .takeIf { it > valueStart }
-        ?: return null
-    return message.substring(valueStart, valueEnd).trim().toDoubleOrNull()
-}
-
 private fun topLevelRouteForSelection(route: String): String = when (route) {
     LOGS_ENCOUNTERS_ROUTE, DEVICES_ENCOUNTERS_ROUTE -> LOGS_ROUTE
     else -> route
@@ -341,8 +322,7 @@ private enum class AlertLogType {
     TRACKER,
     NO_FLY_PASS_THROUGH,
     NFC,
-    FOREIGN_SIGNAL,
-    ACOUSTIC_REALTIME
+    FOREIGN_SIGNAL
 }
 
 private data class AlertLogEntry(
@@ -394,7 +374,6 @@ private data class ForeignSignalRiskSignal(
     val acousticProxyScore: Double,
     val magneticProxyScore: Double,
     val directAcousticObserved: Boolean,
-    val realtimeAcousticObserved: Boolean,
     val directMagneticObserved: Boolean,
     val unavailableSignals: List<String>
 )
@@ -460,7 +439,6 @@ private data class SensorGateSettings(
     val uwbEnabled: Boolean,
     val sdrEnabled: Boolean,
     val directAcousticEnabled: Boolean,
-    val directAcousticRealtimeEnabled: Boolean,
     val directMagneticEnabled: Boolean
 )
 
@@ -690,7 +668,6 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
         sdrEnabled = ScanSettings.isSdrSensorEnabled(context),
         directAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context),
-        directAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context),
         directMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
     )
 
@@ -742,7 +719,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         mutableStateOf(ScanSettings.isNoFlyPassThroughNotificationsEnabled(context))
     }
     var nfcNotificationsEnabled by remember { mutableStateOf(ScanSettings.isNfcNotificationsEnabled(context)) }
-    var gunshotNotificationsEnabled by remember { mutableStateOf(ScanSettings.isGunshotNotificationsEnabled(context)) }
     var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
     var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
     var meshWipeNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshWipeNotificationsEnabled(context)) }
@@ -750,12 +726,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var foreignSignalAlertsEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalAlertsEnabled(context)) }
     var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
     var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
-    var foreignDirectAcousticRealtimeEnabled by remember {
-        mutableStateOf(ScanSettings.isForeignDirectAcousticRealtimeEnabled(context))
-    }
-    var foreignDirectAcousticGunshotEnabled by remember {
-        mutableStateOf(ScanSettings.isForeignDirectAcousticGunshotEnabled(context))
-    }
     var foreignDirectMagneticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectMagneticEnabled(context)) }
     var chainLinkEnabled by remember { mutableStateOf(ScanSettings.isChainLinkEnabled(context)) }
     var chainNodeId by remember { mutableStateOf(ScanSettings.getChainNodeId(context)) }
@@ -791,12 +761,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcAlertEpochMs by remember { mutableStateOf(0L) }
-    var lastGunshotAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcObservedEncounterEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
-    var lastAcousticRealtimeTelemetryLogEpochMs by remember { mutableStateOf(0L) }
-    var lastAcousticRealtimeSpikeLogEpochMs by remember { mutableStateOf(0L) }
-    var lastAcousticRealtimeLoggedEncounterEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
     var lastWearStatusPublishEpochMs by remember { mutableStateOf(0L) }
@@ -814,8 +780,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             it == SourceCatalog.KEY_WIFI_DIRECT ||
                 it == SourceCatalog.KEY_BT_CLASSIC ||
                 it == SourceCatalog.KEY_REMOTE_ID ||
-                it == SourceCatalog.KEY_NFC ||
-                it == SourceCatalog.KEY_ACOUSTIC_REALTIME
+                it == SourceCatalog.KEY_NFC
         }
     }
     var mapResetGeneration by remember { mutableStateOf(0L) }
@@ -1124,8 +1089,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
-        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
-        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -1138,7 +1101,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             ScanSettings.setChainPersistentChannelEnabled(context, true)
         }
         MeshForegroundServiceController.ensureState(context)
-        AcousticRealtimeForegroundServiceController.ensureState(context)
         startupConfigLoaded = true
     }
 
@@ -1636,109 +1598,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         lastMagneticObservedSampleEpochMs = current.first
     }
 
-    LaunchedEffect(operationalAnalysisWindow, foreignDirectAcousticRealtimeEnabled, gunshotNotificationsEnabled) {
-        if (!foreignDirectAcousticRealtimeEnabled) return@LaunchedEffect
-
-        val now = System.currentTimeMillis()
-        val effectiveLastAcousticRealtimeLoggedEncounterEpochMs = if (
-            lastAcousticRealtimeLoggedEncounterEpochMs > now + ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS
-        ) {
-            0L
-        } else {
-            lastAcousticRealtimeLoggedEncounterEpochMs
-        }
-
-        val latestRealtimeEvent = operationalAnalysisWindow
-            .asSequence()
-            .filter(::isRealtimeAcousticSignal)
-            .filter { encounter ->
-                encounter.timestampEpochMs > effectiveLastAcousticRealtimeLoggedEncounterEpochMs &&
-                    encounter.timestampEpochMs <= now + ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS
-            }
-            .sortedByDescending { it.timestampEpochMs }
-            .mapNotNull { encounter ->
-                parseEncounterPayload(encounter)?.let { payload -> encounter to payload }
-            }
-            .firstOrNull()
-            ?: return@LaunchedEffect
-
-        val latestRealtimeEncounter = latestRealtimeEvent.first
-        val payload = latestRealtimeEvent.second
-        val eventType = payload.optString("eventType", "").trim().lowercase(Locale.US)
-        val isGunshotCandidate = eventType == "gunshot_candidate"
-
-        val rmsDbFs = payload.optDoubleOrNull("rmsDbFs")
-        val peakDbFs = payload.optDoubleOrNull("peakDbFs")
-        val crestFactor = payload.optDoubleOrNull("crestFactor")
-        val zeroCrossingRate = payload.optDoubleOrNull("zeroCrossingRate")
-        val sampleRateHz = payload.optInt("sampleRateHz", 0).takeIf { it > 0 }
-
-        val shouldLogTelemetry = !isGunshotCandidate &&
-            (now - lastAcousticRealtimeTelemetryLogEpochMs >= ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS)
-        val isLoudSpike = !isGunshotCandidate && (
-            (peakDbFs != null && peakDbFs >= ACOUSTIC_REALTIME_SPIKE_PEAK_DBFS_THRESHOLD) ||
-                (rmsDbFs != null && rmsDbFs >= ACOUSTIC_REALTIME_SPIKE_RMS_DBFS_THRESHOLD)
-            )
-        val shouldLogLoudSpike = isLoudSpike &&
-            (now - lastAcousticRealtimeSpikeLogEpochMs >= ACOUSTIC_REALTIME_SPIKE_LOG_COOLDOWN_MS)
-
-        if (!isGunshotCandidate && !shouldLogTelemetry && !shouldLogLoudSpike) {
-            return@LaunchedEffect
-        }
-
-        val detailParts = buildList {
-            rmsDbFs?.let { add("RMS ${String.format(Locale.US, "%.1f dBFS", it)}") }
-            peakDbFs?.let { add("Peak ${String.format(Locale.US, "%.1f dBFS", it)}") }
-            crestFactor?.let { add("Crest ${String.format(Locale.US, "%.2f", it)}") }
-            zeroCrossingRate?.let { add("ZCR ${String.format(Locale.US, "%.3f", it)}") }
-            sampleRateHz?.let { add("${it}Hz") }
-        }
-        val detail = if (detailParts.isEmpty()) "" else " (${detailParts.joinToString(" • ")})"
-        val message = if (isGunshotCandidate) {
-            "Acoustic real-time gunshot candidate detected$detail"
-        } else if (shouldLogLoudSpike) {
-            "Acoustic real-time loud sound spike detected$detail"
-        } else {
-            "Acoustic real-time telemetry sample$detail"
-        }
-
-        if (isGunshotCandidate &&
-            gunshotNotificationsEnabled &&
-            hasPostNotificationsPermission(context) &&
-            now - lastGunshotAlertEpochMs >= GUNSHOT_ALERT_COOLDOWN_MS
-        ) {
-            ensureGunshotDetectedNotificationChannel(context)
-            sendGunshotDetectedNotification(
-                context = context,
-                timestampEpochMs = latestRealtimeEncounter.timestampEpochMs,
-                message = message
-            )
-            lastGunshotAlertEpochMs = now
-        }
-
-        withContext(Dispatchers.IO) {
-            AlertLogStore.append(
-                context,
-                AlertLogEntry(
-                    timestampEpochMs = latestRealtimeEncounter.timestampEpochMs,
-                    type = AlertLogType.ACOUSTIC_REALTIME,
-                    source = latestRealtimeEncounter.source.name,
-                    primaryId = latestRealtimeEncounter.primaryId,
-                    message = message,
-                    confidence = null
-                )
-            )
-        }
-        alertLogs = AlertLogStore.read(context)
-        lastAcousticRealtimeLoggedEncounterEpochMs = latestRealtimeEncounter.timestampEpochMs
-        if (!isGunshotCandidate && shouldLogTelemetry) {
-            lastAcousticRealtimeTelemetryLogEpochMs = now
-        }
-        if (shouldLogLoudSpike) {
-            lastAcousticRealtimeSpikeLogEpochMs = now
-        }
-    }
-
     LaunchedEffect(operationalAnalysisWindow, nfcNotificationsEnabled) {
         val latestNfc = operationalAnalysisWindow
             .asSequence()
@@ -1910,14 +1769,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
                                 "sdr" -> ScanSettings.setSdrSensorEnabled(context, enabled)
                                 "direct_acoustic" -> ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
-                                "direct_acoustic_realtime" -> ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, enabled)
                                 "direct_magnetic" -> ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
                             }
                             RemoteIdForegroundServiceController.ensureState(context)
-                            AcousticRealtimeForegroundServiceController.ensureState(context)
                             sensorGateSettings = readSensorGateSettings(context)
                             foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
-                            foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
                             foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                             sensorStatuses = SensorStatusProvider.read(context)
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-sensor-gate")
@@ -1974,7 +1830,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
                     noFlyPassThroughNotificationsEnabled = noFlyPassThroughNotificationsEnabled,
                     nfcNotificationsEnabled = nfcNotificationsEnabled,
-                    gunshotNotificationsEnabled = gunshotNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
                     meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
                     meshWipeNotificationsEnabled = meshWipeNotificationsEnabled,
@@ -1982,8 +1837,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     foreignSignalAlertsEnabled = foreignSignalAlertsEnabled,
                     foreignSignalAlertThreshold = foreignSignalAlertThreshold,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
-                    foreignDirectAcousticRealtimeEnabled = foreignDirectAcousticRealtimeEnabled,
-                    foreignDirectAcousticGunshotEnabled = foreignDirectAcousticGunshotEnabled,
                     foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
                     onSourceScanIntervalSelected = { sourceType, seconds ->
                         val previous = sourceScanIntervals[sourceType]
@@ -2057,10 +1910,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         nfcNotificationsEnabled = enabled
                         ScanSettings.setNfcNotificationsEnabled(context, enabled)
                     },
-                    onGunshotNotificationsChanged = { enabled ->
-                        gunshotNotificationsEnabled = enabled
-                        ScanSettings.setGunshotNotificationsEnabled(context, enabled)
-                    },
                     onMagneticIncreaseNotificationsChanged = { enabled ->
                         magneticIncreaseNotificationsEnabled = enabled
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, enabled)
@@ -2088,22 +1937,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onForeignDirectAcousticEnabledChanged = { enabled ->
                         foreignDirectAcousticEnabled = enabled
                         ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         sensorGateSettings = readSensorGateSettings(context)
                         scope.launch {
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-acoustic")
                         }
-                    },
-                    onForeignDirectAcousticRealtimeEnabledChanged = { enabled ->
-                        foreignDirectAcousticRealtimeEnabled = enabled
-                        ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, enabled)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
-                        sensorGateSettings = readSensorGateSettings(context)
-                        sensorStatuses = SensorStatusProvider.read(context)
-                    },
-                    onForeignDirectAcousticGunshotEnabledChanged = { enabled ->
-                        foreignDirectAcousticGunshotEnabled = enabled
-                        ScanSettings.setForeignDirectAcousticGunshotEnabled(context, enabled)
                     },
                     onForeignDirectMagneticEnabledChanged = { enabled ->
                         foreignDirectMagneticEnabled = enabled
@@ -2204,7 +2041,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
-                        gunshotNotificationsEnabled = ScanSettings.isGunshotNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -2212,8 +2048,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
-                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
-                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -2221,7 +2055,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
                         MeshForegroundServiceController.ensureState(context)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Backup imported from $fileName"
                     },
@@ -2260,7 +2093,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
-                        gunshotNotificationsEnabled = ScanSettings.isGunshotNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -2268,8 +2100,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
-                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
-                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
                         sourceScanTimings = ScanSettings.getSourceScanTimings(context)
@@ -2277,7 +2107,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         alertLogs = AlertLogStore.read(context)
                         ownedDeviceKeys = OwnedDeviceRegistry.read(context)
                         MeshForegroundServiceController.ensureState(context)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Encrypted backup imported from $fileName"
                     },
@@ -2318,7 +2147,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
                         ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
-                        ScanSettings.setGunshotNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
                         ScanSettings.setMeshConnectivityNotificationsEnabled(context, false)
                         ScanSettings.setMeshWipeNotificationsEnabled(context, true)
@@ -2329,8 +2157,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         )
                         ScanSettings.setForeignDirectAcousticEnabled(context, false)
-                        ScanSettings.setForeignDirectAcousticRealtimeEnabled(context, false)
-                        ScanSettings.setForeignDirectAcousticGunshotEnabled(context, false)
                         ScanSettings.setForeignDirectMagneticEnabled(context, false)
 
                         intervalManagedSourceTypes.forEach { sourceType ->
@@ -2360,7 +2186,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = true
                         noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
-                        gunshotNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
                         meshConnectivityNotificationsEnabled = false
                         meshWipeNotificationsEnabled = true
@@ -2368,12 +2193,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = true
                         foreignSignalAlertThreshold = ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         foreignDirectAcousticEnabled = false
-                        foreignDirectAcousticRealtimeEnabled = false
-                        foreignDirectAcousticGunshotEnabled = false
                         foreignDirectMagneticEnabled = false
                         sensorGateSettings = readSensorGateSettings(context)
                         sensorStatuses = SensorStatusProvider.read(context)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
 
                         scope.launch {
                             alignWorkerCadenceWithSources(reasonCode = "scheduler-align-defaults-reset")
@@ -2422,7 +2244,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
-                        gunshotNotificationsEnabled = ScanSettings.isGunshotNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
@@ -2430,8 +2251,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
                         foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
-                        foreignDirectAcousticRealtimeEnabled = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
-                        foreignDirectAcousticGunshotEnabled = ScanSettings.isForeignDirectAcousticGunshotEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
@@ -2442,7 +2261,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         wifiAggregateOnlyEnabled = ScanSettings.isWifiAggregateOnlyEnabled(context)
                         bleRandomizedOneOffSuppressionEnabled = ScanSettings.isBleRandomizedOneOffSuppressionEnabled(context)
                         bleAggregateOnlyEnabled = ScanSettings.isBleAggregateOnlyEnabled(context)
-                        AcousticRealtimeForegroundServiceController.ensureState(context)
                         viewModel.refreshSummary()
                         "Hard reset completed: local data/logs cleared and mesh settings reset."
                     }
@@ -3660,13 +3478,6 @@ private fun HomePage(
                             sensorStatusByName["Acoustic (Direct)"]
                         ),
                         HomeSensorToggle(
-                            "direct_acoustic_realtime",
-                            "Acoustic (Real-time)",
-                            "Continuous on-device listening",
-                            sensorGateSettings.directAcousticRealtimeEnabled,
-                            sensorStatusByName["Acoustic (Real-time)"]
-                        ),
-                        HomeSensorToggle(
                             "direct_magnetic",
                             "Magnetometer (Direct)",
                             "On-device magnetic proxy",
@@ -3781,7 +3592,6 @@ private fun AppSettingsPage(
     trackerNotificationsEnabled: Boolean,
     noFlyPassThroughNotificationsEnabled: Boolean,
     nfcNotificationsEnabled: Boolean,
-    gunshotNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
     meshConnectivityNotificationsEnabled: Boolean,
     meshWipeNotificationsEnabled: Boolean,
@@ -3789,8 +3599,6 @@ private fun AppSettingsPage(
     foreignSignalAlertsEnabled: Boolean,
     foreignSignalAlertThreshold: String,
     foreignDirectAcousticEnabled: Boolean,
-    foreignDirectAcousticRealtimeEnabled: Boolean,
-    foreignDirectAcousticGunshotEnabled: Boolean,
     foreignDirectMagneticEnabled: Boolean,
     onSourceScanIntervalSelected: (String, Long) -> Unit,
     onAllSourceScanIntervalsSelected: (Long) -> Unit,
@@ -3800,7 +3608,6 @@ private fun AppSettingsPage(
     onTrackerNotificationsChanged: (Boolean) -> Unit,
     onNoFlyPassThroughNotificationsChanged: (Boolean) -> Unit,
     onNfcNotificationsChanged: (Boolean) -> Unit,
-    onGunshotNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
     onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
     onMeshWipeNotificationsChanged: (Boolean) -> Unit,
@@ -3808,8 +3615,6 @@ private fun AppSettingsPage(
     onForeignSignalAlertsEnabledChanged: (Boolean) -> Unit,
     onForeignSignalAlertThresholdChanged: (String) -> Unit,
     onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
-    onForeignDirectAcousticRealtimeEnabledChanged: (Boolean) -> Unit,
-    onForeignDirectAcousticGunshotEnabledChanged: (Boolean) -> Unit,
     onForeignDirectMagneticEnabledChanged: (Boolean) -> Unit,
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
@@ -3853,8 +3658,7 @@ private fun AppSettingsPage(
         it == SourceCatalog.KEY_WIFI_DIRECT ||
             it == SourceCatalog.KEY_BT_CLASSIC ||
             it == SourceCatalog.KEY_REMOTE_ID ||
-            it == SourceCatalog.KEY_NFC ||
-            it == SourceCatalog.KEY_ACOUSTIC_REALTIME
+            it == SourceCatalog.KEY_NFC
     }
     val workerCadenceMs = scanIntervalSeconds * 1000L
     val workerCadenceOverrun = (lastScanDurationMs ?: 0L) > workerCadenceMs
@@ -4430,35 +4234,12 @@ private fun AppSettingsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Real-time acoustic channel")
-                            Switch(
-                                checked = foreignDirectAcousticRealtimeEnabled,
-                                onCheckedChange = onForeignDirectAcousticRealtimeEnabledChanged,
-                                enabled = foreignDirectAcousticEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Experimental gunshot detection")
-                            Switch(
-                                checked = foreignDirectAcousticGunshotEnabled,
-                                onCheckedChange = onForeignDirectAcousticGunshotEnabledChanged,
-                                enabled = foreignDirectAcousticEnabled && foreignDirectAcousticRealtimeEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
                             Text("Direct magnetometer channel")
                             Switch(
                                 checked = foreignDirectMagneticEnabled,
                                 onCheckedChange = onForeignDirectMagneticEnabledChanged
                             )
                         }
-                        Text("Real-time acoustic runs continuously while tracking. Gunshot detection is experimental and may produce false positives.")
                     }
                 }
             }
@@ -4478,7 +4259,6 @@ private fun AppSettingsPage(
                             "tracker",
                             "no_fly",
                             "nfc",
-                            "gunshot",
                             "foreign",
                             "magnetic",
                             "mesh_connectivity",
@@ -4527,15 +4307,6 @@ private fun AppSettingsPage(
                                         Switch(
                                             checked = nfcNotificationsEnabled,
                                             onCheckedChange = onNfcNotificationsChanged
-                                        )
-                                    }
-
-                                    "gunshot" -> {
-                                        Text("Gunshot detected alerts")
-                                        Switch(
-                                            checked = gunshotNotificationsEnabled,
-                                            onCheckedChange = onGunshotNotificationsChanged,
-                                            enabled = foreignDirectAcousticRealtimeEnabled && foreignDirectAcousticGunshotEnabled
                                         )
                                     }
 
@@ -5704,7 +5475,6 @@ private fun DetectionPage(
                                 )
                                 Text(
                                     "Acoustic ${when {
-                                        foreignSignalRisk.realtimeAcousticObserved -> "real-time"
                                         foreignSignalRisk.directAcousticObserved -> "direct"
                                         else -> "proxy"
                                     }} ${formatRiskScorePct(foreignSignalRisk.acousticProxyScore)} | " +
@@ -6067,15 +5837,6 @@ private data class SignalIntelSnapshot(
     val acousticDirectSampleCount: Int,
     val acousticDirectTotalCount: Int,
     val lastAcousticRmsDbFs: Double?,
-    val acousticRealtimeSampleCount: Int,
-    val acousticRealtimeTotalCount: Int,
-    val acousticRealtimeGunshotCandidateCount: Int,
-    val acousticRealtimeGunshotCandidateTotalCount: Int,
-    val lastAcousticRealtimePeakDbFs: Double?,
-    val lastAcousticRealtimeRmsDbFs: Double?,
-    val lastAcousticRealtimeCrestFactor: Double?,
-    val lastAcousticRealtimeZeroCrossingRate: Double?,
-    val lastAcousticRealtimeSampleRateHz: Int?,
     val magneticDirectSampleCount: Int,
     val magneticDirectTotalCount: Int,
     val lastMagneticMagnitudeMicroTesla: Double?,
@@ -6088,8 +5849,6 @@ private fun buildSignalIntelSnapshot(
     encounters: List<Encounter>,
     foreignSignalRiskEnabled: Boolean
 ): SignalIntelSnapshot {
-    val latestEncounterTs = encounters.maxOfOrNull { it.timestampEpochMs }
-    val realtimeCutoffTs = latestEncounterTs?.minus(SIGNAL_INTEL_WINDOW_MS) ?: Long.MIN_VALUE
     val window = selectRecentEncounterWindow(
         encounters = encounters,
         windowMs = SIGNAL_INTEL_WINDOW_MS,
@@ -6118,32 +5877,6 @@ private fun buildSignalIntelSnapshot(
     val lastAcousticRmsDbFs = lastAcousticPayload
         ?.optDouble("rmsDbFs", Double.NaN)
         ?.takeIf { it.isFinite() }
-    val acousticRealtime = encounters
-        .asSequence()
-        .filter(::isRealtimeAcousticSignal)
-        .filter { it.timestampEpochMs >= realtimeCutoffTs }
-        .take(SIGNAL_INTEL_MAX_ENCOUNTERS)
-        .toList()
-    val acousticRealtimeTotalCount = encounters.count(::isRealtimeAcousticSignal)
-    val lastAcousticRealtimePayload = acousticRealtime.maxByOrNull { it.timestampEpochMs }
-        ?.let(::parseEncounterPayload)
-    val lastAcousticRealtimePeakDbFs = lastAcousticRealtimePayload
-        ?.optDouble("peakDbFs", Double.NaN)
-        ?.takeIf { it.isFinite() }
-    val lastAcousticRealtimeRmsDbFs = lastAcousticRealtimePayload
-        ?.optDouble("rmsDbFs", Double.NaN)
-        ?.takeIf { it.isFinite() }
-    val lastAcousticRealtimeCrestFactor = lastAcousticRealtimePayload
-        ?.optDouble("crestFactor", Double.NaN)
-        ?.takeIf { it.isFinite() }
-    val lastAcousticRealtimeZeroCrossingRate = lastAcousticRealtimePayload
-        ?.optDouble("zeroCrossingRate", Double.NaN)
-        ?.takeIf { it.isFinite() }
-    val lastAcousticRealtimeSampleRateHz = lastAcousticRealtimePayload
-        ?.optInt("sampleRateHz", 0)
-        ?.takeIf { it > 0 }
-    val acousticRealtimeGunshotCandidates = acousticRealtime.count(::isAcousticGunshotCandidateEvent)
-    val acousticRealtimeGunshotCandidateTotalCount = encounters.count(::isAcousticGunshotCandidateEvent)
 
     val magneticDirect = window
         .asSequence()
@@ -6174,9 +5907,6 @@ private fun buildSignalIntelSnapshot(
         if (acousticDirect.isEmpty()) {
             add("No direct acoustic samples observed. Check microphone permission and direct acoustic toggle.")
         }
-        if (acousticRealtime.isEmpty()) {
-            add("No real-time acoustic events observed in recent window. Enable Real-time acoustic channel for continuous listening.")
-        }
         if (magneticDirect.isEmpty()) {
             add("No direct magnetometer samples observed. Check magnetometer availability and direct magnetic toggle.")
         }
@@ -6201,15 +5931,6 @@ private fun buildSignalIntelSnapshot(
         acousticDirectSampleCount = acousticDirect.size,
         acousticDirectTotalCount = acousticDirectTotalCount,
         lastAcousticRmsDbFs = lastAcousticRmsDbFs,
-        acousticRealtimeSampleCount = acousticRealtime.size,
-        acousticRealtimeTotalCount = acousticRealtimeTotalCount,
-        acousticRealtimeGunshotCandidateCount = acousticRealtimeGunshotCandidates,
-        acousticRealtimeGunshotCandidateTotalCount = acousticRealtimeGunshotCandidateTotalCount,
-        lastAcousticRealtimePeakDbFs = lastAcousticRealtimePeakDbFs,
-        lastAcousticRealtimeRmsDbFs = lastAcousticRealtimeRmsDbFs,
-        lastAcousticRealtimeCrestFactor = lastAcousticRealtimeCrestFactor,
-        lastAcousticRealtimeZeroCrossingRate = lastAcousticRealtimeZeroCrossingRate,
-        lastAcousticRealtimeSampleRateHz = lastAcousticRealtimeSampleRateHz,
         magneticDirectSampleCount = magneticDirect.size,
         magneticDirectTotalCount = magneticDirectTotalCount,
         lastMagneticMagnitudeMicroTesla = lastMagneticMagnitudeMicroTesla,
@@ -6229,7 +5950,6 @@ private fun DetectionSignalIntelPage(
         "nfc",
         "window",
         "uwb",
-        "acoustic_rt",
         "gnss_rf",
         "direct_acoustic",
         "direct_magnetic"
@@ -6284,31 +6004,6 @@ private fun DetectionSignalIntelPage(
                                 Text("Encounters: ${intel.uwbEncounterCount}")
                                 Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
                                 Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
-                            }
-
-                            "acoustic_rt" -> {
-                                Text("Acoustic (Real-time)", fontWeight = FontWeight.Bold)
-                                Text("Events (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeSampleCount}")
-                                Text("Total stored: ${intel.acousticRealtimeTotalCount}")
-                                Text(
-                                    "Gunshot candidates (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeGunshotCandidateCount}"
-                                )
-                                Text("Gunshot candidates total: ${intel.acousticRealtimeGunshotCandidateTotalCount}")
-                                Text(
-                                    "Latest RMS: ${intel.lastAcousticRealtimeRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                                )
-                                Text(
-                                    "Latest peak: ${intel.lastAcousticRealtimePeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                                )
-                                Text(
-                                    "Latest crest factor: ${intel.lastAcousticRealtimeCrestFactor?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"}"
-                                )
-                                Text(
-                                    "Latest zero-crossing rate: ${intel.lastAcousticRealtimeZeroCrossingRate?.let { String.format(Locale.US, "%.3f", it) } ?: "n/a"}"
-                                )
-                                Text(
-                                    "Latest sample rate: ${intel.lastAcousticRealtimeSampleRateHz?.let { "$it Hz" } ?: "n/a"}"
-                                )
                             }
 
                             "gnss_rf" -> {
@@ -6434,34 +6129,12 @@ private fun DetectionLogsPage(
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
     val noFlyCount = remember(logs) { logs.count { it.type == AlertLogType.NO_FLY_PASS_THROUGH } }
     val foreignCount = remember(logs) { logs.count { it.type == AlertLogType.FOREIGN_SIGNAL } }
-    val acousticRealtimeCount = remember(logs) { logs.count { it.type == AlertLogType.ACOUSTIC_REALTIME } }
-    val acousticRealtimePeakHistoryRange = remember(logs) {
-        val values = logs
-            .asSequence()
-            .filter { it.type == AlertLogType.ACOUSTIC_REALTIME }
-            .mapNotNull { parseAcousticMetricDbFs(it.message, "Peak") }
-            .toList()
-        val min = values.minOrNull()
-        val max = values.maxOrNull()
-        if (min == null || max == null) null else min to max
-    }
-    val acousticRealtimeRmsHistoryRange = remember(logs) {
-        val values = logs
-            .asSequence()
-            .filter { it.type == AlertLogType.ACOUSTIC_REALTIME }
-            .mapNotNull { parseAcousticMetricDbFs(it.message, "RMS") }
-            .toList()
-        val min = values.minOrNull()
-        val max = values.maxOrNull()
-        if (min == null || max == null) null else min to max
-    }
     val tabLabels = listOf(
         "All (${logs.size})",
         "Approach ($approachCount)",
         "Tracker ($trackerCount)",
         "No-Fly ($noFlyCount)",
-        "Foreign ($foreignCount)",
-        "Acoustic RT ($acousticRealtimeCount)"
+        "Foreign ($foreignCount)"
     )
     val safeSelectedLogTab = selectedLogTab.coerceIn(0, tabLabels.lastIndex)
 
@@ -6473,7 +6146,6 @@ private fun DetectionLogsPage(
                     2 -> entry.type == AlertLogType.TRACKER
                     3 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
                     4 -> entry.type == AlertLogType.FOREIGN_SIGNAL
-                    5 -> entry.type == AlertLogType.ACOUSTIC_REALTIME
                     else -> true
                 }
             }
@@ -6522,7 +6194,6 @@ private fun DetectionLogsPage(
                 AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
                 AssistChip(onClick = { }, label = { Text("No-Fly $noFlyCount") })
                 AssistChip(onClick = { }, label = { Text("Foreign $foreignCount") })
-                AssistChip(onClick = { }, label = { Text("Acoustic RT $acousticRealtimeCount") })
             }
         }
         item {
@@ -6557,7 +6228,6 @@ private fun DetectionLogsPage(
                 AlertLogType.NO_FLY_PASS_THROUGH -> Color(0xFFEF6C00)
                 AlertLogType.NFC -> Color(0xFF2E7D32)
                 AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
-                AlertLogType.ACOUSTIC_REALTIME -> Color(0xFF00838F)
             }
             val typeLabel = when (entry.type) {
                 AlertLogType.APPROACH -> "Approach"
@@ -6565,26 +6235,12 @@ private fun DetectionLogsPage(
                 AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
                 AlertLogType.NFC -> "NFC"
                 AlertLogType.FOREIGN_SIGNAL -> "Foreign Signal"
-                AlertLogType.ACOUSTIC_REALTIME -> "Acoustic RT"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
             val isNoFlyEntry = entry.type == AlertLogType.NO_FLY_PASS_THROUGH
-            val isAcousticRealtimeEntry = entry.type == AlertLogType.ACOUSTIC_REALTIME
             val opensDeviceDetails = entry.type == AlertLogType.TRACKER ||
                 entry.type == AlertLogType.FOREIGN_SIGNAL ||
-                entry.type == AlertLogType.NFC ||
-                entry.type == AlertLogType.ACOUSTIC_REALTIME
-            val acousticPeakDbFs = if (isAcousticRealtimeEntry) parseAcousticMetricDbFs(entry.message, "Peak") else null
-            val acousticRmsDbFs = if (isAcousticRealtimeEntry) parseAcousticMetricDbFs(entry.message, "RMS") else null
-            fun meterProgress(value: Double?, range: Pair<Double, Double>?): Float? {
-                if (value == null || range == null) return null
-                val min = range.first
-                val max = range.second
-                if (max <= min) return 1f
-                return (((value - min) / (max - min)).toFloat()).coerceIn(0f, 1f)
-            }
-            val acousticPeakMeterProgress = meterProgress(acousticPeakDbFs, acousticRealtimePeakHistoryRange)
-            val acousticRmsMeterProgress = meterProgress(acousticRmsDbFs, acousticRealtimeRmsHistoryRange)
+                entry.type == AlertLogType.NFC
             val noFlyZoneSummary = if (isNoFlyEntry) {
                 parseNoFlyZoneSummaryFromLogMessage(entry.message) ?: "No-fly zone"
             } else {
@@ -6638,48 +6294,6 @@ private fun DetectionLogsPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(entry.message + confidenceLabel)
-                    if (isAcousticRealtimeEntry && (acousticPeakMeterProgress != null || acousticRmsMeterProgress != null)) {
-                        if (acousticPeakMeterProgress != null) {
-                            Text(
-                                text = "Peak ${acousticPeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            LinearProgressIndicator(
-                                progress = { acousticPeakMeterProgress },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            val peakRangeLabel = acousticRealtimePeakHistoryRange?.let { range ->
-                                "${String.format(Locale.US, "%.1f", range.first)} to ${String.format(Locale.US, "%.1f", range.second)} dBFS"
-                            } ?: "n/a"
-                            Text(
-                                text = "Peak historical range: $peakRangeLabel",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        if (acousticRmsMeterProgress != null) {
-                            Text(
-                                text = "RMS ${acousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            LinearProgressIndicator(
-                                progress = { acousticRmsMeterProgress },
-                                modifier = Modifier.fillMaxWidth(),
-                                color = Color(0xFF26A69A)
-                            )
-                            val rmsRangeLabel = acousticRealtimeRmsHistoryRange?.let { range ->
-                                "${String.format(Locale.US, "%.1f", range.first)} to ${String.format(Locale.US, "%.1f", range.second)} dBFS"
-                            } ?: "n/a"
-                            Text(
-                                text = "RMS historical range: $rmsRangeLabel",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
                     if (tapHint != null) {
                         Text(
                             text = tapHint,
@@ -10388,7 +10002,6 @@ private val SOURCE_TYPE_UI_META_BY_SCAN_TYPE = SOURCE_TYPE_UI_META_ORDERED
 
 private val EXTRA_SCAN_SOURCE_LABELS = mapOf(
     SourceCatalog.KEY_ACOUSTIC to "Acoustic",
-    SourceCatalog.KEY_ACOUSTIC_REALTIME to "Acoustic (Real-time)",
     SourceCatalog.KEY_MAGNETIC to "Magnetometer"
 )
 
@@ -10993,7 +10606,6 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
     if (sensorGateSettings.uwbEnabled) add(SourceCatalog.KEY_UWB)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_SDR)
     if (sensorGateSettings.directAcousticEnabled) add(SourceCatalog.KEY_ACOUSTIC)
-    if (sensorGateSettings.directAcousticRealtimeEnabled) add(SourceCatalog.KEY_ACOUSTIC_REALTIME)
     if (sensorGateSettings.directMagneticEnabled) add(SourceCatalog.KEY_MAGNETIC)
 }
 
@@ -12271,7 +11883,6 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
     val rfTextureScore = computeRfTextureScore(ordered)
 
     val directAcousticObserved = ordered.any { isDirectSignalChannel(it, "acoustic") }
-    val realtimeAcousticObserved = ordered.any(::isRealtimeAcousticSignal)
     val directMagneticObserved = ordered.any { isDirectSignalChannel(it, "magnetic") }
     val directAcousticScore = computeDirectAcousticScore(ordered)
     val directMagneticScore = computeDirectMagneticScore(ordered)
@@ -12364,7 +11975,6 @@ private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignal
         acousticProxyScore = acousticProxyScore,
         magneticProxyScore = magneticProxyScore,
         directAcousticObserved = directAcousticObserved,
-        realtimeAcousticObserved = realtimeAcousticObserved,
         directMagneticObserved = directMagneticObserved,
         unavailableSignals = unavailable
     )
@@ -12410,22 +12020,6 @@ private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolea
     val signalChannel = payload.optString("signalChannel", "").trim().lowercase(Locale.US)
     val direct = payload.optBoolean("directChannel", false)
     return direct && signalChannel == normalizedChannel
-}
-
-private fun isRealtimeAcousticSignal(encounter: Encounter): Boolean {
-    if (!isDirectSignalChannel(encounter, "acoustic")) return false
-    val secondary = encounter.secondaryId?.trim()?.lowercase(Locale.US)
-    if (secondary?.contains("direct-acoustic-realtime") == true) return true
-    val payload = parseEncounterPayload(encounter) ?: return false
-    return payload.optBoolean("realtimeChannel", false)
-}
-
-private fun isAcousticGunshotCandidateEvent(encounter: Encounter): Boolean {
-    if (!isRealtimeAcousticSignal(encounter)) return false
-    val secondary = encounter.secondaryId?.trim()?.lowercase(Locale.US)
-    if (secondary?.contains("gunshot") == true) return true
-    val payload = parseEncounterPayload(encounter) ?: return false
-    return payload.optString("eventType", "").trim().lowercase(Locale.US) == "gunshot_candidate"
 }
 
 private fun selectRecentEncounterWindow(
@@ -13057,22 +12651,6 @@ private fun ensureNfcNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
-private fun ensureGunshotDetectedNotificationChannel(context: android.content.Context) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val manager = context.getSystemService(NotificationManager::class.java) ?: return
-    val existing = manager.getNotificationChannel(GUNSHOT_ALERT_CHANNEL_ID)
-    if (existing != null) return
-
-    val channel = NotificationChannel(
-        GUNSHOT_ALERT_CHANNEL_ID,
-        "Gunshot Detected Alerts",
-        NotificationManager.IMPORTANCE_HIGH
-    ).apply {
-        description = "Alerts when acoustic real-time gunshot-candidate events are detected"
-    }
-    manager.createNotificationChannel(channel)
-}
-
 private fun ensureForeignSignalNotificationChannel(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -13246,27 +12824,6 @@ private fun sendNfcNotification(context: android.content.Context, encounter: Enc
         .build()
 
     val notificationId = ("nfc:${encounter.primaryId}:${encounter.timestampEpochMs}").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
-}
-
-private fun sendGunshotDetectedNotification(
-    context: android.content.Context,
-    timestampEpochMs: Long,
-    message: String
-) {
-    val title = "Gunshot candidate detected"
-    val content = "$message • ${formatEpoch(timestampEpochMs)}"
-
-    val notification = NotificationCompat.Builder(context, GUNSHOT_ALERT_CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.stat_notify_error)
-        .setContentTitle(title)
-        .setContentText(content)
-        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
-        .setPriority(NotificationCompat.PRIORITY_HIGH)
-        .setAutoCancel(true)
-        .build()
-
-    val notificationId = ("gunshot:${timestampEpochMs / 1000L}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 

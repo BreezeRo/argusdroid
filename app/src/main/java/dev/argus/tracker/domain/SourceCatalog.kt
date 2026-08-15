@@ -21,7 +21,6 @@ object SourceCatalog {
     const val KEY_UWB = "uwb"
     const val KEY_SDR = "sdr"
     const val KEY_ACOUSTIC = "acoustic"
-    const val KEY_ACOUSTIC_REALTIME = "acoustic_realtime"
     const val KEY_MAGNETIC = "magnetic"
 
     val SOURCE_WIFI: String = EncounterSource.WIFI.name
@@ -53,7 +52,6 @@ object SourceCatalog {
         ScanSourceDefinition(KEY_UWB, EncounterSource.UWB),
         ScanSourceDefinition(KEY_SDR, EncounterSource.SDR),
         ScanSourceDefinition(KEY_ACOUSTIC, null),
-        ScanSourceDefinition(KEY_ACOUSTIC_REALTIME, null),
         ScanSourceDefinition(KEY_MAGNETIC, null)
     )
 

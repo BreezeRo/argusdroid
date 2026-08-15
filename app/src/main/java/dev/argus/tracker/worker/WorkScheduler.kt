@@ -9,7 +9,6 @@ import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import dev.argus.tracker.sensing.AcousticRealtimeForegroundServiceController
 import dev.argus.tracker.sensing.RemoteIdForegroundServiceController
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +33,6 @@ object WorkScheduler {
         ScanSettings.setTrackingEnabled(context, true)
         enqueueAccordingToInterval(context)
         RemoteIdForegroundServiceController.ensureState(context)
-        AcousticRealtimeForegroundServiceController.ensureState(context)
     }
 
     fun enqueueStartupBootstrapScan(context: Context) {
@@ -50,7 +48,6 @@ object WorkScheduler {
             ScanSettings.setTrackingEnabled(context, true)
             val operation = enqueueAccordingToInterval(context)
             RemoteIdForegroundServiceController.ensureState(context)
-            AcousticRealtimeForegroundServiceController.ensureState(context)
 
             // Wait for enqueue operation completion before checking active state.
             operation.result.get()
@@ -122,7 +119,6 @@ object WorkScheduler {
     fun scheduleNextIfNeeded(context: Context) {
         if (!ScanSettings.isTrackingEnabled(context)) return
         RemoteIdForegroundServiceController.ensureState(context)
-        AcousticRealtimeForegroundServiceController.ensureState(context)
         val intervalSeconds = ScanSettings.getScanIntervalSeconds(context)
         if (intervalSeconds >= ScanSettings.MIN_PERIODIC_INTERVAL_SECONDS) return
 
@@ -138,7 +134,6 @@ object WorkScheduler {
         WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
         WorkManager.getInstance(context).cancelUniqueWork(ONE_TIME_WORK_NAME)
         RemoteIdForegroundServiceController.ensureState(context)
-        AcousticRealtimeForegroundServiceController.ensureState(context)
     }
 
     suspend fun isTrackingActive(context: Context): Boolean = withContext(Dispatchers.IO) {

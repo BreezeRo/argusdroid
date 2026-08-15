@@ -109,11 +109,6 @@ object SensorStatusProvider {
                 factoredByArgus = ScanSettings.isForeignDirectAcousticEnabled(context)
             ),
             SensorStatus(
-                name = "Acoustic (Real-time)",
-                isOn = audioPermissionGranted,
-                factoredByArgus = ScanSettings.isForeignDirectAcousticRealtimeEnabled(context)
-            ),
-            SensorStatus(
                 name = "Magnetometer (Direct)",
                 isOn = magneticAvailable,
                 factoredByArgus = ScanSettings.isForeignDirectMagneticEnabled(context)
