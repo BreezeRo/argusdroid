@@ -218,6 +218,7 @@ private const val ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS = 15_000L
 private const val ACOUSTIC_REALTIME_SPIKE_LOG_COOLDOWN_MS = 3_000L
 private const val ACOUSTIC_REALTIME_SPIKE_PEAK_DBFS_THRESHOLD = -24.0
 private const val ACOUSTIC_REALTIME_SPIKE_RMS_DBFS_THRESHOLD = -32.0
+private const val ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS = 5L * 60L * 1000L
 private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
 private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
@@ -1638,18 +1639,31 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     LaunchedEffect(operationalAnalysisWindow, foreignDirectAcousticRealtimeEnabled, gunshotNotificationsEnabled) {
         if (!foreignDirectAcousticRealtimeEnabled) return@LaunchedEffect
 
-        val latestRealtimeEncounter = operationalAnalysisWindow
-            .asSequence()
-            .filter(::isRealtimeAcousticSignal)
-            .maxByOrNull { it.timestampEpochMs }
-            ?: return@LaunchedEffect
-
-        if (latestRealtimeEncounter.timestampEpochMs <= lastAcousticRealtimeLoggedEncounterEpochMs) {
-            return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val effectiveLastAcousticRealtimeLoggedEncounterEpochMs = if (
+            lastAcousticRealtimeLoggedEncounterEpochMs > now + ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS
+        ) {
+            0L
+        } else {
+            lastAcousticRealtimeLoggedEncounterEpochMs
         }
 
-        val payload = parseEncounterPayload(latestRealtimeEncounter) ?: return@LaunchedEffect
-        val now = System.currentTimeMillis()
+        val latestRealtimeEvent = operationalAnalysisWindow
+            .asSequence()
+            .filter(::isRealtimeAcousticSignal)
+            .filter { encounter ->
+                encounter.timestampEpochMs > effectiveLastAcousticRealtimeLoggedEncounterEpochMs &&
+                    encounter.timestampEpochMs <= now + ACOUSTIC_REALTIME_FUTURE_TIMESTAMP_TOLERANCE_MS
+            }
+            .sortedByDescending { it.timestampEpochMs }
+            .mapNotNull { encounter ->
+                parseEncounterPayload(encounter)?.let { payload -> encounter to payload }
+            }
+            .firstOrNull()
+            ?: return@LaunchedEffect
+
+        val latestRealtimeEncounter = latestRealtimeEvent.first
+        val payload = latestRealtimeEvent.second
         val eventType = payload.optString("eventType", "").trim().lowercase(Locale.US)
         val isGunshotCandidate = eventType == "gunshot_candidate"
 
@@ -4070,30 +4084,36 @@ private fun AppSettingsPage(
                     }
                 }
             }
-            items(intervalSourceTypes) { sourceType ->
-                val currentInterval = sourceScanIntervals[sourceType]
-                    ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.Medium)
-                        Button(onClick = { sourceIntervalExpandedFor = sourceType }) {
-                            Text(ScanSettings.formatInterval(currentInterval))
-                        }
-                        DropdownMenu(
-                            expanded = sourceIntervalExpandedFor == sourceType,
-                            onDismissRequest = { sourceIntervalExpandedFor = null }
+            item {
+                HomeResponsiveGrid(
+                    items = intervalSourceTypes,
+                    twoColumnMinWidth = 760.dp,
+                    threeColumnMinWidth = 10_000.dp
+                ) { sourceType ->
+                    val currentInterval = sourceScanIntervals[sourceType]
+                        ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
-                                DropdownMenuItem(
-                                    text = { Text(ScanSettings.formatInterval(seconds)) },
-                                    onClick = {
-                                        onSourceScanIntervalSelected(sourceType, seconds)
-                                        sourceIntervalExpandedFor = null
-                                    }
-                                )
+                            Text(formatSourceTypeLabel(sourceType), fontWeight = FontWeight.Medium)
+                            Button(onClick = { sourceIntervalExpandedFor = sourceType }) {
+                                Text(ScanSettings.formatInterval(currentInterval))
+                            }
+                            DropdownMenu(
+                                expanded = sourceIntervalExpandedFor == sourceType,
+                                onDismissRequest = { sourceIntervalExpandedFor = null }
+                            ) {
+                                ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
+                                    DropdownMenuItem(
+                                        text = { Text(ScanSettings.formatInterval(seconds)) },
+                                        onClick = {
+                                            onSourceScanIntervalSelected(sourceType, seconds)
+                                            sourceIntervalExpandedFor = null
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -4453,99 +4473,106 @@ private fun AppSettingsPage(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Approach notifications")
-                            Switch(
-                                checked = approachNotificationsEnabled,
-                                onCheckedChange = onApproachNotificationsChanged,
-                                enabled = approachDetectionEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Tracker suspicion alerts")
-                            Switch(
-                                checked = trackerNotificationsEnabled,
-                                onCheckedChange = onTrackerNotificationsChanged,
-                                enabled = approachDetectionEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("No-fly pass-through alerts")
-                            Switch(
-                                checked = noFlyPassThroughNotificationsEnabled,
-                                onCheckedChange = onNoFlyPassThroughNotificationsChanged
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("NFC tap alerts")
-                            Switch(
-                                checked = nfcNotificationsEnabled,
-                                onCheckedChange = onNfcNotificationsChanged
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Gunshot detected alerts")
-                            Switch(
-                                checked = gunshotNotificationsEnabled,
-                                onCheckedChange = onGunshotNotificationsChanged,
-                                enabled = foreignDirectAcousticRealtimeEnabled && foreignDirectAcousticGunshotEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Foreign signal alerts")
-                            Switch(
-                                checked = foreignSignalAlertsEnabled,
-                                onCheckedChange = onForeignSignalAlertsEnabledChanged,
-                                enabled = foreignSignalRiskEnabled
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Magnetic disturbance alerts")
-                            Switch(
-                                checked = magneticIncreaseNotificationsEnabled,
-                                onCheckedChange = onMagneticIncreaseNotificationsChanged
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Mesh peer connectivity alerts")
-                            Switch(
-                                checked = meshConnectivityNotificationsEnabled,
-                                onCheckedChange = onMeshConnectivityNotificationsChanged
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Mesh wipe lifecycle alerts")
-                            Switch(
-                                checked = meshWipeNotificationsEnabled,
-                                onCheckedChange = onMeshWipeNotificationsChanged
-                            )
+                        val notificationToggleKeys = listOf(
+                            "approach",
+                            "tracker",
+                            "no_fly",
+                            "nfc",
+                            "gunshot",
+                            "foreign",
+                            "magnetic",
+                            "mesh_connectivity",
+                            "mesh_wipe"
+                        )
+
+                        HomeResponsiveGrid(
+                            items = notificationToggleKeys,
+                            twoColumnMinWidth = 760.dp,
+                            threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+                        ) { toggleKey ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                when (toggleKey) {
+                                    "approach" -> {
+                                        Text("Approach notifications")
+                                        Switch(
+                                            checked = approachNotificationsEnabled,
+                                            onCheckedChange = onApproachNotificationsChanged,
+                                            enabled = approachDetectionEnabled
+                                        )
+                                    }
+
+                                    "tracker" -> {
+                                        Text("Tracker suspicion alerts")
+                                        Switch(
+                                            checked = trackerNotificationsEnabled,
+                                            onCheckedChange = onTrackerNotificationsChanged,
+                                            enabled = approachDetectionEnabled
+                                        )
+                                    }
+
+                                    "no_fly" -> {
+                                        Text("No-fly pass-through alerts")
+                                        Switch(
+                                            checked = noFlyPassThroughNotificationsEnabled,
+                                            onCheckedChange = onNoFlyPassThroughNotificationsChanged
+                                        )
+                                    }
+
+                                    "nfc" -> {
+                                        Text("NFC tap alerts")
+                                        Switch(
+                                            checked = nfcNotificationsEnabled,
+                                            onCheckedChange = onNfcNotificationsChanged
+                                        )
+                                    }
+
+                                    "gunshot" -> {
+                                        Text("Gunshot detected alerts")
+                                        Switch(
+                                            checked = gunshotNotificationsEnabled,
+                                            onCheckedChange = onGunshotNotificationsChanged,
+                                            enabled = foreignDirectAcousticRealtimeEnabled && foreignDirectAcousticGunshotEnabled
+                                        )
+                                    }
+
+                                    "foreign" -> {
+                                        Text("Foreign signal alerts")
+                                        Switch(
+                                            checked = foreignSignalAlertsEnabled,
+                                            onCheckedChange = onForeignSignalAlertsEnabledChanged,
+                                            enabled = foreignSignalRiskEnabled
+                                        )
+                                    }
+
+                                    "magnetic" -> {
+                                        Text("Magnetic disturbance alerts")
+                                        Switch(
+                                            checked = magneticIncreaseNotificationsEnabled,
+                                            onCheckedChange = onMagneticIncreaseNotificationsChanged
+                                        )
+                                    }
+
+                                    "mesh_connectivity" -> {
+                                        Text("Mesh peer connectivity alerts")
+                                        Switch(
+                                            checked = meshConnectivityNotificationsEnabled,
+                                            onCheckedChange = onMeshConnectivityNotificationsChanged
+                                        )
+                                    }
+
+                                    else -> {
+                                        Text("Mesh wipe lifecycle alerts")
+                                        Switch(
+                                            checked = meshWipeNotificationsEnabled,
+                                            onCheckedChange = onMeshWipeNotificationsChanged
+                                        )
+                                    }
+                                }
+                            }
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5693,29 +5720,35 @@ private fun DetectionPage(
                         }
                     }
                 }
-                items(
-                    items = readinessItems,
-                    key = { item -> item.id },
-                    contentType = { "readiness" }
-                ) { item ->
-                    val statusText = if (item.isMissing) "MISSING" else "READY"
-                    val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
-                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                item {
+                    HomeResponsiveGrid(
+                        items = readinessItems,
+                        twoColumnMinWidth = 760.dp,
+                        threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+                    ) { item ->
+                        val statusText = if (item.isMissing) "MISSING" else "READY"
+                        val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Text(item.title, fontWeight = FontWeight.Bold)
-                                Text(statusText, color = statusColor, fontWeight = FontWeight.Bold)
-                            }
-                            Text("Current: ${item.currentValue}")
-                            Text("Recommended: ${item.recommendedValue}")
-                            Button(onClick = { onOpenReadinessSetting(item) }) {
-                                Text(item.openSettingsLabel)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(item.title, fontWeight = FontWeight.Bold)
+                                    Text(statusText, color = statusColor, fontWeight = FontWeight.Bold)
+                                }
+                                Text("Current: ${item.currentValue}")
+                                Text("Recommended: ${item.recommendedValue}")
+                                Button(onClick = { onOpenReadinessSetting(item) }) {
+                                    Text(item.openSettingsLabel)
+                                }
                             }
                         }
                     }
@@ -5931,6 +5964,7 @@ private fun DetectionPage(
                             mapTitle = "Aircraft Map",
                             mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
                             currentLocationOverride = flightMapCurrentLocation,
+                            centerOnAircraftCoverageOnOpen = true,
                             noFlyZones = noFlyZoneOverlays,
                             showNoFlyZoneControl = mapNoFlyZonesEnabled,
                             noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
@@ -6191,6 +6225,16 @@ private fun DetectionSignalIntelPage(
     riskEnabled: Boolean,
     onRefresh: () -> Unit
 ) {
+    val signalPanelKeys = listOf(
+        "nfc",
+        "window",
+        "uwb",
+        "acoustic_rt",
+        "gnss_rf",
+        "direct_acoustic",
+        "direct_magnetic"
+    )
+
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(bottom = 16.dp)
@@ -6207,119 +6251,93 @@ private fun DetectionSignalIntelPage(
             }
         }
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("NFC", fontWeight = FontWeight.Bold)
-                    Text("Encounters: ${intel.nfcEncounterCount}")
-                    Text("Unique tags/devices: ${intel.nfcUniqueTagCount}")
-                    Text("Last seen: ${intel.lastNfcEpochMs?.let(::formatEpoch) ?: "n/a"}")
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Window", fontWeight = FontWeight.Bold)
-                    Text("Recent encounters sampled (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.encounterWindowCount}")
-                    if (riskEnabled && intel.foreignRiskScore != null && intel.foreignRiskLevel != null) {
-                        Text("Foreign signal score: ${intel.foreignRiskScore}/100 (${intel.foreignRiskLevel.name})")
-                    } else {
-                        Text("Foreign signal scoring disabled in settings.")
+            HomeResponsiveGrid(
+                items = signalPanelKeys,
+                twoColumnMinWidth = 760.dp,
+                threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+            ) { panelKey ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        when (panelKey) {
+                            "nfc" -> {
+                                Text("NFC", fontWeight = FontWeight.Bold)
+                                Text("Encounters: ${intel.nfcEncounterCount}")
+                                Text("Unique tags/devices: ${intel.nfcUniqueTagCount}")
+                                Text("Last seen: ${intel.lastNfcEpochMs?.let(::formatEpoch) ?: "n/a"}")
+                            }
+
+                            "window" -> {
+                                Text("Window", fontWeight = FontWeight.Bold)
+                                Text("Recent encounters sampled (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.encounterWindowCount}")
+                                if (riskEnabled && intel.foreignRiskScore != null && intel.foreignRiskLevel != null) {
+                                    Text("Foreign signal score: ${intel.foreignRiskScore}/100 (${intel.foreignRiskLevel.name})")
+                                } else {
+                                    Text("Foreign signal scoring disabled in settings.")
+                                }
+                            }
+
+                            "uwb" -> {
+                                Text("UWB", fontWeight = FontWeight.Bold)
+                                Text("Encounters: ${intel.uwbEncounterCount}")
+                                Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
+                                Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
+                            }
+
+                            "acoustic_rt" -> {
+                                Text("Acoustic (Real-time)", fontWeight = FontWeight.Bold)
+                                Text("Events (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeSampleCount}")
+                                Text("Total stored: ${intel.acousticRealtimeTotalCount}")
+                                Text(
+                                    "Gunshot candidates (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeGunshotCandidateCount}"
+                                )
+                                Text("Gunshot candidates total: ${intel.acousticRealtimeGunshotCandidateTotalCount}")
+                                Text(
+                                    "Latest RMS: ${intel.lastAcousticRealtimeRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                                )
+                                Text(
+                                    "Latest peak: ${intel.lastAcousticRealtimePeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                                )
+                                Text(
+                                    "Latest crest factor: ${intel.lastAcousticRealtimeCrestFactor?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"}"
+                                )
+                                Text(
+                                    "Latest zero-crossing rate: ${intel.lastAcousticRealtimeZeroCrossingRate?.let { String.format(Locale.US, "%.3f", it) } ?: "n/a"}"
+                                )
+                                Text(
+                                    "Latest sample rate: ${intel.lastAcousticRealtimeSampleRateHz?.let { "$it Hz" } ?: "n/a"}"
+                                )
+                            }
+
+                            "gnss_rf" -> {
+                                Text("GNSS and RF Texture", fontWeight = FontWeight.Bold)
+                                Text("GNSS location samples: ${intel.gnssLocationSampleCount}")
+                                Text("GNSS interference score: ${formatRiskScorePct(intel.gnssInterferenceScore)}")
+                                Text("RF texture score: ${formatRiskScorePct(intel.rfTextureScore)}")
+                                Text("RF RSSI samples: ${intel.rfRssiSampleCount}")
+                            }
+
+                            "direct_acoustic" -> {
+                                Text("Direct Acoustic", fontWeight = FontWeight.Bold)
+                                Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticDirectSampleCount}")
+                                Text("Total stored: ${intel.acousticDirectTotalCount}")
+                                Text(
+                                    "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                                )
+                            }
+
+                            else -> {
+                                Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
+                                Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.magneticDirectSampleCount}")
+                                Text("Total stored: ${intel.magneticDirectTotalCount}")
+                                Text(
+                                    "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
+                                )
+                            }
+                        }
                     }
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("UWB", fontWeight = FontWeight.Bold)
-                    Text("Encounters: ${intel.uwbEncounterCount}")
-                    Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
-                    Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Acoustic (Real-time)", fontWeight = FontWeight.Bold)
-                    Text("Events (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeSampleCount}")
-                    Text("Total stored: ${intel.acousticRealtimeTotalCount}")
-                    Text(
-                        "Gunshot candidates (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticRealtimeGunshotCandidateCount}"
-                    )
-                    Text("Gunshot candidates total: ${intel.acousticRealtimeGunshotCandidateTotalCount}")
-                    Text(
-                        "Latest RMS: ${intel.lastAcousticRealtimeRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                    )
-                    Text(
-                        "Latest peak: ${intel.lastAcousticRealtimePeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                    )
-                    Text(
-                        "Latest crest factor: ${intel.lastAcousticRealtimeCrestFactor?.let { String.format(Locale.US, "%.2f", it) } ?: "n/a"}"
-                    )
-                    Text(
-                        "Latest zero-crossing rate: ${intel.lastAcousticRealtimeZeroCrossingRate?.let { String.format(Locale.US, "%.3f", it) } ?: "n/a"}"
-                    )
-                    Text(
-                        "Latest sample rate: ${intel.lastAcousticRealtimeSampleRateHz?.let { "$it Hz" } ?: "n/a"}"
-                    )
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("GNSS and RF Texture", fontWeight = FontWeight.Bold)
-                    Text("GNSS location samples: ${intel.gnssLocationSampleCount}")
-                    Text("GNSS interference score: ${formatRiskScorePct(intel.gnssInterferenceScore)}")
-                    Text("RF texture score: ${formatRiskScorePct(intel.rfTextureScore)}")
-                    Text("RF RSSI samples: ${intel.rfRssiSampleCount}")
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Direct Acoustic", fontWeight = FontWeight.Bold)
-                    Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticDirectSampleCount}")
-                    Text("Total stored: ${intel.acousticDirectTotalCount}")
-                    Text(
-                        "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                    )
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
-                    Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.magneticDirectSampleCount}")
-                    Text("Total stored: ${intel.magneticDirectTotalCount}")
-                    Text(
-                        "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
-                    )
                 }
             }
         }
@@ -7345,6 +7363,7 @@ private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
     currentLocationOverride: DetectionLocation? = null,
+    centerOnAircraftCoverageOnOpen: Boolean = false,
     showCoverageRadiusCircle: Boolean = true,
     noFlyZones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon> = emptyList(),
     showNoFlyZoneControl: Boolean = false,
@@ -7823,7 +7842,7 @@ private fun DetectionMapPage(
     }
 
     LaunchedEffect(currentLocation, hasMapsApiKey, mapLoaded, initialMyLocationPositioned) {
-        if (!hasMapsApiKey || !mapLoaded || initialMyLocationPositioned) return@LaunchedEffect
+        if (!hasMapsApiKey || !mapLoaded || initialMyLocationPositioned || centerOnAircraftCoverageOnOpen) return@LaunchedEffect
         val location = currentLocation ?: return@LaunchedEffect
 
         mapError = null
@@ -7837,6 +7856,41 @@ private fun DetectionMapPage(
         }.onFailure {
             mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
         }.onSuccess {
+            initialMyLocationPositioned = true
+        }
+    }
+
+    LaunchedEffect(
+        centerOnAircraftCoverageOnOpen,
+        hasMapsApiKey,
+        mapLoaded,
+        initialFallbackPositioned,
+        stableAircraftCoverageCenter,
+        stableAircraftCoverageRadiusMeters
+    ) {
+        if (!centerOnAircraftCoverageOnOpen || !hasMapsApiKey || !mapLoaded || initialFallbackPositioned) {
+            return@LaunchedEffect
+        }
+
+        val center = stableAircraftCoverageCenter ?: return@LaunchedEffect
+        val radiusMeters = stableAircraftCoverageRadiusMeters
+            .coerceAtLeast(100.0)
+
+        val centerLatLng = LatLng(center.lat, center.lon)
+        val sphereBounds = LatLngBounds.Builder()
+            .include(offsetLatLng(centerLatLng, radiusMeters, 0.0))
+            .include(offsetLatLng(centerLatLng, radiusMeters, 90.0))
+            .include(offsetLatLng(centerLatLng, radiusMeters, 180.0))
+            .include(offsetLatLng(centerLatLng, radiusMeters, 270.0))
+            .build()
+
+        mapError = null
+        runCatching {
+            cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(sphereBounds, 120))
+        }.onFailure {
+            mapError = "Failed to center on aircraft coverage sphere: ${it.message ?: "unknown error"}"
+        }.onSuccess {
+            initialFallbackPositioned = true
             initialMyLocationPositioned = true
         }
     }
