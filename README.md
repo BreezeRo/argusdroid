@@ -126,6 +126,22 @@ Disabled source gates prevent that source from participating in both scheduled a
 - Set approach notifications and mesh connectivity notifications off by default.
 - Removed artificial startup loader holds and now release after first startup scan completion.
 - Added Detection Signal Intel breakdown for real-time acoustic and gunshot-candidate counts.
+- Added Settings -> Notifications toggle for gunshot detected alerts.
+- Added real-time acoustic log enhancements:
+	- Immediate loud-spike log events (not only periodic telemetry cadence).
+	- Per-entry RMS/Peak progress meters normalized to historical ranges.
+- Added startup loader progress bar tied to runtime/bootstrap readiness checkpoints.
+- Added no-fly incident deep-link flow:
+	- No-fly notifications are now clickable and open a dedicated incident map route.
+	- Logs entries now deep-link to relevant pages by alert type.
+- Added no-fly incident map upgrades:
+	- Aircraft marker uses aircraft icon style instead of default Google pin.
+	- Incident map loads only entered no-fly zone polygons for performance.
+	- Polygon simplification/caps added to avoid heavy overlay hangs.
+	- Incident route supports fallback coordinates when historical points are sparse.
+- Hardened no-fly alert qualification:
+	- Alerts are radius-limited to configured aircraft range from observer location.
+	- Altitude-aware zone checks skip alerts when aircraft is outside zone altitude limits.
 
 ## Web Dashboard
 
