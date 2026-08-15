@@ -699,7 +699,7 @@ class LocalMeshChainLinkCoordinator(
             wipeNotices.toList().sortedByDescending { it.timestampEpochMs }
         }
         val current = meshState.value
-        meshState.value = current.copy(
+        val updatedSnapshot = current.copy(
             localDeviceName = ScanSettings.getChainDeviceName(context),
             peers = peers,
             incomingRequests = requests,
@@ -707,6 +707,8 @@ class LocalMeshChainLinkCoordinator(
             lastRefreshEpochMs = lastRefresh ?: current.lastRefreshEpochMs,
             lastSyncEpochMs = lastSync ?: current.lastSyncEpochMs
         )
+        meshState.value = updatedSnapshot
+        MeshPeerSnapshotStore.write(context, updatedSnapshot)
     }
 
     private fun addWipeNotice(notice: MeshWipeNotice) {

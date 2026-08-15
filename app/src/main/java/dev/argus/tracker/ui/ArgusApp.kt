@@ -36,6 +36,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -97,6 +103,8 @@ import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
+import com.google.maps.android.compose.Circle
+import com.google.maps.android.compose.Polygon
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.MainActivity
 import dev.argus.tracker.ArgusApplication
@@ -118,6 +126,7 @@ import dev.argus.tracker.sensing.SensorStatusProvider
 import dev.argus.tracker.sensing.TowerLookupResult
 import dev.argus.tracker.sensing.AviationPerfStatsStore
 import dev.argus.tracker.sensing.remoteid.RemoteIdPayloadParser
+import dev.argus.tracker.sensing.remoteid.RemoteIdParseConfidence
 import dev.argus.tracker.wear.WearDevicePoint
 import dev.argus.tracker.wear.WearStatusBridgePublisher
 import dev.argus.tracker.worker.ScanSettings
@@ -2537,7 +2546,7 @@ private fun HomePage(
                         HomeSensorToggle(
                             "remote_id",
                             "Remote ID",
-                            "Drone identity broadcasts",
+                            "Remote ID identity broadcasts",
                             sensorGateSettings.remoteIdEnabled,
                             sensorStatusByName["Remote ID"]
                         ),
@@ -3780,6 +3789,26 @@ private fun DetectionPage(
         val resolvedPins = resolvedCandidates.mapNotNull { candidate ->
             val location = candidate.approximateLocation ?: return@mapNotNull null
             if (!isValidLatLon(location.lat, location.lon)) return@mapNotNull null
+            val sourceIsAircraft = candidate.source == EncounterSource.AIRCRAFT.name
+            val latestEncounter = candidate.encounters.maxByOrNull { it.timestampEpochMs }
+            val previousEncounter = if (sourceIsAircraft && latestEncounter != null) {
+                candidate.encounters
+                    .asSequence()
+                    .filter { it.timestampEpochMs < latestEncounter.timestampEpochMs }
+                    .maxByOrNull { it.timestampEpochMs }
+            } else {
+                null
+            }
+            val aircraftVisualHints = if (sourceIsAircraft && latestEncounter != null) {
+                readAircraftVisualHints(latestEncounter.rawPayloadJson)
+            } else {
+                null
+            }
+            val resolvedAircraftHeading = if (sourceIsAircraft && latestEncounter != null) {
+                aircraftVisualHints?.headingDegrees ?: estimateHeadingFromEncounters(previousEncounter, latestEncounter)
+            } else {
+                null
+            }
             val liveCutoffForSource = if (candidate.source == EncounterSource.AIRCRAFT.name) {
                 aircraftLiveCutoffEpochMs
             } else {
@@ -3855,6 +3884,8 @@ private fun DetectionPage(
                 source = candidate.source,
                 primaryId = candidate.primaryId,
                 encounterTimestampEpochMs = null,
+                aircraftIconType = aircraftVisualHints?.iconType,
+                headingDegrees = resolvedAircraftHeading,
                 motionBadge = motionBadge,
                 motionSpeedMps = candidate.motionSignal?.speedMps,
                 isLive = isLive
@@ -5311,6 +5342,7 @@ private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
     currentLocationOverride: DetectionLocation? = null,
+    showCoverageRadiusCircle: Boolean = true,
     pins: List<MapPin>,
     pinLimit: Int,
     onPinLimitChange: (Int) -> Unit,
@@ -5400,6 +5432,20 @@ private fun DetectionMapPage(
             maxDistanceMeters = MAP_AUTO_FOCUS_MAX_DISTANCE_METERS
         )
     }
+    val coverageCircleRadiusMeters = remember(filteredVisiblePins, currentLocation, showCoverageRadiusCircle) {
+        if (!showCoverageRadiusCircle || currentLocation == null || filteredVisiblePins.isEmpty()) {
+            0.0
+        } else {
+            filteredVisiblePins.maxOfOrNull { pin ->
+                distanceFromLocationMeters(
+                    fromLat = currentLocation.lat,
+                    fromLon = currentLocation.lon,
+                    toLat = pin.position.latitude,
+                    toLon = pin.position.longitude
+                ) ?: 0.0
+            } ?: 0.0
+        }
+    }
     val cameraFocusPins = remember(nearbyVisiblePins, filteredVisiblePins) {
         val focusPins = if (nearbyVisiblePins.isNotEmpty()) nearbyVisiblePins else filteredVisiblePins
         samplePinsForCamera(focusPins, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
@@ -5434,6 +5480,16 @@ private fun DetectionMapPage(
             renderedPins.map { pin -> MapRenderItem.SinglePin(pin) }
         }
     }
+    val radarSweepHeadingDeg by rememberInfiniteTransition(label = "radarSweep")
+        .animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2600, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "radarSweepHeadingDeg"
+        )
     val renderedPinSnippetCache = remember(mapRenderItems, preciseDotsEnabled, useDenseDotMarkers) {
         if (preciseDotsEnabled || useDenseDotMarkers) {
             emptyMap()
@@ -5974,6 +6030,9 @@ private fun DetectionMapPage(
                             Text("Play Services: $playServicesDiagnostic")
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
                             Text("Pins rendered: ${renderedPins.size}/${pins.size}")
+                            if (showCoverageRadiusCircle && coverageCircleRadiusMeters > 10.0) {
+                                Text("Coverage radius: ${formatDistanceFeetMiles(coverageCircleRadiusMeters)}")
+                            }
                             Text(
                                 text = if (currentLocationSnapshot != null) {
                                     "Current location: ${"%.5f".format(currentLocationSnapshot.lat)}, ${"%.5f".format(currentLocationSnapshot.lon)}"
@@ -6043,6 +6102,28 @@ private fun DetectionMapPage(
                         myLocationButtonEnabled = hasLocationPermission
                     )
                 ) {
+                    if (showCoverageRadiusCircle && currentLocation != null && coverageCircleRadiusMeters > 10.0) {
+                        val coverageCenter = LatLng(currentLocation.lat, currentLocation.lon)
+                        Circle(
+                            center = coverageCenter,
+                            radius = coverageCircleRadiusMeters,
+                            strokeWidth = 2f,
+                            strokeColor = Color(0xFF1565C0),
+                            fillColor = Color(0x1A1565C0)
+                        )
+                        Polygon(
+                            points = buildRadarSweepSectorPoints(
+                                center = coverageCenter,
+                                radiusMeters = coverageCircleRadiusMeters,
+                                headingDegrees = radarSweepHeadingDeg,
+                                halfWidthDegrees = 22f,
+                                arcStepDegrees = 6f
+                            ),
+                            fillColor = Color(0x3D4FC3F7),
+                            strokeColor = Color(0x704FC3F7),
+                            strokeWidth = 1.5f
+                        )
+                    }
                     mapRenderItems.forEach { item ->
                         when (item) {
                             is MapRenderItem.SinglePin -> {
@@ -6474,6 +6555,32 @@ private fun offsetLatLng(base: LatLng, distanceMeters: Double, bearingDegrees: D
     )
 
     return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
+}
+
+private fun buildRadarSweepSectorPoints(
+    center: LatLng,
+    radiusMeters: Double,
+    headingDegrees: Float,
+    halfWidthDegrees: Float = 20f,
+    arcStepDegrees: Float = 5f
+): List<LatLng> {
+    if (radiusMeters <= 0.0) return listOf(center)
+
+    val start = headingDegrees - halfWidthDegrees
+    val end = headingDegrees + halfWidthDegrees
+    val step = arcStepDegrees.coerceAtLeast(1f)
+
+    val points = ArrayList<LatLng>(32)
+    points.add(center)
+
+    var angle = start
+    while (angle <= end) {
+        points.add(offsetLatLng(center, radiusMeters, angle.toDouble()))
+        angle += step
+    }
+
+    points.add(offsetLatLng(center, radiusMeters, end.toDouble()))
+    return points
 }
 
 private fun meshPeerColor(state: ChainPeerState): Color = when (state) {
@@ -7059,7 +7166,7 @@ private fun deviceGlyphForSource(source: String): String = when (source) {
     "WIFI_DIRECT" -> "WFD"
     "BLUETOOTH_LE" -> "BLE"
     "BLUETOOTH_CLASSIC" -> "BT"
-    "REMOTE_ID" -> "RID / Drone"
+    "REMOTE_ID" -> "RID"
     "AIRCRAFT" -> "AIR"
     "UWB" -> "UWB"
     "SDR" -> "SDR"
@@ -7322,6 +7429,7 @@ private fun listSourceLabel(source: String, secondaryId: String?): String {
     }
     if (source == "WIFI_DIRECT") return "WIFI DIRECT"
     if (source == "BLUETOOTH_CLASSIC") return "BLUETOOTH CLASSIC"
+    if (source == "REMOTE_ID") return "REMOTE ID"
     return source
 }
 
@@ -7426,14 +7534,74 @@ private fun readAircraftFields(rawPayloadJson: String): List<Pair<String, String
         return null
     }
 
+    fun readFirstDouble(keyCandidates: List<String>): Double? {
+        keyCandidates.forEach { key ->
+            payload.optDoubleOrNull(key)?.let { return it }
+            payload.optString(key, "").trim().toDoubleOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    fun readFirstLong(keyCandidates: List<String>): Long? {
+        keyCandidates.forEach { key ->
+            if (payload.has(key) && !payload.isNull(key)) {
+                payload.optLong(key, Long.MIN_VALUE)
+                    .takeIf { it != Long.MIN_VALUE }
+                    ?.let { return it }
+            }
+            payload.optString(key, "").trim().toLongOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    fun readFirstBoolean(keyCandidates: List<String>): Boolean? {
+        keyCandidates.forEach { key ->
+            if (!payload.has(key) || payload.isNull(key)) return@forEach
+            return when (val value = payload.opt(key)) {
+                is Boolean -> value
+                is Number -> value.toInt() != 0
+                is String -> value.equals("true", ignoreCase = true) || value == "1"
+                else -> null
+            }
+        }
+        return null
+    }
+
     readFirst(listOf("icao24", "hex", "id", "primaryId"))?.let { fields += "ICAO24" to it }
     readFirst(listOf("callsign", "flight", "registration", "label"))?.let { fields += "Callsign" to it }
+    readFirst(listOf("registration", "tail", "tailNumber"))?.let { fields += "Registration" to it }
     readFirst(listOf("aircraftTypeHint", "aircraftType", "type", "category"))?.let { fields += "Aircraft Type" to it }
     readFirst(listOf("originCountry", "country"))?.let { fields += "Origin Country" to it }
-    readFirst(listOf("altitudeMeters", "baroAltitudeMeters", "geoAltitudeMeters", "alt_baro", "alt_geom"))
-        ?.let { fields += "Altitude" to "$it m" }
-    readFirst(listOf("speedMetersPerSecond", "speed", "gs"))?.let { fields += "Speed" to "$it m/s" }
-    readFirst(listOf("headingDegrees", "track", "trueTrack"))?.let { fields += "Heading" to "$it deg" }
+    readFirstDouble(listOf("altitudeMeters", "baroAltitudeMeters", "geoAltitudeMeters", "alt_baro", "alt_geom"))
+        ?.let { altitudeMeters ->
+            val altitudeFeet = altitudeMeters * 3.28084
+            fields += "Altitude" to String.format(Locale.US, "%.0f m (%.0f ft)", altitudeMeters, altitudeFeet)
+        }
+    readFirstDouble(listOf("speedMetersPerSecond", "speed", "gs"))?.let { speedMps ->
+        val speedKnots = speedMps * 1.94384
+        fields += "Speed" to String.format(Locale.US, "%.1f m/s (%.0f kt)", speedMps, speedKnots)
+    }
+    readFirstDouble(listOf("headingDegrees", "track", "trueTrack"))?.let { heading ->
+        val normalized = ((heading % 360.0) + 360.0) % 360.0
+        fields += "Heading" to String.format(
+            Locale.US,
+            "%.0f deg (%s)",
+            normalized,
+            formatHeadingCardinal(normalized)
+        )
+    }
+    readFirstDouble(listOf("verticalRateMps", "verticalSpeed", "verticalRate"))?.let { verticalRateMps ->
+        val verticalRateFpm = verticalRateMps * 196.8504
+        fields += "Vertical Rate" to String.format(Locale.US, "%.1f m/s (%.0f fpm)", verticalRateMps, verticalRateFpm)
+    }
+    readFirstBoolean(listOf("onGround", "ground"))?.let { onGround ->
+        fields += "On Ground" to if (onGround) "Yes" else "No"
+    }
+    readFirst(listOf("squawk", "transponderCode"))?.let { fields += "Squawk" to it }
+    readFirstLong(listOf("lastContactEpochMs", "lastContactSeconds"))?.let { lastContactRaw ->
+        val epochMs = if (lastContactRaw < 3_000_000_000L) lastContactRaw * 1000L else lastContactRaw
+        fields += "Last Contact" to formatEpoch(epochMs)
+    }
     readFirst(listOf("provider"))?.let { fields += "Provider" to it }
 
     return if (fields.isNotEmpty()) fields else readGenericPayloadFields(rawPayloadJson)
@@ -7566,15 +7734,29 @@ private fun readRemoteIdFields(rawPayloadJson: String): List<Pair<String, String
     val payload = runCatching { JSONObject(rawPayloadJson) }.getOrNull() ?: return emptyList()
     val normalized = RemoteIdPayloadParser.normalizeIncomingPayload(payload)
     val decoded = normalized.decoded
+    val remoteIdAssessment = assessRemoteIdEntityType(normalized)
 
     val semantic = mutableListOf<Pair<String, String>>()
+    semantic += "Entity Assessment" to remoteIdAssessment
     semantic += "UAS ID" to normalized.primaryId
     normalized.secondaryId?.let { semantic += "Operator ID" to it }
     decoded?.let {
         semantic += "Message Type" to it.messageType
         semantic += "Parse Confidence" to it.parseConfidence.name
-        it.droneLat?.let { value -> semantic += "Drone Lat" to formatCoordinate(value) }
-        it.droneLon?.let { value -> semantic += "Drone Lon" to formatCoordinate(value) }
+        it.droneLat?.let { value ->
+            semantic += if (remoteIdAssessment.startsWith("Likely Drone")) {
+                "Drone Lat" to formatCoordinate(value)
+            } else {
+                "Broadcast Lat" to formatCoordinate(value)
+            }
+        }
+        it.droneLon?.let { value ->
+            semantic += if (remoteIdAssessment.startsWith("Likely Drone")) {
+                "Drone Lon" to formatCoordinate(value)
+            } else {
+                "Broadcast Lon" to formatCoordinate(value)
+            }
+        }
         it.operatorLat?.let { value -> semantic += "Operator Lat" to formatCoordinate(value) }
         it.operatorLon?.let { value -> semantic += "Operator Lon" to formatCoordinate(value) }
         it.altitudeMeters?.let { value -> semantic += "Aircraft Altitude" to String.format(Locale.US, "%.1f m", value) }
@@ -7590,6 +7772,26 @@ private fun readRemoteIdFields(rawPayloadJson: String): List<Pair<String, String
     }
 
     return readGenericPayloadFields(rawPayloadJson)
+}
+
+private fun assessRemoteIdEntityType(normalized: dev.argus.tracker.sensing.remoteid.RemoteIdNormalizedPayload): String {
+    val decoded = normalized.decoded ?: return "Unverified Remote ID-like broadcast"
+    val hasPosition = decoded.droneLat != null && decoded.droneLon != null
+    val hasKinematics = decoded.altitudeMeters != null || decoded.speedMetersPerSecond != null || decoded.headingDegrees != null
+    val hasUasId = decoded.uasId?.isNotBlank() == true || !normalized.primaryId.startsWith("remote-id-unknown")
+    val message = decoded.messageType.lowercase(Locale.US)
+    val remoteIdMessageMatch = message.contains("basic") || message.contains("location") || message.contains("operator") || message.contains("self")
+
+    val likelyDrone =
+        decoded.parseConfidence == RemoteIdParseConfidence.HIGH ||
+            (hasPosition && (hasUasId || remoteIdMessageMatch)) ||
+            (hasUasId && hasKinematics && decoded.parseConfidence != RemoteIdParseConfidence.NONE)
+
+    return if (likelyDrone) {
+        "Likely Drone (Remote ID evidence)"
+    } else {
+        "Unverified Remote ID-like broadcast"
+    }
 }
 
 private fun formatCoordinate(value: Double): String =

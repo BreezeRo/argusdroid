@@ -2,6 +2,7 @@ package dev.argus.tracker.sensing
 
 import android.content.Context
 import android.util.Log
+import dev.argus.tracker.data.chain.MeshPeerSnapshotStore
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
@@ -28,12 +29,14 @@ class AviationScanner(
         private const val KEY_OPENSKY_DAY_INDEX_UTC = "opensky_day_index_utc"
         private const val KEY_OPENSKY_REQUEST_COUNT_TODAY = "opensky_request_count_today"
         private const val KEY_OPENSKY_LAST_REQUEST_EPOCH_MS = "opensky_last_request_epoch_ms"
+        private const val KEY_OPENSKY_LAST_MESH_SKIP_LOG_EPOCH_MS = "opensky_last_mesh_skip_log_epoch_ms"
         private const val OPENSKY_CACHE_DIR = "aviation"
         private const val OPENSKY_CACHE_FILE_NAME = "opensky_cache.json"
         private const val OPENSKY_SAFE_CACHE_TTL_MS = 4 * 60_000L
         private const val OPENSKY_MIN_REQUEST_INTERVAL_MS = 4 * 60_000L
         private const val OPENSKY_DAILY_REQUEST_BUDGET = 380
         private const val OPENSKY_RATE_LIMIT_LOG_INTERVAL_MS = 15 * 60_000L
+        private const val OPENSKY_MESH_GATE_MAX_AGE_MS = 3 * 60_000L
         private const val PUBLIC_FEED_STALE_CACHE_MAX_AGE_MS = 5 * 60_000L
         private const val PUBLIC_FEED_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
         private const val PUBLIC_FEED_READ_CHUNK_BYTES = 8 * 1024
@@ -146,6 +149,39 @@ class AviationScanner(
                 fromCache = true,
                 emitIngestStatsLogs = false
             )
+        }
+
+        val meshGateDecision = evaluateMeshPublicFeedGate(nowEpochMs)
+        if (!meshGateDecision.allowed) {
+            val staleCachedBody = cached
+                ?.takeIf { nowEpochMs - it.fetchedAtEpochMs in 0..PUBLIC_FEED_STALE_CACHE_MAX_AGE_MS }
+                ?.body
+            AviationPerfStatsStore.recordRateLimitedSkip(context)
+            if (shouldEmitMeshGateLog(nowEpochMs)) {
+                OperationalErrorLogStore.append(
+                    context = context,
+                    category = "INGEST_MESH_GATE",
+                    source = "aircraft_public",
+                    message = meshGateDecision.reason ?: "Public aviation fetch skipped by mesh leader gate"
+                )
+                markMeshGateLogEmitted(nowEpochMs)
+            }
+            if (staleCachedBody != null) {
+                AviationPerfStatsStore.recordCacheHit(
+                    context = context,
+                    source = "cache_stale",
+                    payloadBytes = staleCachedBody.length
+                )
+                return parsePublicFeedBody(
+                    body = staleCachedBody,
+                    requestUrl = requestUrl,
+                    fallbackLocation = location,
+                    fallbackNowEpochMs = fallbackNowEpochMs,
+                    fromCache = true,
+                    emitIngestStatsLogs = false
+                )
+            }
+            return emptyList()
         }
 
         val gateDecision = evaluateOpenSkyRequestGate(nowEpochMs)
@@ -631,6 +667,48 @@ class AviationScanner(
         val reason: String? = null
     )
 
+    private fun evaluateMeshPublicFeedGate(nowEpochMs: Long): RequestGateDecision {
+        if (!ScanSettings.isChainLinkEnabled(context)) {
+            return RequestGateDecision(allowed = true)
+        }
+        if (ScanSettings.getChainSharedSecret(context).isBlank()) {
+            return RequestGateDecision(allowed = true)
+        }
+
+        val selfNodeId = ScanSettings.getChainNodeId(context).trim()
+        if (selfNodeId.isBlank()) {
+            return RequestGateDecision(allowed = true)
+        }
+
+        val snapshot = MeshPeerSnapshotStore.read(context)
+            ?: return RequestGateDecision(allowed = true)
+        if (nowEpochMs - snapshot.lastUpdatedEpochMs > OPENSKY_MESH_GATE_MAX_AGE_MS) {
+            return RequestGateDecision(allowed = true)
+        }
+
+        val connectedPeers = snapshot.connectedPeerNodeIds
+        if (connectedPeers.isEmpty()) {
+            return RequestGateDecision(allowed = true)
+        }
+
+        val contenders = (connectedPeers + selfNodeId)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+        val electedLeader = contenders.firstOrNull()
+            ?: return RequestGateDecision(allowed = true)
+
+        if (electedLeader == selfNodeId) {
+            return RequestGateDecision(allowed = true)
+        }
+
+        return RequestGateDecision(
+            allowed = false,
+            reason = "Mesh gate active: node $selfNodeId skipped OpenSky request; elected leader is $electedLeader"
+        )
+    }
+
     private fun evaluateOpenSkyRequestGate(nowEpochMs: Long): RequestGateDecision {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dayIndexUtc = nowEpochMs / 86_400_000L
@@ -696,6 +774,20 @@ class AviationScanner(
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_OPENSKY_LAST_RATE_LIMIT_LOG_EPOCH_MS, nowEpochMs)
+            .apply()
+    }
+
+    private fun shouldEmitMeshGateLog(nowEpochMs: Long): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val lastLoggedAt = prefs.getLong(KEY_OPENSKY_LAST_MESH_SKIP_LOG_EPOCH_MS, 0L)
+        if (lastLoggedAt <= 0L) return true
+        return nowEpochMs - lastLoggedAt >= OPENSKY_RATE_LIMIT_LOG_INTERVAL_MS
+    }
+
+    private fun markMeshGateLogEmitted(nowEpochMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_OPENSKY_LAST_MESH_SKIP_LOG_EPOCH_MS, nowEpochMs)
             .apply()
     }
 
