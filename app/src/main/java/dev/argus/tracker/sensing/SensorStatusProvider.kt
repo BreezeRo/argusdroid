@@ -2,6 +2,8 @@ package dev.argus.tracker.sensing
 
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.provider.Settings
 import android.telephony.TelephonyManager
@@ -44,8 +46,13 @@ object SensorStatusProvider {
         val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
 
         val ingestDir = context.filesDir.resolve("ingest")
+        val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val sdrFeedConfigured = ingestDir.resolve("sdr.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val activeNetwork = connectivityManager?.activeNetwork
+        val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+        val internetAvailable = networkCapabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
 
         return listOf(
             SensorStatus(
@@ -62,6 +69,16 @@ object SensorStatusProvider {
                 name = "Remote ID",
                 isOn = ScanSettings.isRemoteIdSensorEnabled(context),
                 factoredByArgus = ScanSettings.isRemoteIdSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "ADS-B (Aviation)",
+                isOn = adsbFeedConfigured,
+                factoredByArgus = ScanSettings.isAviationAdsbSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "Public Flight Radar",
+                isOn = internetAvailable,
+                factoredByArgus = ScanSettings.isAviationPublicSensorEnabled(context)
             ),
             SensorStatus(
                 name = "Cellular",

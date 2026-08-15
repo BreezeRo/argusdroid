@@ -2,6 +2,19 @@
 
 This document defines the current Remote ID ingest API and payload schema used by Argus.
 
+## Aviation feed additions
+
+Argus also supports optional aircraft tracking from two sources:
+
+- ADS-B ingest file: app internal files directory ingest/adsb.jsonl
+- Public internet feed: OpenSky-compatible JSON endpoint (default: https://opensky-network.org/api/states/all)
+
+Aviation payloads are normalized to schema argus.aviation.v1 and include:
+
+- deviceClassHint: aircraft
+- aircraftTypeHint: best-effort type (for example helicopter, jet, prop, glider, uas)
+- provider: ADSB_JSONL, PUBLIC_OPENSKY, or PUBLIC_RADAR
+
 ## 1) Normalized schema
 
 Argus writes/reads normalized Remote ID payloads with:

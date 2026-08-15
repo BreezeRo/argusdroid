@@ -7,6 +7,7 @@ import dev.argus.tracker.data.chain.LocalMeshChainLinkCoordinator
 import dev.argus.tracker.data.db.ArgusDatabase
 import dev.argus.tracker.sensing.ArgusSensingService
 import dev.argus.tracker.sensing.AcousticSignatureScanner
+import dev.argus.tracker.sensing.AviationScanner
 import dev.argus.tracker.sensing.BleScanner
 import dev.argus.tracker.sensing.BluetoothClassicScanner
 import dev.argus.tracker.sensing.CellularScanner
@@ -55,6 +56,7 @@ class DefaultAppContainer(
                 BluetoothClassicScanner(context),
                 CellularScanner(context),
                 RemoteIdScanner(context),
+                AviationScanner(context),
                 ExternalFeedScanner(context, EncounterSource.UWB, "uwb"),
                 ExternalFeedScanner(context, EncounterSource.SDR, "sdr"),
                 AcousticSignatureScanner(context),

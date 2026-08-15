@@ -5,6 +5,8 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -128,8 +130,13 @@ object DetectionReadinessAdvisor {
 
         val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
         val ingestDir = context.filesDir.resolve("ingest")
+        val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val sdrFeedConfigured = ingestDir.resolve("sdr.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val activeNetwork = connectivityManager?.activeNetwork
+        val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+        val internetReady = networkCapabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         val uwbReady = uwbHardwareAvailable || uwbFeedConfigured
 
         return listOf(
@@ -282,6 +289,25 @@ object DetectionReadinessAdvisor {
                 openSettingsLabel = "Open App Storage Settings",
                 settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     .setData(Uri.fromParts("package", context.packageName, null))
+            ),
+            DetectionReadinessItem(
+                id = "source_adsb",
+                title = "ADS-B Ingest Feed",
+                recommendedValue = "ADS-B ingest feed configured (adsb.jsonl)",
+                currentValue = if (adsbFeedConfigured) "Configured" else "Not configured",
+                isMissing = !adsbFeedConfigured,
+                openSettingsLabel = "Open App Storage Settings",
+                settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.fromParts("package", context.packageName, null))
+            ),
+            DetectionReadinessItem(
+                id = "source_public_aviation",
+                title = "Public Flight Radar Internet Access",
+                recommendedValue = "Connected",
+                currentValue = if (internetReady) "Connected" else "Offline",
+                isMissing = !internetReady,
+                openSettingsLabel = "Open Network Settings",
+                settingsIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS)
             )
         )
     }

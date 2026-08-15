@@ -7,6 +7,7 @@ enum class EncounterSource {
     BLUETOOTH_CLASSIC,
     REMOTE_ID,
     CELL,
+    AIRCRAFT,
     UWB,
     SDR,
     UNKNOWN_RF

@@ -4,6 +4,7 @@ import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.SignalScanner
 import android.os.SystemClock
 import android.content.Context
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.worker.ScanSettings
 
 data class ScanBatchResult(
@@ -44,7 +45,16 @@ class ArgusSensingService(
             }
 
             val scanStartedAt = SystemClock.elapsedRealtime()
-            val scannerBatch = runCatching { scanner.scanOnce() }.getOrDefault(emptyList())
+            val scannerBatch = runCatching { scanner.scanOnce() }
+                .onFailure { error ->
+                    OperationalErrorLogStore.append(
+                        context = context,
+                        category = "SCAN_SOURCE",
+                        source = sourceType,
+                        message = "Source scan failed: ${error.message ?: "unknown error"}"
+                    )
+                }
+                .getOrDefault(emptyList())
             val durationMs = (SystemClock.elapsedRealtime() - scanStartedAt).coerceAtLeast(0L)
             sourceDurations[sourceType] = durationMs
             allEncounters += scannerBatch
@@ -66,6 +76,7 @@ class ArgusSensingService(
         is BluetoothClassicScanner -> "bt_classic"
         is CellularScanner -> "cellular"
         is RemoteIdScanner -> "remote_id"
+        is AviationScanner -> "aircraft"
         is ExternalFeedScanner -> scanner.sourceTypeKey
         is AcousticSignatureScanner -> "acoustic"
         is MagnetometerDisturbanceScanner -> "magnetic"

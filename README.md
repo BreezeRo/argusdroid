@@ -15,6 +15,7 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Multi-source sensing for Wi-Fi, Wi-Fi Direct peers, Bluetooth LE, Bluetooth Classic, and Cellular.
 - Direct-channel sensing for acoustic signatures (microphone) and magnetometer disturbance samples.
 - External-feed sensing hooks for UWB and SDR JSONL ingest streams.
+- Optional aviation tracking sources for ADS-B ingest and public internet radar feeds, normalized into AIRCRAFT encounters.
 - BLE heuristics now classify likely device classes (for example tracker-tag, wearable, audio, sensor) and can promote likely Remote ID BLE signatures.
 - Encounter normalization into a shared model with timestamp, IDs, signal metadata, optional location, and raw payload JSON.
 - Room-backed local persistence for historical analysis.
@@ -110,9 +111,12 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 - Remote ID BLE decoding attempts are now performed from service/manufacturer data.
 - Remote ID companion ingest broadcast is available for external decoders (`dev.argus.tracker.action.INGEST_REMOTE_ID`).
 - Remote ID payloads are normalized to schema `argus.remote_id.v1` with decoded fields when available.
+- ADS-B ingest hook is active via JSONL feed file: app internal files path ingest/adsb.jsonl.
+- Public flight radar ingest can query OpenSky-compatible JSON over internet (bounded to local vicinity when location is available).
+- Aircraft payloads are normalized to schema `argus.aviation.v1` and include `deviceClassHint=aircraft` plus best-effort `aircraftTypeHint`.
 - UWB ingest hook is active via JSONL feed file: app internal files path ingest/uwb.jsonl.
 - SDR ingest hook is active via JSONL feed file: app internal files path ingest/sdr.jsonl.
-- UWB and SDR ingest collection are each gated by dedicated Home sensor toggles.
+- UWB, SDR, ADS-B, and public flight-radar ingest collection are each gated by dedicated Home sensor toggles.
 - Each JSON line should be a single object containing at minimum an id (or primaryId) and optional fields such as timestampEpochMs, label, rssiDbm, frequencyMhz, lat, and lon.
 - Remote ID feed entries can also include semantic fields such as messageType, uasId, operatorId, droneLat, droneLon, altitudeMeters, speedMetersPerSecond, and headingDegrees.
 - Ingest files are expected to come from companion SDR tooling, external collectors, or test fixtures; app storage settings themselves do not create these files.
@@ -164,7 +168,7 @@ Argusdroid is an Android app for on-device radio encounter intelligence. It coll
 ### Scan interval tuning and telemetry
 
 - Global worker cadence supports fast options including 1s and 3s (default 15s).
-- Per-source scan intervals are configurable independently (Wi-Fi, Wi-Fi Direct, BLE, Bluetooth Classic, Cellular, Remote ID, UWB, SDR, Acoustic, Magnetometer).
+- Per-source scan intervals are configurable independently (Wi-Fi, Wi-Fi Direct, BLE, Bluetooth Classic, Cellular, Remote ID, Aircraft, UWB, SDR, Acoustic, Magnetometer).
 - Per-source intervals are minimum per-source spacing within scan batches; effective per-source cadence cannot exceed the global worker cadence.
 - Per-source timing telemetry tracks last, avg, p50, p95, and max durations.
 - Auto-adjust mode can increase/decrease source intervals based on overrun/stability behavior.

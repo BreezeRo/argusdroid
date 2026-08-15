@@ -9,4 +9,9 @@ class EncounterSourceTest {
     fun enumContainsWifi() {
         assertEquals("WIFI", EncounterSource.WIFI.name)
     }
+
+    @Test
+    fun enumContainsAircraft() {
+        assertEquals("AIRCRAFT", EncounterSource.AIRCRAFT.name)
+    }
 }

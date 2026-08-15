@@ -19,6 +19,10 @@ object ScanSettings {
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
     private const val KEY_SENSOR_UWB_ENABLED = "sensor_uwb_enabled"
     private const val KEY_SENSOR_SDR_ENABLED = "sensor_sdr_enabled"
+    private const val KEY_SENSOR_AVIATION_ADSB_ENABLED = "sensor_aviation_adsb_enabled"
+    private const val KEY_SENSOR_AVIATION_PUBLIC_ENABLED = "sensor_aviation_public_enabled"
+    private const val KEY_AVIATION_PUBLIC_FEED_URL = "aviation_public_feed_url"
+    private const val KEY_AVIATION_PUBLIC_RADIUS_MILES = "aviation_public_radius_miles"
     private const val KEY_REMOTE_ID_INGEST_TOKEN = "remote_id_ingest_token"
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
@@ -68,6 +72,8 @@ object ScanSettings {
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 15L
+    const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 100
+    const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
     const val DEFAULT_APP_THEME_MODE = "SYSTEM"
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
@@ -87,6 +93,7 @@ object ScanSettings {
         "bt_classic",
         "cellular",
         "remote_id",
+        "aircraft",
         "uwb",
         "sdr",
         "acoustic",
@@ -234,6 +241,50 @@ object ScanSettings {
 
     fun setSdrSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_SDR_ENABLED, enabled)
+    }
+
+    fun isAviationAdsbSensorEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, false)
+
+    fun setAviationAdsbSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_AVIATION_ADSB_ENABLED, enabled)
+    }
+
+    fun isAviationPublicSensorEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SENSOR_AVIATION_PUBLIC_ENABLED, false)
+
+    fun setAviationPublicSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_AVIATION_PUBLIC_ENABLED, enabled)
+    }
+
+    fun getAviationPublicFeedUrl(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_AVIATION_PUBLIC_FEED_URL, DEFAULT_AVIATION_PUBLIC_FEED_URL)
+            .orEmpty()
+            .trim()
+
+    fun setAviationPublicFeedUrl(context: Context, url: String) {
+        val safe = url.trim().ifBlank { DEFAULT_AVIATION_PUBLIC_FEED_URL }
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_AVIATION_PUBLIC_FEED_URL, safe)
+            .apply()
+    }
+
+    fun getAviationPublicRadiusMiles(context: Context): Int {
+        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_AVIATION_PUBLIC_RADIUS_MILES, DEFAULT_AVIATION_PUBLIC_RADIUS_MILES)
+        return value.coerceIn(10, 300)
+    }
+
+    fun setAviationPublicRadiusMiles(context: Context, miles: Int) {
+        val safe = miles.coerceIn(10, 300)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_AVIATION_PUBLIC_RADIUS_MILES, safe)
+            .apply()
     }
 
     fun getRemoteIdIngestToken(context: Context): String =
