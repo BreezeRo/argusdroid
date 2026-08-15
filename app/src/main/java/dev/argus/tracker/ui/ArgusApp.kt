@@ -41,9 +41,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -191,6 +193,7 @@ private const val LOGS_ENCOUNTERS_ROUTE = "logsEncounters"
 private const val DEVICES_ENCOUNTERS_ROUTE = "devicesEncounters"
 private const val APPROACH_ALERT_MAP_ROUTE = "approachAlertMap/{source}/{primaryId}"
 private const val MOVING_DEVICE_PATH_ROUTE = "movingDevicePath/{source}/{primaryId}"
+private const val NO_FLY_INCIDENT_PATH_ROUTE = "noFlyIncidentPath/{source}/{primaryId}/{zoneSummary}/{eventEpochMs}?lat={lat}&lon={lon}&zoneIds={zoneIds}"
 private const val DEVICE_DETAIL_ROUTE = "deviceDetail/{source}/{primaryId}?lat={lat}&lon={lon}&ts={ts}"
 private const val ENCOUNTER_DETAIL_ROUTE = "encounterDetail/{source}/{primaryId}/{timestamp}"
 private val DETAIL_TWO_COLUMN_MIN_WIDTH: Dp = 720.dp
@@ -212,6 +215,9 @@ private const val GUNSHOT_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
 private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS = 15_000L
+private const val ACOUSTIC_REALTIME_SPIKE_LOG_COOLDOWN_MS = 3_000L
+private const val ACOUSTIC_REALTIME_SPIKE_PEAK_DBFS_THRESHOLD = -24.0
+private const val ACOUSTIC_REALTIME_SPIKE_RMS_DBFS_THRESHOLD = -32.0
 private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
 private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
@@ -237,6 +243,7 @@ private const val MAP_RENDER_PIN_LIMIT_MID = 420
 private const val MAP_SWEEP_ANIMATION_STEP_DEGREES = 8f
 private const val MAP_SWEEP_ANIMATION_FRAME_MS = 90L
 private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 650
+private const val INCIDENT_NO_FLY_BOUNDARY_POINT_LIMIT = 120
 private const val NO_FLY_ZONE_RENDER_COUNT_LOW = 60
 private const val NO_FLY_ZONE_RENDER_COUNT_BALANCED = 120
 private const val NO_FLY_ZONE_RENDER_COUNT_HIGH = 220
@@ -254,8 +261,16 @@ private const val OPERATIONAL_ANALYSIS_MAX_ENCOUNTERS = 6000
 private const val MAGNETIC_ALERT_WINDOW_MS = 30L * 60L * 1000L
 private const val MAGNETIC_ALERT_MAX_ENCOUNTERS = 2000
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
+private const val ACTION_OPEN_NO_FLY_INCIDENT_PATH = "dev.argus.tracker.action.OPEN_NO_FLY_INCIDENT_PATH"
 private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
 private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
+private const val EXTRA_NO_FLY_SOURCE = "extra_no_fly_source"
+private const val EXTRA_NO_FLY_PRIMARY_ID = "extra_no_fly_primary_id"
+private const val EXTRA_NO_FLY_ZONE_SUMMARY = "extra_no_fly_zone_summary"
+private const val EXTRA_NO_FLY_EVENT_EPOCH_MS = "extra_no_fly_event_epoch_ms"
+private const val EXTRA_NO_FLY_LAT = "extra_no_fly_lat"
+private const val EXTRA_NO_FLY_LON = "extra_no_fly_lon"
+private const val EXTRA_NO_FLY_ZONE_IDS = "extra_no_fly_zone_ids"
 private const val GOOGLE_MAP_DARK_STYLE_JSON = """
 [
     {"elementType":"geometry","stylers":[{"color":"#212121"}]},
@@ -284,6 +299,27 @@ private const val GOOGLE_MAP_DARK_STYLE_JSON = """
 
 private fun routeNeedsNowTicker(route: String): Boolean {
     return route == HOME_ROUTE || route.startsWith("approachAlertMap/")
+}
+
+private fun parseNoFlyZoneSummaryFromLogMessage(message: String): String? {
+    val marker = "entered no-fly zone:"
+    val markerIndex = message.indexOf(marker, ignoreCase = true)
+    if (markerIndex < 0) return null
+    return message
+        .substring(markerIndex + marker.length)
+        .trim()
+        .takeIf { it.isNotBlank() }
+}
+
+private fun parseAcousticMetricDbFs(message: String, metric: String): Double? {
+    val marker = "$metric "
+    val start = message.indexOf(marker, ignoreCase = true)
+    if (start < 0) return null
+    val valueStart = start + marker.length
+    val valueEnd = message.indexOf(" dBFS", startIndex = valueStart, ignoreCase = true)
+        .takeIf { it > valueStart }
+        ?: return null
+    return message.substring(valueStart, valueEnd).trim().toDoubleOrNull()
 }
 
 private fun topLevelRouteForSelection(route: String): String = when (route) {
@@ -481,8 +517,10 @@ private data class NoFlyTrackSnapshot(
     val latestTimestampEpochMs: Long,
     val latestLat: Double,
     val latestLon: Double,
+    val latestAltitudeFeet: Double?,
     val previousLat: Double?,
-    val previousLon: Double?
+    val previousLon: Double?,
+    val previousAltitudeFeet: Double?
 )
 
 private data class MeshCoverageNodeInsight(
@@ -756,6 +794,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var lastNfcObservedEncounterEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var lastAcousticRealtimeTelemetryLogEpochMs by remember { mutableStateOf(0L) }
+    var lastAcousticRealtimeSpikeLogEpochMs by remember { mutableStateOf(0L) }
     var lastAcousticRealtimeLoggedEncounterEpochMs by remember { mutableStateOf(0L) }
     var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
@@ -946,11 +985,52 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(notificationIntent) {
         val intent = notificationIntent ?: return@LaunchedEffect
-        if (intent.action != ACTION_OPEN_APPROACH_MAP) return@LaunchedEffect
-        val source = intent.getStringExtra(EXTRA_APPROACH_SOURCE)?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        val primaryId = intent.getStringExtra(EXTRA_APPROACH_PRIMARY_ID)?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        navController.navigate("approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}") {
-            launchSingleTop = true
+        when (intent.action) {
+            ACTION_OPEN_APPROACH_MAP -> {
+                val source = intent.getStringExtra(EXTRA_APPROACH_SOURCE)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@LaunchedEffect
+                val primaryId = intent.getStringExtra(EXTRA_APPROACH_PRIMARY_ID)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@LaunchedEffect
+                navController.navigate("approachAlertMap/${Uri.encode(source)}/${Uri.encode(primaryId)}") {
+                    launchSingleTop = true
+                }
+            }
+
+            ACTION_OPEN_NO_FLY_INCIDENT_PATH -> {
+                val source = intent.getStringExtra(EXTRA_NO_FLY_SOURCE)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@LaunchedEffect
+                val primaryId = intent.getStringExtra(EXTRA_NO_FLY_PRIMARY_ID)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@LaunchedEffect
+                val zoneSummary = intent.getStringExtra(EXTRA_NO_FLY_ZONE_SUMMARY)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "No-fly zone"
+                val eventEpochMs = intent.getLongExtra(EXTRA_NO_FLY_EVENT_EPOCH_MS, 0L)
+                    .takeIf { it > 0L }
+                    ?: System.currentTimeMillis()
+                val incidentLat = intent.getDoubleExtra(EXTRA_NO_FLY_LAT, Double.NaN)
+                    .takeIf { !it.isNaN() && it in -90.0..90.0 }
+                val incidentLon = intent.getDoubleExtra(EXTRA_NO_FLY_LON, Double.NaN)
+                    .takeIf { !it.isNaN() && it in -180.0..180.0 }
+                val enteredZoneIds = intent.getStringExtra(EXTRA_NO_FLY_ZONE_IDS)
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                val queryParts = buildList {
+                    incidentLat?.let { add("lat=${Uri.encode(it.toString())}") }
+                    incidentLon?.let { add("lon=${Uri.encode(it.toString())}") }
+                    enteredZoneIds?.let { add("zoneIds=${Uri.encode(it)}") }
+                }
+                val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}" 
+
+                navController.navigate(
+                    "noFlyIncidentPath/${Uri.encode(source)}/${Uri.encode(primaryId)}/${Uri.encode(zoneSummary)}/$eventEpochMs$query"
+                ) {
+                    launchSingleTop = true
+                }
+            }
         }
     }
     suspend fun applyScanInterval(
@@ -1288,7 +1368,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(operationalAnalysisWindow, noFlyPassThroughNotificationsEnabled) {
         val now = System.currentTimeMillis()
+        val observerLocation = LocationSnapshotProvider.read(context)
+        val noFlyAlertRadiusMeters = ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 300) * 1609.344
         val noFlyTracks = withContext(Dispatchers.Default) {
+            val anchor = observerLocation ?: return@withContext emptyList()
             operationalAnalysisWindow
                 .asSequence()
                 .filter { encounter ->
@@ -1321,11 +1404,26 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     }
 
                     val latestResolved = resolvedLatLon(latest) ?: return@mapNotNull null
-                    val previousResolved = sorted
+                    val distanceFromObserverMeters = distanceFromLocationMeters(
+                        fromLat = anchor.lat,
+                        fromLon = anchor.lon,
+                        toLat = latestResolved.first,
+                        toLon = latestResolved.second
+                    ) ?: return@mapNotNull null
+                    if (distanceFromObserverMeters > noFlyAlertRadiusMeters) {
+                        return@mapNotNull null
+                    }
+                    val previousResolvedWithEncounter = sorted
                         .drop(1)
                         .asSequence()
-                        .mapNotNull { previousEncounter -> resolvedLatLon(previousEncounter) }
+                        .mapNotNull { previousEncounter ->
+                            resolvedLatLon(previousEncounter)?.let { previousEncounter to it }
+                        }
                         .firstOrNull()
+                    val previousResolved = previousResolvedWithEncounter?.second
+                    val previousAltitudeFeet = previousResolvedWithEncounter
+                        ?.first
+                        ?.let(::extractEncounterAltitudeFeet)
 
                     NoFlyTrackSnapshot(
                         source = latest.source,
@@ -1334,8 +1432,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         latestTimestampEpochMs = latest.timestampEpochMs,
                         latestLat = latestResolved.first,
                         latestLon = latestResolved.second,
+                        latestAltitudeFeet = extractEncounterAltitudeFeet(latest),
                         previousLat = previousResolved?.first,
-                        previousLon = previousResolved?.second
+                        previousLon = previousResolved?.second,
+                        previousAltitudeFeet = previousAltitudeFeet
                     )
                 }
         }
@@ -1362,7 +1462,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
             val currentZoneIds = zones
                 .asSequence()
-                .filter { zone -> noFlyZoneContainsPoint(zone, track.latestLat, track.latestLon) }
+                .filter { zone ->
+                    noFlyZoneContainsPoint(zone, track.latestLat, track.latestLon) &&
+                        noFlyZoneAltitudeAllowsEntry(zone, track.latestAltitudeFeet)
+                }
                 .map { zone -> zone.id }
                 .toSet()
 
@@ -1370,7 +1473,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 if (isValidLatLon(track.previousLat, track.previousLon)) {
                     zones
                         .asSequence()
-                        .filter { zone -> noFlyZoneContainsPoint(zone, track.previousLat!!, track.previousLon!!) }
+                        .filter { zone ->
+                            noFlyZoneContainsPoint(zone, track.previousLat!!, track.previousLon!!) &&
+                                noFlyZoneAltitudeAllowsEntry(zone, track.previousAltitudeFeet)
+                        }
                         .map { zone -> zone.id }
                         .toSet()
                 } else {
@@ -1416,7 +1522,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         source = track.source,
                         primaryId = track.primaryId,
                         sourceLabel = sourceLabel,
-                        zones = enteredZones
+                        zones = enteredZones,
+                        eventEpochMs = track.latestTimestampEpochMs,
+                        eventLat = track.latestLat,
+                        eventLon = track.latestLon
                     )
                     lastNoFlyZoneNotificationEpochByTrackZone[zoneNotificationKey] = now
                 }
@@ -1544,18 +1653,24 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         val eventType = payload.optString("eventType", "").trim().lowercase(Locale.US)
         val isGunshotCandidate = eventType == "gunshot_candidate"
 
-        val shouldLogTelemetry = !isGunshotCandidate &&
-            (now - lastAcousticRealtimeTelemetryLogEpochMs >= ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS)
-
-        if (!isGunshotCandidate && !shouldLogTelemetry) {
-            return@LaunchedEffect
-        }
-
         val rmsDbFs = payload.optDoubleOrNull("rmsDbFs")
         val peakDbFs = payload.optDoubleOrNull("peakDbFs")
         val crestFactor = payload.optDoubleOrNull("crestFactor")
         val zeroCrossingRate = payload.optDoubleOrNull("zeroCrossingRate")
         val sampleRateHz = payload.optInt("sampleRateHz", 0).takeIf { it > 0 }
+
+        val shouldLogTelemetry = !isGunshotCandidate &&
+            (now - lastAcousticRealtimeTelemetryLogEpochMs >= ACOUSTIC_REALTIME_LOG_TELEMETRY_INTERVAL_MS)
+        val isLoudSpike = !isGunshotCandidate && (
+            (peakDbFs != null && peakDbFs >= ACOUSTIC_REALTIME_SPIKE_PEAK_DBFS_THRESHOLD) ||
+                (rmsDbFs != null && rmsDbFs >= ACOUSTIC_REALTIME_SPIKE_RMS_DBFS_THRESHOLD)
+            )
+        val shouldLogLoudSpike = isLoudSpike &&
+            (now - lastAcousticRealtimeSpikeLogEpochMs >= ACOUSTIC_REALTIME_SPIKE_LOG_COOLDOWN_MS)
+
+        if (!isGunshotCandidate && !shouldLogTelemetry && !shouldLogLoudSpike) {
+            return@LaunchedEffect
+        }
 
         val detailParts = buildList {
             rmsDbFs?.let { add("RMS ${String.format(Locale.US, "%.1f dBFS", it)}") }
@@ -1567,6 +1682,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         val detail = if (detailParts.isEmpty()) "" else " (${detailParts.joinToString(" • ")})"
         val message = if (isGunshotCandidate) {
             "Acoustic real-time gunshot candidate detected$detail"
+        } else if (shouldLogLoudSpike) {
+            "Acoustic real-time loud sound spike detected$detail"
         } else {
             "Acoustic real-time telemetry sample$detail"
         }
@@ -1600,8 +1717,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
         alertLogs = AlertLogStore.read(context)
         lastAcousticRealtimeLoggedEncounterEpochMs = latestRealtimeEncounter.timestampEpochMs
-        if (!isGunshotCandidate) {
+        if (!isGunshotCandidate && shouldLogTelemetry) {
             lastAcousticRealtimeTelemetryLogEpochMs = now
+        }
+        if (shouldLogLoudSpike) {
+            lastAcousticRealtimeSpikeLogEpochMs = now
         }
     }
 
@@ -2554,6 +2674,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             launchSingleTop = true
                         }
                     },
+                    onOpenNoFlyIncidentPath = { source, primaryId, zoneSummary, eventEpochMs ->
+                        navController.navigate(
+                            "noFlyIncidentPath/${Uri.encode(source)}/${Uri.encode(primaryId)}/${Uri.encode(zoneSummary)}/$eventEpochMs"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onOpenDeviceDetails = { source, primaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        )
+                    },
                     onEncounterClick = { encounter ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
@@ -2585,6 +2717,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             launchSingleTop = true
                         }
                     },
+                    onOpenNoFlyIncidentPath = { source, primaryId, zoneSummary, eventEpochMs ->
+                        navController.navigate(
+                            "noFlyIncidentPath/${Uri.encode(source)}/${Uri.encode(primaryId)}/${Uri.encode(zoneSummary)}/$eventEpochMs"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onOpenDeviceDetails = { source, primaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        )
+                    },
                     onEncounterClick = { encounter ->
                         navController.navigate(
                             "encounterDetail/${Uri.encode(encounter.source.name)}/${Uri.encode(encounter.primaryId)}/${encounter.timestampEpochMs}"
@@ -2615,6 +2759,18 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ) {
                             launchSingleTop = true
                         }
+                    },
+                    onOpenNoFlyIncidentPath = { source, primaryId, zoneSummary, eventEpochMs ->
+                        navController.navigate(
+                            "noFlyIncidentPath/${Uri.encode(source)}/${Uri.encode(primaryId)}/${Uri.encode(zoneSummary)}/$eventEpochMs"
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onOpenDeviceDetails = { source, primaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(source)}/${Uri.encode(primaryId)}"
+                        )
                     },
                     onEncounterClick = { encounter ->
                         navController.navigate(
@@ -2705,6 +2861,44 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     source = source,
                     primaryId = primaryId,
                     encounters = allPipelineEncounters,
+                    incidentZoneSummary = null,
+                    incidentEventEpochMs = null,
+                    onOpenDeviceDetails = { detailSource, detailPrimaryId ->
+                        navController.navigate(
+                            "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
+                        )
+                    },
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable(NO_FLY_INCIDENT_PATH_ROUTE) { entry ->
+                val source = Uri.decode(entry.arguments?.getString("source") ?: "")
+                val primaryId = Uri.decode(entry.arguments?.getString("primaryId") ?: "")
+                val zoneSummary = Uri.decode(entry.arguments?.getString("zoneSummary") ?: "")
+                val eventEpochMs = entry.arguments?.getString("eventEpochMs")?.toLongOrNull()
+                val incidentLat = entry.arguments?.getString("lat")?.toDoubleOrNull()
+                val incidentLon = entry.arguments?.getString("lon")?.toDoubleOrNull()
+                val enteredZoneIds = entry.arguments
+                    ?.getString("zoneIds")
+                    ?.split(',')
+                    ?.map { it.trim() }
+                    ?.filter { it.isNotBlank() }
+                    ?.toSet()
+                    .orEmpty()
+                val incidentLocation = if (isValidLatLon(incidentLat, incidentLon)) {
+                    DetectionLocation(incidentLat!!, incidentLon!!)
+                } else {
+                    null
+                }
+                MovingDevicePathMapPage(
+                    source = source,
+                    primaryId = primaryId,
+                    encounters = allPipelineEncounters,
+                    incidentZoneSummary = zoneSummary.takeIf { it.isNotBlank() },
+                    incidentEventEpochMs = eventEpochMs,
+                    fallbackIncidentLocation = incidentLocation,
+                    enteredZoneIds = enteredZoneIds,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
@@ -2767,7 +2961,29 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        val startupChecks = listOf(
+                            startupConfigLoaded,
+                            trackingObserverInitialized,
+                            operationalObserverInitialized,
+                            mapPrewarmReady,
+                            mapDataPrewarmReady,
+                            startupBootstrapScanCompleted
+                        )
+                        val startupProgress = startupChecks.count { it }.toFloat() / startupChecks.size.toFloat()
+                        val startupProgressPercent = (startupProgress * 100f).toInt().coerceIn(0, 100)
+
                         CircularProgressIndicator()
+                        LinearProgressIndicator(
+                            progress = { startupProgress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .widthIn(max = 360.dp)
+                        )
+                        Text(
+                            "Startup progress: $startupProgressPercent%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Text(
                             if (appRuntimeReady && !startupRuntimeGateReleased) {
                                 "Waiting for first startup scan to complete..."
@@ -4840,7 +5056,9 @@ private fun DetectionPage(
     var identityModeOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
-    var deviceMapAircraftRadiusMiles by rememberSaveable { mutableStateOf(50) }
+    var deviceMapAircraftRadiusMiles by rememberSaveable {
+        mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(25, 75))
+    }
     var flightMapRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
@@ -5624,7 +5842,10 @@ private fun DetectionPage(
                         showRadiusControl = true,
                         radiusMiles = deviceMapAircraftRadiusMiles,
                         onRadiusMilesChange = { miles ->
-                            deviceMapAircraftRadiusMiles = miles.coerceIn(25, 75)
+                            val safeMiles = miles.coerceIn(25, 75)
+                            deviceMapAircraftRadiusMiles = safeMiles
+                            flightMapRadiusMiles = safeMiles
+                            ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
                         },
                         radiusControlLabel = "Aircraft Radius (mi)",
                         radiusOptions = listOf(25, 50, 75),
@@ -5741,7 +5962,10 @@ private fun DetectionPage(
                             showRadiusControl = true,
                             radiusMiles = flightMapRadiusMiles,
                             onRadiusMilesChange = { miles ->
-                                flightMapRadiusMiles = miles.coerceIn(10, 1000)
+                                val safeMiles = miles.coerceIn(10, 1000)
+                                flightMapRadiusMiles = safeMiles
+                                deviceMapAircraftRadiusMiles = safeMiles.coerceIn(25, 75)
+                                ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
                             },
                             radiusControlLabel = "Radius (mi)",
                             radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
@@ -6130,6 +6354,8 @@ private fun LogsHubPage(
     onClearLogs: () -> Unit,
     onClearErrorLogs: () -> Unit,
     onOpenApproachMap: (source: String, primaryId: String) -> Unit,
+    onOpenNoFlyIncidentPath: (source: String, primaryId: String, zoneSummary: String, eventEpochMs: Long) -> Unit,
+    onOpenDeviceDetails: (source: String, primaryId: String) -> Unit,
     onEncounterClick: (Encounter) -> Unit
 ) {
     var selectedTab by rememberSaveable { mutableStateOf(initialTab.coerceIn(0, 2)) }
@@ -6154,7 +6380,9 @@ private fun LogsHubPage(
                 DetectionLogsPage(
                     logs = logs,
                     onClearLogs = onClearLogs,
-                    onOpenApproachMap = onOpenApproachMap
+                    onOpenApproachMap = onOpenApproachMap,
+                    onOpenNoFlyIncidentPath = onOpenNoFlyIncidentPath,
+                    onOpenDeviceDetails = onOpenDeviceDetails
                 )
             } else if (selectedTab == 1) {
                 ErrorLogsPage(
@@ -6178,7 +6406,9 @@ private fun LogsHubPage(
 private fun DetectionLogsPage(
     logs: List<AlertLogEntry>,
     onClearLogs: () -> Unit,
-    onOpenApproachMap: (source: String, primaryId: String) -> Unit
+    onOpenApproachMap: (source: String, primaryId: String) -> Unit,
+    onOpenNoFlyIncidentPath: (source: String, primaryId: String, zoneSummary: String, eventEpochMs: Long) -> Unit,
+    onOpenDeviceDetails: (source: String, primaryId: String) -> Unit
 ) {
     var selectedLogTab by rememberSaveable { mutableStateOf(0) }
 
@@ -6187,6 +6417,26 @@ private fun DetectionLogsPage(
     val noFlyCount = remember(logs) { logs.count { it.type == AlertLogType.NO_FLY_PASS_THROUGH } }
     val foreignCount = remember(logs) { logs.count { it.type == AlertLogType.FOREIGN_SIGNAL } }
     val acousticRealtimeCount = remember(logs) { logs.count { it.type == AlertLogType.ACOUSTIC_REALTIME } }
+    val acousticRealtimePeakHistoryRange = remember(logs) {
+        val values = logs
+            .asSequence()
+            .filter { it.type == AlertLogType.ACOUSTIC_REALTIME }
+            .mapNotNull { parseAcousticMetricDbFs(it.message, "Peak") }
+            .toList()
+        val min = values.minOrNull()
+        val max = values.maxOrNull()
+        if (min == null || max == null) null else min to max
+    }
+    val acousticRealtimeRmsHistoryRange = remember(logs) {
+        val values = logs
+            .asSequence()
+            .filter { it.type == AlertLogType.ACOUSTIC_REALTIME }
+            .mapNotNull { parseAcousticMetricDbFs(it.message, "RMS") }
+            .toList()
+        val min = values.minOrNull()
+        val max = values.maxOrNull()
+        if (min == null || max == null) null else min to max
+    }
     val tabLabels = listOf(
         "All (${logs.size})",
         "Approach ($approachCount)",
@@ -6195,11 +6445,12 @@ private fun DetectionLogsPage(
         "Foreign ($foreignCount)",
         "Acoustic RT ($acousticRealtimeCount)"
     )
+    val safeSelectedLogTab = selectedLogTab.coerceIn(0, tabLabels.lastIndex)
 
-    val filteredLogs = remember(logs, selectedLogTab) {
+    val filteredLogs = remember(logs, safeSelectedLogTab) {
         logs.asSequence()
             .filter { entry ->
-                when (selectedLogTab) {
+                when (safeSelectedLogTab) {
                     1 -> entry.type == AlertLogType.APPROACH
                     2 -> entry.type == AlertLogType.TRACKER
                     3 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
@@ -6232,10 +6483,10 @@ private fun DetectionLogsPage(
             Text("Review historical alerts by category.")
         }
         item {
-            TabRow(selectedTabIndex = selectedLogTab) {
+            TabRow(selectedTabIndex = safeSelectedLogTab) {
                 tabLabels.forEachIndexed { index, label ->
                     Tab(
-                        selected = selectedLogTab == index,
+                        selected = safeSelectedLogTab == index,
                         onClick = { selectedLogTab = index },
                         text = { Text(label) }
                     )
@@ -6275,13 +6526,13 @@ private fun DetectionLogsPage(
             }
         }
 
-        items(
+        itemsIndexed(
             items = filteredLogs,
-            key = { entry ->
-                "${entry.timestampEpochMs}|${entry.type.name}|${entry.source}|${entry.primaryId}|${entry.message.hashCode()}"
+            key = { index, entry ->
+                "${entry.timestampEpochMs}|${entry.type.name}|${entry.source}|${entry.primaryId}|${entry.message.hashCode()}|$index"
             },
-            contentType = { "alertLog" }
-        ) { entry ->
+            contentType = { _, _ -> "alertLog" }
+        ) { _, entry ->
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
@@ -6299,17 +6550,55 @@ private fun DetectionLogsPage(
                 AlertLogType.ACOUSTIC_REALTIME -> "Acoustic RT"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
+            val isNoFlyEntry = entry.type == AlertLogType.NO_FLY_PASS_THROUGH
+            val isAcousticRealtimeEntry = entry.type == AlertLogType.ACOUSTIC_REALTIME
+            val opensDeviceDetails = entry.type == AlertLogType.TRACKER ||
+                entry.type == AlertLogType.FOREIGN_SIGNAL ||
+                entry.type == AlertLogType.NFC ||
+                entry.type == AlertLogType.ACOUSTIC_REALTIME
+            val acousticPeakDbFs = if (isAcousticRealtimeEntry) parseAcousticMetricDbFs(entry.message, "Peak") else null
+            val acousticRmsDbFs = if (isAcousticRealtimeEntry) parseAcousticMetricDbFs(entry.message, "RMS") else null
+            fun meterProgress(value: Double?, range: Pair<Double, Double>?): Float? {
+                if (value == null || range == null) return null
+                val min = range.first
+                val max = range.second
+                if (max <= min) return 1f
+                return (((value - min) / (max - min)).toFloat()).coerceIn(0f, 1f)
+            }
+            val acousticPeakMeterProgress = meterProgress(acousticPeakDbFs, acousticRealtimePeakHistoryRange)
+            val acousticRmsMeterProgress = meterProgress(acousticRmsDbFs, acousticRealtimeRmsHistoryRange)
+            val noFlyZoneSummary = if (isNoFlyEntry) {
+                parseNoFlyZoneSummaryFromLogMessage(entry.message) ?: "No-fly zone"
+            } else {
+                null
+            }
             val confidenceLabel = entry.confidence
                 ?.let { " • ${String.format(Locale.US, "%.0f%%", it * 100.0)} confidence" }
                 .orEmpty()
+            val isClickable = isApproachEntry || isNoFlyEntry || opensDeviceDetails
+            val tapHint = when {
+                isApproachEntry -> "Tap to open approach map"
+                isNoFlyEntry -> "Tap to open no-fly incident path"
+                opensDeviceDetails -> "Tap to open device details"
+                else -> null
+            }
 
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(
-                        if (isApproachEntry) {
+                        if (isClickable) {
                             Modifier.clickable {
-                                onOpenApproachMap(entry.source, entry.primaryId)
+                                when {
+                                    isApproachEntry -> onOpenApproachMap(entry.source, entry.primaryId)
+                                    isNoFlyEntry -> onOpenNoFlyIncidentPath(
+                                        entry.source,
+                                        entry.primaryId,
+                                        noFlyZoneSummary ?: "No-fly zone",
+                                        entry.timestampEpochMs
+                                    )
+                                    opensDeviceDetails -> onOpenDeviceDetails(entry.source, entry.primaryId)
+                                }
                             }
                         } else {
                             Modifier
@@ -6331,9 +6620,51 @@ private fun DetectionLogsPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(entry.message + confidenceLabel)
-                    if (isApproachEntry) {
+                    if (isAcousticRealtimeEntry && (acousticPeakMeterProgress != null || acousticRmsMeterProgress != null)) {
+                        if (acousticPeakMeterProgress != null) {
+                            Text(
+                                text = "Peak ${acousticPeakDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            LinearProgressIndicator(
+                                progress = { acousticPeakMeterProgress },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            val peakRangeLabel = acousticRealtimePeakHistoryRange?.let { range ->
+                                "${String.format(Locale.US, "%.1f", range.first)} to ${String.format(Locale.US, "%.1f", range.second)} dBFS"
+                            } ?: "n/a"
+                            Text(
+                                text = "Peak historical range: $peakRangeLabel",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (acousticRmsMeterProgress != null) {
+                            Text(
+                                text = "RMS ${acousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            LinearProgressIndicator(
+                                progress = { acousticRmsMeterProgress },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = Color(0xFF26A69A)
+                            )
+                            val rmsRangeLabel = acousticRealtimeRmsHistoryRange?.let { range ->
+                                "${String.format(Locale.US, "%.1f", range.first)} to ${String.format(Locale.US, "%.1f", range.second)} dBFS"
+                            } ?: "n/a"
+                            Text(
+                                text = "RMS historical range: $rmsRangeLabel",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (tapHint != null) {
                         Text(
-                            text = "Tap to open approach map",
+                            text = tapHint,
                             color = Color(0xFF1565C0),
                             fontWeight = FontWeight.Medium
                         )
@@ -8848,9 +9179,14 @@ private fun MovingDevicePathMapPage(
     source: String,
     primaryId: String,
     encounters: List<Encounter>,
+    incidentZoneSummary: String? = null,
+    incidentEventEpochMs: Long? = null,
+    fallbackIncidentLocation: DetectionLocation? = null,
+    enteredZoneIds: Set<String> = emptySet(),
     onOpenDeviceDetails: (String, String) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
@@ -8863,8 +9199,24 @@ private fun MovingDevicePathMapPage(
     val pathPoints = remember(deviceEncounters) {
         deviceEncounters
             .mapNotNull { encounter ->
-                if (!isValidLatLon(encounter.lat, encounter.lon)) return@mapNotNull null
-                LatLng(encounter.lat!!, encounter.lon!!)
+                val resolvedLatLon = when (encounter.source) {
+                    EncounterSource.REMOTE_ID -> {
+                        remoteIdBroadcastLatLon(encounter)
+                            ?: if (isValidLatLon(encounter.lat, encounter.lon)) {
+                                encounter.lat!! to encounter.lon!!
+                            } else {
+                                null
+                            }
+                    }
+
+                    else -> if (isValidLatLon(encounter.lat, encounter.lon)) {
+                        encounter.lat!! to encounter.lon!!
+                    } else {
+                        null
+                    }
+                } ?: return@mapNotNull null
+
+                LatLng(resolvedLatLon.first, resolvedLatLon.second)
             }
             .fold(mutableListOf<LatLng>()) { acc, point ->
                 val previous = acc.lastOrNull()
@@ -8881,6 +9233,79 @@ private fun MovingDevicePathMapPage(
         decimateLatLngPoints(pathPoints, MAP_CAMERA_BOUNDS_SAMPLE_LIMIT)
     }
     val latestMotion = remember(deviceEncounters) { analyzeMotionSignal(deviceEncounters) }
+    val latestAircraftMarkerPin = remember(deviceEncounters, pathPoints, source, primaryId) {
+        val latestEncounter = deviceEncounters.lastOrNull() ?: return@remember null
+        val latestPoint = pathPoints.lastOrNull() ?: return@remember null
+        val hints = readAircraftVisualHints(latestEncounter.rawPayloadJson)
+        MapPin(
+            position = latestPoint,
+            title = "Latest aircraft position",
+            snippetBuilder = { formatEpoch(latestEncounter.timestampEpochMs) },
+            timestampEpochMs = latestEncounter.timestampEpochMs,
+            source = SourceCatalog.SOURCE_AIRCRAFT,
+            primaryId = primaryId,
+            secondaryId = latestEncounter.secondaryId,
+            encounterTimestampEpochMs = latestEncounter.timestampEpochMs,
+            aircraftIconType = hints.iconType,
+            headingDegrees = hints.headingDegrees,
+            isLive = true
+        )
+    }
+    val latestAircraftLocation = remember(pathPoints) {
+        pathPoints.lastOrNull()?.let { point -> DetectionLocation(point.latitude, point.longitude) }
+    }
+    val noFlyAnchorLocation = latestAircraftLocation ?: fallbackIncidentLocation
+    val noFlyZones by produceState(
+        initialValue = emptyList<NoFlyZoneOverlayProvider.NoFlyZonePolygon>(),
+        key1 = noFlyAnchorLocation
+    ) {
+        val anchor = noFlyAnchorLocation
+        value = if (anchor == null) {
+            emptyList()
+        } else {
+            withContext(Dispatchers.IO) {
+                NoFlyZoneOverlayProvider.read(context, near = anchor)
+            }
+        }
+    }
+    val renderedNoFlyZones by produceState(
+        initialValue = emptyList<Pair<NoFlyZoneOverlayProvider.NoFlyZonePolygon, List<LatLng>>>(),
+        key1 = noFlyZones
+    ) {
+        value = withContext(Dispatchers.Default) {
+            noFlyZones.mapNotNull { zone ->
+                val simplifiedBoundary = simplifyNoFlyBoundary(
+                    boundary = zone.boundary,
+                    maxPoints = INCIDENT_NO_FLY_BOUNDARY_POINT_LIMIT
+                )
+                val boundary = simplifiedBoundary
+                    .mapNotNull { vertex ->
+                        if (!isValidLatLon(vertex.lat, vertex.lon)) return@mapNotNull null
+                        LatLng(vertex.lat, vertex.lon)
+                    }
+                if (boundary.size < 3) {
+                    null
+                } else {
+                    zone to boundary
+                }
+            }
+        }
+    }
+    val activeNoFlyZoneIds = remember(noFlyZones, noFlyAnchorLocation) {
+        val location = noFlyAnchorLocation ?: return@remember emptySet<String>()
+        noFlyZones
+            .asSequence()
+            .filter { zone -> noFlyZoneContainsPoint(zone, location.lat, location.lon) }
+            .map { zone -> zone.id }
+            .toSet()
+    }
+    val incidentRenderedNoFlyZones = remember(renderedNoFlyZones, enteredZoneIds, activeNoFlyZoneIds) {
+        when {
+            enteredZoneIds.isNotEmpty() -> renderedNoFlyZones.filter { (zone, _) -> zone.id in enteredZoneIds }
+            activeNoFlyZoneIds.isNotEmpty() -> renderedNoFlyZones.filter { (zone, _) -> zone.id in activeNoFlyZoneIds }
+            else -> emptyList()
+        }
+    }
 
     LaunchedEffect(cameraPathPoints) {
         when {
@@ -8899,6 +9324,17 @@ private fun MovingDevicePathMapPage(
                     )
                 }
             }
+
+            fallbackIncidentLocation != null -> {
+                runCatching {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(
+                            LatLng(fallbackIncidentLocation.lat, fallbackIncidentLocation.lon),
+                            15f
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -8908,6 +9344,20 @@ private fun MovingDevicePathMapPage(
     ) {
         Text("Moving Device Path", style = MaterialTheme.typography.headlineSmall)
         Text("$source • $primaryId")
+        if (!incidentZoneSummary.isNullOrBlank()) {
+            Text(
+                "Incident: Entered no-fly zone $incidentZoneSummary",
+                color = Color(0xFFB3261E),
+                fontWeight = FontWeight.SemiBold
+            )
+            incidentEventEpochMs?.let { epochMs ->
+                Text(
+                    "Alert time: ${formatEpoch(epochMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
         val statusText = latestMotion?.let {
             if (it.isInMotion) {
                 "Status: MOVING ${formatSpeedLabel(it.speedMps)} ${formatHeadingCardinal(it.headingDeg)}"
@@ -8916,6 +9366,8 @@ private fun MovingDevicePathMapPage(
             }
         } ?: "Status: n/a"
         Text(statusText)
+        Text("Historical encounters used: ${deviceEncounters.size}")
+        Text("No-fly zones rendered: ${incidentRenderedNoFlyZones.size} • Aircraft inside: ${activeNoFlyZoneIds.size}")
         Text("Path points: ${renderedPathPoints.size}/${pathPoints.size}")
         Text("Blue path direction: starts at GREEN marker and ends at RED marker.")
 
@@ -8933,6 +9385,16 @@ private fun MovingDevicePathMapPage(
                     myLocationButtonEnabled = false
                 )
             ) {
+                incidentRenderedNoFlyZones.forEach { (zone, boundary) ->
+                    val isActive = zone.id in activeNoFlyZoneIds
+                    Polygon(
+                        points = boundary,
+                        fillColor = if (isActive) Color(0x55D32F2F) else Color(0x30E53935),
+                        strokeColor = if (isActive) Color(0xFFD32F2F) else Color(0xFFE53935),
+                        strokeWidth = if (isActive) 4f else 2f
+                    )
+                }
+
                 if (renderedPathPoints.size >= 2) {
                     Polyline(
                         points = renderedPathPoints,
@@ -8951,11 +9413,42 @@ private fun MovingDevicePathMapPage(
                 }
 
                 pathPoints.lastOrNull()?.let { end ->
+                    val heading = latestAircraftMarkerPin?.headingDegrees?.toFloat()?.let { value ->
+                        ((value % 360f) + 360f) % 360f
+                    } ?: 0f
                     Marker(
                         state = MarkerState(position = end),
                         title = "Latest device position",
                         snippet = formatEpoch(deviceEncounters.lastOrNull()?.timestampEpochMs ?: 0L),
-                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                        icon = latestAircraftMarkerPin?.let { markerAircraftIconForPin(it) }
+                            ?: BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
+                        anchor = Offset(0.5f, 0.5f),
+                        rotation = heading,
+                        flat = true
+                    )
+                }
+
+                if (pathPoints.isEmpty() && fallbackIncidentLocation != null) {
+                    val incidentMarkerPin = latestAircraftMarkerPin ?: MapPin(
+                        position = LatLng(fallbackIncidentLocation.lat, fallbackIncidentLocation.lon),
+                        title = "Incident aircraft location",
+                        snippetBuilder = { incidentEventEpochMs?.let(::formatEpoch) ?: "No timestamp" },
+                        timestampEpochMs = incidentEventEpochMs ?: System.currentTimeMillis(),
+                        source = SourceCatalog.SOURCE_AIRCRAFT,
+                        primaryId = primaryId,
+                        secondaryId = null,
+                        encounterTimestampEpochMs = incidentEventEpochMs,
+                        aircraftIconType = "plane",
+                        headingDegrees = null,
+                        isLive = true
+                    )
+                    Marker(
+                        state = MarkerState(position = LatLng(fallbackIncidentLocation.lat, fallbackIncidentLocation.lon)),
+                        title = "Incident location",
+                        snippet = incidentEventEpochMs?.let(::formatEpoch) ?: "No timestamp",
+                        icon = markerAircraftIconForPin(incidentMarkerPin),
+                        anchor = Offset(0.5f, 0.5f),
+                        flat = true
                     )
                 }
             }
@@ -10469,6 +10962,7 @@ private fun requiresAllEncountersRoute(route: String): Boolean {
         route == DEVICES_ENCOUNTERS_ROUTE ||
         route == APPROACH_ALERT_MAP_ROUTE ||
         route == MOVING_DEVICE_PATH_ROUTE ||
+    route == NO_FLY_INCIDENT_PATH_ROUTE ||
         route == DEVICE_DETAIL_ROUTE ||
         route == ENCOUNTER_DETAIL_ROUTE
 }
@@ -12364,6 +12858,59 @@ private fun noFlyZoneContainsPoint(
     return polygonContainsPoint(boundary, lat, lon)
 }
 
+private fun extractEncounterAltitudeFeet(encounter: Encounter): Double? {
+    val payload = parseEncounterPayload(encounter) ?: return null
+
+    fun readFirstDouble(keyCandidates: List<String>): Double? {
+        keyCandidates.forEach { key ->
+            payload.optDoubleOrNull(key)?.let { return it }
+            payload.optString(key, "").trim().toDoubleOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    readFirstDouble(
+        listOf(
+            "altitudeFeet",
+            "altitudeFt",
+            "aircraftAltitudeFeet",
+            "droneAltitudeFeet",
+            "alt_ft"
+        )
+    )?.let { return it }
+
+    val altitudeMeters = readFirstDouble(
+        listOf(
+            "altitudeMeters",
+            "baroAltitudeMeters",
+            "geoAltitudeMeters",
+            "aircraftAltitudeMeters",
+            "droneAltitudeMeters",
+            "aircraft_altitude_m",
+            "drone_altitude_m",
+            "altitude_m",
+            "alt_baro",
+            "alt_geom",
+            "altitude"
+        )
+    ) ?: return null
+
+    return altitudeMeters * 3.28084
+}
+
+private fun noFlyZoneAltitudeAllowsEntry(
+    zone: NoFlyZoneOverlayProvider.NoFlyZonePolygon,
+    aircraftAltitudeFeet: Double?
+): Boolean {
+    if (aircraftAltitudeFeet == null || !aircraftAltitudeFeet.isFinite()) return true
+    val lowerBoundFeet = zone.lowerAltitudeFeet?.toDouble()
+    val upperBoundFeet = zone.upperAltitudeFeet?.toDouble()
+
+    if (lowerBoundFeet != null && aircraftAltitudeFeet < lowerBoundFeet) return false
+    if (upperBoundFeet != null && aircraftAltitudeFeet > upperBoundFeet) return false
+    return true
+}
+
 private fun polygonContainsPoint(boundary: List<DetectionLocation>, lat: Double, lon: Double): Boolean {
     var inside = false
     var previousIndex = boundary.size - 1
@@ -12572,7 +13119,10 @@ private fun sendNoFlyPassThroughNotification(
     source: EncounterSource,
     primaryId: String,
     sourceLabel: String,
-    zones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>
+    zones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>,
+    eventEpochMs: Long,
+    eventLat: Double?,
+    eventLon: Double?
 ) {
     if (zones.isEmpty()) return
 
@@ -12586,6 +13136,33 @@ private fun sendNoFlyPassThroughNotification(
         .joinToString(" / ") { zone -> zone.label.takeIf { it.isNotBlank() } ?: "Unnamed zone" }
     val overflowSuffix = if (zones.size > 2) " +${zones.size - 2} more" else ""
     val content = "$sourceLabel $primaryId • $zoneHeadline$overflowSuffix"
+    val enteredZoneIds = zones
+        .asSequence()
+        .map { zone -> zone.id }
+        .sorted()
+        .joinToString(",")
+    val tapIntent = Intent(context, MainActivity::class.java).apply {
+        action = ACTION_OPEN_NO_FLY_INCIDENT_PATH
+        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        putExtra(EXTRA_NO_FLY_SOURCE, source.name)
+        putExtra(EXTRA_NO_FLY_PRIMARY_ID, primaryId)
+        putExtra(EXTRA_NO_FLY_ZONE_SUMMARY, "$zoneHeadline$overflowSuffix")
+        putExtra(EXTRA_NO_FLY_EVENT_EPOCH_MS, eventEpochMs)
+        putExtra(EXTRA_NO_FLY_ZONE_IDS, enteredZoneIds)
+        if (isValidLatLon(eventLat, eventLon)) {
+            putExtra(EXTRA_NO_FLY_LAT, eventLat!!)
+            putExtra(EXTRA_NO_FLY_LON, eventLon!!)
+        }
+    }
+
+    val zoneIdSignature = enteredZoneIds
+    val notificationId = ("no-fly:$primaryId:$zoneIdSignature").hashCode()
+    val tapPendingIntent = PendingIntent.getActivity(
+        context,
+        notificationId,
+        tapIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
 
     val notification = NotificationCompat.Builder(context, NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_error)
@@ -12594,14 +13171,9 @@ private fun sendNoFlyPassThroughNotification(
         .setStyle(NotificationCompat.BigTextStyle().bigText(content))
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setAutoCancel(true)
+        .setContentIntent(tapPendingIntent)
         .build()
 
-    val zoneIdSignature = zones
-        .asSequence()
-        .map { zone -> zone.id }
-        .sorted()
-        .joinToString(",")
-    val notificationId = ("no-fly:$primaryId:$zoneIdSignature").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
@@ -12758,6 +13330,26 @@ private fun DevicesEncountersPage(
 }
 
 @Composable
+private fun CompactSwitchControl(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled
+        )
+    }
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
     recentEncounters: List<Encounter>,
@@ -12778,6 +13370,7 @@ private fun DevicesPage(
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
+    var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
             initial = LocationSnapshotProvider.read(context)
@@ -12847,74 +13440,88 @@ private fun DevicesPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            ScopeFilterDropdown(
-                selectedScope = dataScope,
-                onScopeSelected = {
-                    dataScope = it
-                    sourceFilter = null
-                    queryFilter = ""
-                }
-            )
-            DeviceSortDropdown(
-                selectedSort = sortMode,
-                onSortSelected = { sortMode = it }
-            )
-            SourceFilterDropdown(
-                selectedSource = sourceFilter,
-                sourceOptions = sourceOptions,
-                onSourceSelected = { sourceFilter = it }
-            )
-            OutlinedTextField(
-                value = queryFilter,
-                onValueChange = { queryFilter = it },
-                modifier = Modifier.widthIn(min = 220.dp),
-                label = { Text("Search device ID or label") },
-                singleLine = true
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Secondary IDs")
-                Switch(
-                    checked = showSecondaryIds,
-                    onCheckedChange = { showSecondaryIds = it }
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Distance")
-                Switch(
-                    checked = showDistance,
-                    onCheckedChange = {
-                        showDistance = it
-                        if (!it) sortByDistance = false
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Filters & Display", style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = { filtersExpanded = !filtersExpanded }) {
+                        Text(if (filtersExpanded) "Hide" else "Show")
                     }
-                )
-            }
-            if (showDistance) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Sort by Distance")
-                    Switch(
-                        checked = sortByDistance,
-                        onCheckedChange = { sortByDistance = it }
+                }
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ScopeFilterDropdown(
+                        selectedScope = dataScope,
+                        onScopeSelected = {
+                            dataScope = it
+                            sourceFilter = null
+                            queryFilter = ""
+                        }
+                    )
+                    DeviceSortDropdown(
+                        selectedSort = sortMode,
+                        onSortSelected = { sortMode = it }
+                    )
+                    SourceFilterDropdown(
+                        selectedSource = sourceFilter,
+                        sourceOptions = sourceOptions,
+                        onSourceSelected = { sourceFilter = it }
                     )
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Owned Only")
-                Switch(
-                    checked = showOwnedOnly,
-                    onCheckedChange = { showOwnedOnly = it }
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Tracker Risk Only")
-                Switch(
-                    checked = showTrackerRiskOnly,
-                    onCheckedChange = { showTrackerRiskOnly = it }
-                )
+
+                AnimatedVisibility(
+                    visible = filtersExpanded,
+                    enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth / 4 }),
+                    exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth / 4 })
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = queryFilter,
+                            onValueChange = { queryFilter = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Search device ID or label") },
+                            singleLine = true
+                        )
+                        CompactSwitchControl(
+                            label = "Show Secondary IDs",
+                            checked = showSecondaryIds,
+                            onCheckedChange = { showSecondaryIds = it }
+                        )
+                        CompactSwitchControl(
+                            label = "Show Distance",
+                            checked = showDistance,
+                            onCheckedChange = {
+                                showDistance = it
+                                if (!it) sortByDistance = false
+                            }
+                        )
+                        CompactSwitchControl(
+                            label = "Sort by Distance",
+                            checked = sortByDistance,
+                            onCheckedChange = { sortByDistance = it },
+                            enabled = showDistance
+                        )
+                        CompactSwitchControl(
+                            label = "Show Owned Only",
+                            checked = showOwnedOnly,
+                            onCheckedChange = { showOwnedOnly = it }
+                        )
+                        CompactSwitchControl(
+                            label = "Tracker Risk Only",
+                            checked = showTrackerRiskOnly,
+                            onCheckedChange = { showTrackerRiskOnly = it }
+                        )
+                    }
+                }
             }
         }
         Text("Showing ${displayedDevices.size} of ${devices.size}")
@@ -13044,6 +13651,7 @@ private fun EncountersPage(
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
+    var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
             initial = LocationSnapshotProvider.read(context)
@@ -13094,63 +13702,80 @@ private fun EncountersPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Encounters", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any encounter for full telemetry.")
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            ScopeFilterDropdown(
-                selectedScope = dataScope,
-                onScopeSelected = {
-                    dataScope = it
-                    sourceFilter = null
-                    queryFilter = ""
-                }
-            )
-            SourceFilterDropdown(
-                selectedSource = sourceFilter,
-                sourceOptions = sourceOptions,
-                onSourceSelected = { sourceFilter = it }
-            )
-            OutlinedTextField(
-                value = queryFilter,
-                onValueChange = { queryFilter = it },
-                modifier = Modifier.widthIn(min = 220.dp),
-                label = { Text("Search ID, label, or payload") },
-                singleLine = true
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Secondary IDs")
-                Switch(
-                    checked = showSecondaryIds,
-                    onCheckedChange = { showSecondaryIds = it }
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Distance")
-                Switch(
-                    checked = showDistance,
-                    onCheckedChange = {
-                        showDistance = it
-                        if (!it) sortByDistance = false
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Filters & Display", style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = { filtersExpanded = !filtersExpanded }) {
+                        Text(if (filtersExpanded) "Hide" else "Show")
                     }
-                )
-            }
-            if (showDistance) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Sort by Distance")
-                    Switch(
-                        checked = sortByDistance,
-                        onCheckedChange = { sortByDistance = it }
+                }
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ScopeFilterDropdown(
+                        selectedScope = dataScope,
+                        onScopeSelected = {
+                            dataScope = it
+                            sourceFilter = null
+                            queryFilter = ""
+                        }
+                    )
+                    SourceFilterDropdown(
+                        selectedSource = sourceFilter,
+                        sourceOptions = sourceOptions,
+                        onSourceSelected = { sourceFilter = it }
                     )
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Show Owned Only")
-                Switch(
-                    checked = showOwnedOnly,
-                    onCheckedChange = { showOwnedOnly = it }
-                )
+
+                AnimatedVisibility(
+                    visible = filtersExpanded,
+                    enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth / 4 }),
+                    exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth / 4 })
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = queryFilter,
+                            onValueChange = { queryFilter = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Search ID, label, or payload") },
+                            singleLine = true
+                        )
+                        CompactSwitchControl(
+                            label = "Show Secondary IDs",
+                            checked = showSecondaryIds,
+                            onCheckedChange = { showSecondaryIds = it }
+                        )
+                        CompactSwitchControl(
+                            label = "Show Distance",
+                            checked = showDistance,
+                            onCheckedChange = {
+                                showDistance = it
+                                if (!it) sortByDistance = false
+                            }
+                        )
+                        CompactSwitchControl(
+                            label = "Sort by Distance",
+                            checked = sortByDistance,
+                            onCheckedChange = { sortByDistance = it },
+                            enabled = showDistance
+                        )
+                        CompactSwitchControl(
+                            label = "Show Owned Only",
+                            checked = showOwnedOnly,
+                            onCheckedChange = { showOwnedOnly = it }
+                        )
+                    }
+                }
             }
         }
         Text("Showing ${displayedEncounters.size} of ${encounters.size}")
