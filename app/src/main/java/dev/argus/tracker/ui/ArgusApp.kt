@@ -206,6 +206,8 @@ private const val APPROACH_ALERT_CHANNEL_ID = "argus_approach_alerts"
 private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+private const val FLOCK_ALERT_CHANNEL_ID = "argus_flock_alerts"
+private const val FLOCK_ALERT_COOLDOWN_MS = 10 * 60 * 1000L
 private const val NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID = "argus_no_fly_pass_through_alerts"
 private const val NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
@@ -350,7 +352,9 @@ private data class TrackerRiskSignal(
     val activeWindowMinutes: Double,
     val summary: String,
     val seenAtHome: Boolean,
-    val seenAwayFromHome: Boolean
+    val seenAwayFromHome: Boolean,
+    val trackerFamilyHint: String? = null,
+    val trackerFamilyConfidence: Double? = null
 )
 
 private enum class ForeignSignalRiskLevel {
@@ -690,6 +694,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var liveMapUpdateIntervalSeconds by remember { mutableStateOf(ScanSettings.getLiveMapUpdateIntervalSeconds(context)) }
     var mapClusteringEnabled by remember { mutableStateOf(ScanSettings.isMapClusteringEnabled(context)) }
     var mapClusterRangeLevel by remember { mutableStateOf(ScanSettings.getMapClusterRangeLevel(context)) }
+    var mapTrafficEnabled by remember { mutableStateOf(ScanSettings.isMapTrafficEnabled(context)) }
     var mapNoFlyZonesEnabled by remember { mutableStateOf(ScanSettings.isMapNoFlyZonesEnabled(context)) }
     var mapNoFlyRenderQualityLevel by remember {
         mutableStateOf(ScanSettings.getMapNoFlyRenderQualityLevel(context))
@@ -718,6 +723,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachDetectionEnabled by remember { mutableStateOf(ScanSettings.isApproachDetectionEnabled(context)) }
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
+    var flockNotificationsEnabled by remember { mutableStateOf(ScanSettings.isFlockNotificationsEnabled(context)) }
     var noFlyPassThroughNotificationsEnabled by remember {
         mutableStateOf(ScanSettings.isNoFlyPassThroughNotificationsEnabled(context))
     }
@@ -759,6 +765,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
+    val lastFlockNotificationEpochBySignature = remember { mutableMapOf<String, Long>() }
     val noFlyZoneStateByTrack = remember { mutableMapOf<String, Set<String>>() }
     val lastNoFlyZoneNotificationEpochByTrackZone = remember { mutableMapOf<String, Long>() }
     val noFlyZoneDetectionCache = remember { mutableMapOf<String, List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>() }
@@ -888,15 +895,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         delay(750)
         val peersTotal = chainMesh.peers.size
         val peersConnected = chainMesh.peers.count { it.state == ChainPeerState.CONNECTED }
-        val meshDashboardUrl = chainMesh.peers
-            .asSequence()
-            .filter { it.state == ChainPeerState.CONNECTED }
-            .mapNotNull { peer ->
-                peer.host
-                    .takeIf { host -> host.isNotBlank() }
-                    ?.let { host -> "http://$host:8091/" }
-            }
-            .firstOrNull()
         val recentDevicePoints = withContext(Dispatchers.Default) {
             buildWearDevicePoints(recent100PipelineEncounters)
         }
@@ -904,7 +902,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         val alertMessage = latestAlert?.message?.takeIf { it.isNotBlank() } ?: "No recent alerts"
         val alertEpochMs = latestAlert?.timestampEpochMs
         val pointsSignature = recentDevicePoints.hashCode()
-        val signature = "$peersTotal|$peersConnected|$alertMessage|${alertEpochMs ?: 0L}|${meshDashboardUrl.orEmpty()}|$pointsSignature"
+        val signature = "$peersTotal|$peersConnected|$alertMessage|${alertEpochMs ?: 0L}|$pointsSignature"
         if (signature == lastWearStatusSignature) return@LaunchedEffect
         val now = System.currentTimeMillis()
         if (now - lastWearStatusPublishEpochMs < 3_000L) return@LaunchedEffect
@@ -917,8 +915,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             peersConnected = peersConnected,
             lastAlertMessage = alertMessage,
             lastAlertEpochMs = alertEpochMs,
-            devicePoints = recentDevicePoints,
-            dashboardMapUrlOverride = meshDashboardUrl
+            devicePoints = recentDevicePoints
         )
     }
 
@@ -1085,6 +1082,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
+        mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
@@ -1338,6 +1336,83 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             trackerStateByDevice.remove(staleKey)
             lastTrackerNotificationEpochByDevice.remove(staleKey)
         }
+    }
+
+    LaunchedEffect(operationalAnalysisWindow, flockNotificationsEnabled) {
+        if (!flockNotificationsEnabled) {
+            lastFlockNotificationEpochBySignature.clear()
+            return@LaunchedEffect
+        }
+
+        val now = System.currentTimeMillis()
+        val flocks = withContext(Dispatchers.Default) {
+            detectDeviceFlocks(
+                encounters = operationalAnalysisWindow,
+                minTravelSpanMeters = 10.0
+            )
+        }
+
+        val activeSignatures = mutableSetOf<String>()
+        flocks.forEach { flock ->
+            val signature = flock.members
+                .asSequence()
+                .map { member -> "${member.source}|${member.primaryId}" }
+                .sorted()
+                .joinToString(separator = ",")
+
+            if (signature.isBlank()) return@forEach
+            activeSignatures += signature
+
+            val lastNotified = lastFlockNotificationEpochBySignature[signature] ?: 0L
+            val persistedLastSignature = ScanSettings.getFlockAlertLastSignature(context)
+            val persistedLastNotified = ScanSettings.getFlockAlertLastNotificationEpochMs(context)
+            val sharedLastNotified = maxOf(lastNotified, persistedLastNotified)
+            if ((signature == persistedLastSignature) || (sharedLastNotified != 0L && now - sharedLastNotified < FLOCK_ALERT_COOLDOWN_MS)) {
+                return@forEach
+            }
+
+            val primaryMember = flock.members.firstOrNull()
+            val primarySource = primaryMember?.source ?: SourceCatalog.SOURCE_CELL
+            val primaryId = primaryMember?.primaryId ?: "flock-${flock.id}"
+            val memberPreview = flock.members
+                .take(4)
+                .joinToString(separator = ", ") { member ->
+                    "${member.source}:${member.primaryId}"
+                }
+            val overflow = (flock.members.size - 4).coerceAtLeast(0)
+            val overflowLabel = if (overflow > 0) " +$overflow more" else ""
+            val message = "Flock detected (${flock.members.size} devices, ${flock.coTravelEventCount} co-travel events, span ${formatDistanceFeetMiles(flock.travelSpanMeters)}): $memberPreview$overflowLabel"
+
+            withContext(Dispatchers.IO) {
+                AlertLogStore.append(
+                    context = context,
+                    entry = AlertLogEntry(
+                        timestampEpochMs = now,
+                        type = AlertLogType.TRACKER,
+                        source = primarySource,
+                        primaryId = primaryId,
+                        message = message,
+                        confidence = null
+                    )
+                )
+            }
+
+            if (hasPostNotificationsPermission(context)) {
+                ensureFlockNotificationChannel(context)
+                sendFlockNotification(context, flock)
+            }
+
+            lastFlockNotificationEpochBySignature[signature] = now
+            ScanSettings.setFlockAlertLastSignature(context, signature)
+            ScanSettings.setFlockAlertLastNotificationEpochMs(context, now)
+        }
+
+        val stale = lastFlockNotificationEpochBySignature.keys.filter { it !in activeSignatures }
+        stale.forEach { signature ->
+            lastFlockNotificationEpochBySignature.remove(signature)
+        }
+
+        alertLogs = AlertLogStore.read(context)
     }
 
     LaunchedEffect(operationalAnalysisWindow, noFlyPassThroughNotificationsEnabled) {
@@ -1822,6 +1897,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     mapClusteringEnabled = mapClusteringEnabled,
                     mapClusterRangeLevel = mapClusterRangeLevel,
+                    mapTrafficEnabled = mapTrafficEnabled,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
                     mapNoFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
@@ -1841,6 +1917,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     approachDetectionEnabled = approachDetectionEnabled,
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
+                    flockNotificationsEnabled = flockNotificationsEnabled,
                     noFlyPassThroughNotificationsEnabled = noFlyPassThroughNotificationsEnabled,
                     nfcNotificationsEnabled = nfcNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
@@ -1915,6 +1992,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onTrackerNotificationsChanged = { enabled ->
                         trackerNotificationsEnabled = enabled
                         ScanSettings.setTrackerNotificationsEnabled(context, enabled)
+                    },
+                    onFlockNotificationsChanged = { enabled ->
+                        flockNotificationsEnabled = enabled
+                        ScanSettings.setFlockNotificationsEnabled(context, enabled)
                     },
                     onNoFlyPassThroughNotificationsChanged = { enabled ->
                         noFlyPassThroughNotificationsEnabled = enabled
@@ -2013,6 +2094,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         mapClusterRangeLevel = level
                         ScanSettings.setMapClusterRangeLevel(context, level)
                     },
+                    onMapTrafficEnabledChanged = { enabled ->
+                        mapTrafficEnabled = enabled
+                        ScanSettings.setMapTrafficEnabled(context, enabled)
+                    },
                     onMapNoFlyZonesEnabledChanged = { enabled ->
                         mapNoFlyZonesEnabled = enabled
                         ScanSettings.setMapNoFlyZonesEnabled(context, enabled)
@@ -2076,6 +2161,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
+                        mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
@@ -2090,6 +2176,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2129,6 +2216,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
+                        mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
@@ -2143,6 +2231,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2178,6 +2267,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         )
                         ScanSettings.setMapClusteringEnabled(context, ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED)
                         ScanSettings.setMapClusterRangeLevel(context, ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
+                        ScanSettings.setMapTrafficEnabled(context, ScanSettings.DEFAULT_MAP_TRAFFIC_ENABLED)
                         ScanSettings.setMapNoFlyZonesEnabled(context, ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED)
                         ScanSettings.setMapNoFlyRenderQualityLevel(context, ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL)
                         ScanSettings.setMapScannerSweepAnimationEnabled(
@@ -2198,6 +2288,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setApproachDetectionEnabled(context, true)
                         ScanSettings.setApproachNotificationsEnabled(context, false)
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
+                        ScanSettings.setFlockNotificationsEnabled(context, true)
                         ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
@@ -2225,6 +2316,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         liveMapUpdateIntervalSeconds = ScanSettings.DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
                         mapClusteringEnabled = ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED
                         mapClusterRangeLevel = ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL
+                        mapTrafficEnabled = ScanSettings.DEFAULT_MAP_TRAFFIC_ENABLED
                         mapNoFlyZonesEnabled = ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED
                         mapNoFlyRenderQualityLevel = ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
                         mapScannerSweepAnimationEnabled = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
@@ -2238,6 +2330,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachDetectionEnabled = true
                         approachNotificationsEnabled = false
                         trackerNotificationsEnabled = true
+                        flockNotificationsEnabled = true
                         noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
@@ -2297,6 +2390,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             .getOrDefault(AppThemeMode.DARK)
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
+                        flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2310,6 +2404,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         homePoint = ScanSettings.getHomePoint(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
+                        mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
@@ -2351,6 +2446,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     bleRandomizedOneOffSuppressionEnabled = bleRandomizedOneOffSuppressionEnabled,
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
                     mapNoFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                    mapTrafficEnabled = mapTrafficEnabled,
                     mapClusteringEnabled = mapClusteringEnabled,
                     onMapClusteringEnabledChanged = { enabled ->
                         mapClusteringEnabled = enabled
@@ -3639,6 +3735,7 @@ private fun AppSettingsPage(
     liveMapUpdateIntervalSeconds: Long,
     mapClusteringEnabled: Boolean,
     mapClusterRangeLevel: Int,
+    mapTrafficEnabled: Boolean,
     mapNoFlyZonesEnabled: Boolean,
     mapNoFlyRenderQualityLevel: Int,
     mapScannerSweepAnimationEnabled: Boolean,
@@ -3658,6 +3755,7 @@ private fun AppSettingsPage(
     approachDetectionEnabled: Boolean,
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
+    flockNotificationsEnabled: Boolean,
     noFlyPassThroughNotificationsEnabled: Boolean,
     nfcNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
@@ -3675,6 +3773,7 @@ private fun AppSettingsPage(
     onApproachDetectionChanged: (Boolean) -> Unit,
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
+    onFlockNotificationsChanged: (Boolean) -> Unit,
     onNoFlyPassThroughNotificationsChanged: (Boolean) -> Unit,
     onNfcNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
@@ -3691,6 +3790,7 @@ private fun AppSettingsPage(
     onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     onMapClusterRangeLevelSelected: (Int) -> Unit,
+    onMapTrafficEnabledChanged: (Boolean) -> Unit,
     onMapNoFlyZonesEnabledChanged: (Boolean) -> Unit,
     onMapNoFlyRenderQualityLevelSelected: (Int) -> Unit,
     onMapScannerSweepAnimationEnabledChanged: (Boolean) -> Unit,
@@ -3858,6 +3958,19 @@ private fun AppSettingsPage(
                             }
                         }
                         Text("Tight keeps clusters smaller; wide merges nearby markers earlier when zoomed out.")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Traffic layer")
+                            Switch(
+                                checked = mapTrafficEnabled,
+                                onCheckedChange = onMapTrafficEnabledChanged
+                            )
+                        }
+                        Text("Shows live road traffic overlays on Detection Device Map.")
+                        Text("Note: Google traffic layer cannot hide only non-congested (green) segments.")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -4406,6 +4519,7 @@ private fun AppSettingsPage(
                         val notificationToggleKeys = listOf(
                             "approach",
                             "tracker",
+                            "flock",
                             "no_fly",
                             "nfc",
                             "foreign",
@@ -4440,6 +4554,14 @@ private fun AppSettingsPage(
                                             checked = trackerNotificationsEnabled,
                                             onCheckedChange = onTrackerNotificationsChanged,
                                             enabled = approachDetectionEnabled
+                                        )
+                                    }
+
+                                    "flock" -> {
+                                        Text("Flock alerts")
+                                        Switch(
+                                            checked = flockNotificationsEnabled,
+                                            onCheckedChange = onFlockNotificationsChanged
                                         )
                                     }
 
@@ -4964,6 +5086,7 @@ private fun DetectionPage(
     bleRandomizedOneOffSuppressionEnabled: Boolean,
     mapNoFlyZonesEnabled: Boolean,
     mapNoFlyRenderQualityLevel: Int,
+    mapTrafficEnabled: Boolean,
     mapClusteringEnabled: Boolean,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     mapClusterRangeLevel: Int,
@@ -5003,6 +5126,12 @@ private fun DetectionPage(
     var identityModeOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    var bluetoothMapPinLimit by rememberSaveable { mutableStateOf(1000) }
+    var liveOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(true) }
+    var identityModeOnBluetoothMap by rememberSaveable { mutableStateOf(true) }
+    var movingOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
+    var sinceSnapshotOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
+    var bluetoothMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     var deviceMapAircraftRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(25, 75))
     }
@@ -5017,7 +5146,7 @@ private fun DetectionPage(
         onInitialTabRequestHandled()
     }
 
-    val isDeviceLocationTabActive = selectedTab == 3 && selectedMapSubTab == 0
+    val isDeviceLocationTabActive = selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)
     val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
         if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
     }
@@ -5026,7 +5155,7 @@ private fun DetectionPage(
     }
     val flightDisplayRadiusMeters = flightMapRadiusMiles.coerceIn(10, 1000) * 1609.344
     val topSpeedRecords = remember(selectedTab, selectedMapSubTab, meshInsightEncounters.size) {
-        if (selectedTab == 3 && selectedMapSubTab == 0) {
+        if (selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)) {
             DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
         } else {
             emptyMap()
@@ -5173,9 +5302,21 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
+    val bluetoothMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 2) {
+        LocationSnapshotProvider.observe(
+            context,
+            minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
+        ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
 
     val isFlightMapActive = selectedTab == 3 && selectedMapSubTab == 1
-    val activeMapLocation = if (selectedMapSubTab == 1) flightMapCurrentLocation else deviceMapCurrentLocation
+    val activeMapLocation = when (selectedMapSubTab) {
+        1 -> flightMapCurrentLocation
+        2 -> bluetoothMapCurrentLocation
+        else -> deviceMapCurrentLocation
+    }
     val noFlyOverlayLocationKey = remember(activeMapLocation) {
         activeMapLocation?.let { location ->
             val latBucket = (location.lat * 2.0).roundToInt()
@@ -5194,8 +5335,10 @@ private fun DetectionPage(
     LaunchedEffect(mapResetGeneration) {
         deviceMapSnapshotEpochMs = null
         flightMapSnapshotEpochMs = null
+        bluetoothMapSnapshotEpochMs = null
         sinceSnapshotOnlyOnDeviceMap = false
         sinceSnapshotOnlyOnFlightMap = false
+        sinceSnapshotOnlyOnBluetoothMap = false
         allDeviceCandidates = emptyList()
         deviceCandidatesPrepared = false
         resolvedLocationCache.clear()
@@ -5493,6 +5636,14 @@ private fun DetectionPage(
                 secondaryId = candidate.secondaryId,
                 motionBadge = motionBadge
             )
+            val bluetoothFamilyBadge = if (
+                candidate.source == EncounterSource.BLUETOOTH_LE.name ||
+                    candidate.source == EncounterSource.BLUETOOTH_CLASSIC.name
+            ) {
+                trackerFamilyBadgeLabel(candidate.trackerRisk?.trackerFamilyHint)
+            } else {
+                null
+            }
             val line1 = "Seen ${candidate.seenCount}x"
             val line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet"
             val line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet"
@@ -5522,6 +5673,7 @@ private fun DetectionPage(
                 source = candidate.source,
                 primaryId = candidate.primaryId,
                 secondaryId = candidate.secondaryId,
+                trackerFamilyBadge = bluetoothFamilyBadge,
                 encounterTimestampEpochMs = candidate.latestEncounter.timestampEpochMs,
                 aircraftIconType = aircraftVisualHints?.iconType,
                 headingDegrees = resolvedAircraftHeading,
@@ -5531,7 +5683,7 @@ private fun DetectionPage(
             )
         }
 
-        estimatedDeviceLocationPins = spreadOverlappingMapPins(resolvedPins)
+        estimatedDeviceLocationPins = resolvedPins
     }
 
     Column(
@@ -5709,6 +5861,11 @@ private fun DetectionPage(
                         onClick = { selectedMapSubTab = 1 },
                         text = { Text("Aircraft Map") }
                     )
+                    Tab(
+                        selected = selectedMapSubTab == 2,
+                        onClick = { selectedMapSubTab = 2 },
+                        text = { Text("Bluetooth Map") }
+                    )
                 }
 
                 if (selectedMapSubTab == 0) {
@@ -5755,11 +5912,13 @@ private fun DetectionPage(
                                     }
                                 }
                                 .toList()
+                                .let(::spreadOverlappingMapPins)
                         }
                     }
                     DetectionMapPage(
                         mapTitle = "Device Map",
                         mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
+                        showTrafficLayer = mapTrafficEnabled,
                         currentLocationOverride = deviceMapCurrentLocation,
                         noFlyZones = noFlyZoneOverlays,
                         showNoFlyZoneControl = mapNoFlyZonesEnabled,
@@ -5821,7 +5980,7 @@ private fun DetectionPage(
                         onLiveCollect = onLiveCollect,
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
-                } else {
+                } else if (selectedMapSubTab == 1) {
                     val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
                         ScanSettings.isAviationPublicSensorEnabled(context)
                     if (!flightSensorsEnabled) {
@@ -5941,6 +6100,109 @@ private fun DetectionPage(
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
                     }
+                } else {
+                    val bluetoothMapPins by produceState(
+                        estimatedDeviceLocationPins,
+                        bluetoothMapPinLimit,
+                        liveOnlyOnBluetoothMap,
+                        movingOnlyOnBluetoothMap,
+                        sinceSnapshotOnlyOnBluetoothMap,
+                        bluetoothMapSnapshotEpochMs
+                    ) {
+                        value = withContext(Dispatchers.Default) {
+                            estimatedDeviceLocationPins
+                                .asSequence()
+                                .filter { pin ->
+                                    pin.source == EncounterSource.BLUETOOTH_LE.name ||
+                                        pin.source == EncounterSource.BLUETOOTH_CLASSIC.name
+                                }
+                                .filter { pin ->
+                                    if (!liveOnlyOnBluetoothMap) true else pin.isLive
+                                }
+                                .filter { pin ->
+                                    if (!movingOnlyOnBluetoothMap) true else pin.motionBadge == "MOVING"
+                                }
+                                .filter { pin ->
+                                    if (!sinceSnapshotOnlyOnBluetoothMap) {
+                                        true
+                                    } else {
+                                        val snapshotEpoch = bluetoothMapSnapshotEpochMs
+                                        snapshotEpoch != null && pin.timestampEpochMs >= snapshotEpoch
+                                    }
+                                }
+                                .toList()
+                                .let { pins ->
+                                    val preLimit = (bluetoothMapPinLimit.coerceAtLeast(1) * 2)
+                                        .coerceAtMost(MAP_RENDER_PIN_LIMIT_MID)
+                                    val bounded = selectVisiblePinsWithSourceCoverage(
+                                        pins = pins,
+                                        pinLimit = preLimit
+                                    )
+                                    runCatching {
+                                        spreadOverlappingMapPinsMinimal(
+                                            pins = bounded,
+                                            minSeparationMeters = 1.2
+                                        )
+                                    }.getOrElse { bounded }
+                                }
+                        }
+                    }
+
+                    DetectionMapPage(
+                        mapTitle = "Bluetooth Map",
+                        mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
+                        currentLocationOverride = bluetoothMapCurrentLocation,
+                        noFlyZones = noFlyZoneOverlays,
+                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                        pins = bluetoothMapPins,
+                        pinLimit = bluetoothMapPinLimit,
+                        onPinLimitChange = { bluetoothMapPinLimit = it },
+                        mapClusteringEnabled = mapClusteringEnabled,
+                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                        mapClusterRangeLevel = mapClusterRangeLevel,
+                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                        onPinDetailsClick = { pin ->
+                            if (pin.motionBadge == "MOVING") {
+                                onMovingDeviceMapPinClick(pin.source, pin.primaryId)
+                            } else {
+                                onDeviceMapPinClick(
+                                    pin.source,
+                                    pin.primaryId,
+                                    pin.position.latitude,
+                                    pin.position.longitude,
+                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
+                                )
+                            }
+                        },
+                        liveUpdatesAllowed = true,
+                        useSourceOnlyPinColors = true,
+                        enableVerticalScroll = true,
+                        showLiveOnlyControl = true,
+                        liveOnlyEnabled = liveOnlyOnBluetoothMap,
+                        onLiveOnlyEnabledChange = { liveOnlyOnBluetoothMap = it },
+                        identityModeEnabled = identityModeOnBluetoothMap,
+                        onIdentityModeEnabledChange = { identityModeOnBluetoothMap = it },
+                        showMovingOnlyControl = true,
+                        movingOnlyEnabled = movingOnlyOnBluetoothMap,
+                        onMovingOnlyEnabledChange = { movingOnlyOnBluetoothMap = it },
+                        showSinceSnapshotControl = true,
+                        sinceSnapshotEnabled = sinceSnapshotOnlyOnBluetoothMap,
+                        snapshotEpochMs = bluetoothMapSnapshotEpochMs,
+                        onSinceSnapshotEnabledChange = { enabled ->
+                            sinceSnapshotOnlyOnBluetoothMap = enabled
+                            if (enabled && bluetoothMapSnapshotEpochMs == null) {
+                                bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
+                            }
+                        },
+                        onCaptureSnapshot = {
+                            bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
+                        },
+                        showTrackerFamilyBadge = true,
+                        onLiveCollect = onLiveCollect,
+                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                    )
                 }
             }
         } else {
@@ -7127,6 +7389,7 @@ private fun buildMeshCoverageInsights(
 private fun DetectionMapPage(
     mapTitle: String,
     mapDescription: String,
+    showTrafficLayer: Boolean = false,
     currentLocationOverride: DetectionLocation? = null,
     centerOnAircraftCoverageOnOpen: Boolean = false,
     showCoverageRadiusCircle: Boolean = true,
@@ -7163,6 +7426,7 @@ private fun DetectionMapPage(
     snapshotEpochMs: Long? = null,
     onSinceSnapshotEnabledChange: (Boolean) -> Unit = {},
     onCaptureSnapshot: () -> Unit = {},
+    showTrackerFamilyBadge: Boolean = false,
     onLiveCollect: suspend () -> String,
     liveMapUpdateIntervalSeconds: Long
 ) {
@@ -7224,7 +7488,7 @@ private fun DetectionMapPage(
         }
 
         @Composable
-        private fun NoFlyZoneLayer(
+        fun NoFlyZoneLayer(
             renderedNoFlyZones: List<NoFlyZoneRenderShape>,
             renderedNoFlyZoneMarkers: List<NoFlyZoneRenderShape>,
             selectedNoFlyZoneId: String?,
@@ -7266,7 +7530,7 @@ private fun DetectionMapPage(
         }
 
         @Composable
-        private fun CoverageSweepLayer(
+        fun CoverageSweepLayer(
             showCoverageRadiusCircle: Boolean,
             proximityRenderCenter: DetectionLocation?,
             stableCoverageRadiusMeters: Double,
@@ -7333,11 +7597,12 @@ private fun DetectionMapPage(
         }
 
         @Composable
-        private fun MapRenderLayer(
+        fun MapRenderLayer(
             mapRenderItems: List<MapRenderItem>,
             preciseDotsEnabled: Boolean,
             useDenseDotMarkers: Boolean,
             useSourceOnlyPinColors: Boolean,
+            showTrackerFamilyBadge: Boolean,
             renderedPinSnippetCache: Map<String, String?>,
             selectedMapPin: MapPin?,
             onSelectMapPin: (MapPin) -> Unit,
@@ -7355,16 +7620,16 @@ private fun DetectionMapPage(
                         } else {
                             0f
                         }
-                        val showMarkerDetails = !(preciseDotsEnabled || useDenseDotMarkers)
+                        val showMarkerDetails = !preciseDotsEnabled
                         val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
                         Marker(
                             state = markerState,
                             title = if (showMarkerDetails) pin.title else null,
                             snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
-                            icon = if (preciseDotsEnabled || useDenseDotMarkers) {
+                            icon = if (preciseDotsEnabled) {
                                 markerDotIconForPin(pin, useSourceOnlyPinColors)
                             } else {
-                                markerIconForPin(pin, useSourceOnlyPinColors)
+                                markerIconForPin(pin, useSourceOnlyPinColors, showTrackerFamilyBadge)
                             },
                             anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
                             rotation = aircraftHeading,
@@ -7438,9 +7703,10 @@ private fun DetectionMapPage(
     }
     val scrollState = if (useScrollableLayout) rememberScrollState() else null
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
-    val mapProperties = remember(hasLocationPermission, mapStyleOptions) {
+    val mapProperties = remember(hasLocationPermission, mapStyleOptions, showTrafficLayer) {
         MapProperties(
             isMyLocationEnabled = hasLocationPermission,
+            isTrafficEnabled = showTrafficLayer,
             mapStyleOptions = mapStyleOptions
         )
     }
@@ -7793,7 +8059,7 @@ private fun DetectionMapPage(
         key3 = useDenseDotMarkers
     ) {
         value = withContext(Dispatchers.Default) {
-            if (preciseDotsEnabled || useDenseDotMarkers) {
+            if (preciseDotsEnabled) {
                 emptyMap()
             } else {
                 mapRenderItems
@@ -8721,6 +8987,7 @@ private fun DetectionMapPage(
                         preciseDotsEnabled = preciseDotsEnabled,
                         useDenseDotMarkers = useDenseDotMarkers,
                         useSourceOnlyPinColors = useSourceOnlyPinColors,
+                        showTrackerFamilyBadge = showTrackerFamilyBadge,
                         renderedPinSnippetCache = renderedPinSnippetCache,
                         selectedMapPin = selectedMapPin,
                         onSelectMapPin = { pin ->
@@ -9076,6 +9343,193 @@ private fun DetectionMapPage(
 }
 
 @Composable
+private fun NoFlyZoneLayer(
+    renderedNoFlyZones: List<NoFlyZoneRenderShape>,
+    renderedNoFlyZoneMarkers: List<NoFlyZoneRenderShape>,
+    selectedNoFlyZoneId: String?,
+    onSelectZone: (String) -> Unit
+) {
+    if (renderedNoFlyZones.isEmpty()) return
+
+    renderedNoFlyZones.forEach { zoneRender ->
+        val zone = zoneRender.zone
+        Polygon(
+            points = zoneRender.polygonPoints,
+            fillColor = Color(0x30E53935),
+            strokeColor = Color(0xFFE53935),
+            strokeWidth = 2f,
+            clickable = true,
+            onClick = { onSelectZone(zone.id) }
+        )
+    }
+
+    renderedNoFlyZoneMarkers.forEach { zoneRender ->
+        val zone = zoneRender.zone
+        val point = zoneRender.centroid ?: return@forEach
+        val markerState = remember(point) { MarkerState(position = point) }
+        Marker(
+            state = markerState,
+            title = zone.label,
+            snippet = noFlyZoneSnippet(zone),
+            icon = noFlyZoneMarkerIcon(
+                selected = selectedNoFlyZoneId == zone.id,
+                compact = true
+            ),
+            anchor = Offset(0.5f, 0.5f),
+            onClick = {
+                onSelectZone(zone.id)
+                false
+            }
+        )
+    }
+}
+
+@Composable
+private fun CoverageSweepLayer(
+    showCoverageRadiusCircle: Boolean,
+    proximityRenderCenter: DetectionLocation?,
+    stableCoverageRadiusMeters: Double,
+    aircraftRenderCenter: DetectionLocation?,
+    stableAircraftCoverageRadiusMeters: Double,
+    mapScannerSweepAnimationEnabled: Boolean,
+    radarSweepHeadingDeg: Float
+) {
+    if (!showCoverageRadiusCircle) return
+
+    val proximityCenter = proximityRenderCenter
+    if (proximityCenter != null && stableCoverageRadiusMeters > 10.0) {
+        val coverageCenter = LatLng(proximityCenter.lat, proximityCenter.lon)
+        Circle(
+            center = coverageCenter,
+            radius = stableCoverageRadiusMeters,
+            strokeWidth = 2f,
+            strokeColor = Color(0xFFE65100),
+            fillColor = Color(0x1AE65100)
+        )
+        if (mapScannerSweepAnimationEnabled) {
+            val sweepRadiusMeters = containedSweepRadiusMeters(stableCoverageRadiusMeters)
+            Polygon(
+                points = buildRadarSweepSectorPoints(
+                    center = coverageCenter,
+                    radiusMeters = sweepRadiusMeters,
+                    headingDegrees = radarSweepHeadingDeg,
+                    halfWidthDegrees = 22f,
+                    arcStepDegrees = 6f
+                ),
+                fillColor = Color(0x33FFB74D),
+                strokeColor = Color.Transparent,
+                strokeWidth = 0f
+            )
+        }
+    }
+
+    val aircraftCenter = aircraftRenderCenter
+    if (aircraftCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
+        val coverageCenter = LatLng(aircraftCenter.lat, aircraftCenter.lon)
+        Circle(
+            center = coverageCenter,
+            radius = stableAircraftCoverageRadiusMeters,
+            strokeWidth = 2f,
+            strokeColor = Color(0xFF1565C0),
+            fillColor = Color(0x1A1565C0)
+        )
+        if (mapScannerSweepAnimationEnabled) {
+            val sweepRadiusMeters = containedSweepRadiusMeters(stableAircraftCoverageRadiusMeters)
+            Polygon(
+                points = buildRadarSweepSectorPoints(
+                    center = coverageCenter,
+                    radiusMeters = sweepRadiusMeters,
+                    headingDegrees = (radarSweepHeadingDeg + 120f) % 360f,
+                    halfWidthDegrees = 18f,
+                    arcStepDegrees = 6f
+                ),
+                fillColor = Color(0x3D4FC3F7),
+                strokeColor = Color.Transparent,
+                strokeWidth = 0f
+            )
+        }
+    }
+}
+
+@Composable
+private fun MapRenderLayer(
+    mapRenderItems: List<MapRenderItem>,
+    preciseDotsEnabled: Boolean,
+    useDenseDotMarkers: Boolean,
+    useSourceOnlyPinColors: Boolean,
+    showTrackerFamilyBadge: Boolean,
+    renderedPinSnippetCache: Map<String, String?>,
+    selectedMapPin: MapPin?,
+    onSelectMapPin: (MapPin) -> Unit,
+    onPinDetailsClick: (MapPin) -> Unit
+) {
+    mapRenderItems.forEach { item ->
+        when (item) {
+            is MapRenderItem.SinglePin -> {
+                val pin = item.pin
+                val markerState = remember(pin.position) { MarkerState(position = pin.position) }
+                val aircraftHeading = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
+                    pin.headingDegrees?.toFloat()?.let { value ->
+                        ((value % 360f) + 360f) % 360f
+                    } ?: 0f
+                } else {
+                    0f
+                }
+                val showMarkerDetails = !preciseDotsEnabled
+                val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                Marker(
+                    state = markerState,
+                    title = if (showMarkerDetails) pin.title else null,
+                    snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
+                    icon = if (preciseDotsEnabled) {
+                        markerDotIconForPin(pin, useSourceOnlyPinColors)
+                    } else {
+                        markerIconForPin(pin, useSourceOnlyPinColors, showTrackerFamilyBadge)
+                    },
+                    anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
+                    rotation = aircraftHeading,
+                    flat = pin.source == SourceCatalog.SOURCE_AIRCRAFT,
+                    onClick = {
+                        if (!showMarkerDetails) {
+                            val selected = selectedMapPin
+                            val isSameSelection =
+                                selected != null &&
+                                    selected.source == pin.source &&
+                                    selected.primaryId == pin.primaryId &&
+                                    selected.timestampEpochMs == pin.timestampEpochMs
+
+                            if (isSameSelection) {
+                                onPinDetailsClick(pin)
+                            } else {
+                                onSelectMapPin(pin)
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                    onInfoWindowClick = {
+                        onPinDetailsClick(pin)
+                    }
+                )
+            }
+
+            is MapRenderItem.Cluster -> {
+                val markerState = remember(item.position) { MarkerState(position = item.position) }
+                Marker(
+                    state = markerState,
+                    title = "Cluster (${item.count})",
+                    snippet = item.summary,
+                    icon = clusterMarkerIcon(item),
+                    anchor = Offset(0.5f, 0.5f),
+                    flat = false
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun MovingDevicePathMapPage(
     source: String,
     primaryId: String,
@@ -9376,6 +9830,7 @@ private data class MapPin(
     val primaryId: String,
     val secondaryId: String?,
     val markerGlyphOverride: String? = null,
+    val trackerFamilyBadge: String? = null,
     val encounterTimestampEpochMs: Long?,
     val aircraftIconType: String? = null,
     val headingDegrees: Double? = null,
@@ -9394,8 +9849,42 @@ private fun bestSecondaryId(encounters: List<Encounter>): String? {
     return encounters
         .asSequence()
         .sortedByDescending { encounter -> encounterFreshnessEpochMs(encounter) }
-        .mapNotNull { encounter -> encounter.secondaryId?.trim() }
+        .mapNotNull { encounter ->
+            if (encounter.source == EncounterSource.CELL) {
+                deriveCellSecondaryId(encounter)
+            } else {
+                encounter.secondaryId?.trim()
+            }
+        }
         .firstOrNull { value -> value.isNotBlank() }
+}
+
+private fun deriveCellSecondaryId(encounter: Encounter): String? {
+    if (encounter.source != EncounterSource.CELL) return encounter.secondaryId?.trim()
+
+    val payload = runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
+    val operator = payload
+        ?.optString("networkOperatorName", "")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) }
+
+    val radio = payload
+        ?.optString("radio", "")
+        ?.trim()
+        ?.uppercase(Locale.US)
+        ?.takeIf { it.isNotBlank() }
+
+    val existing = normalizeCellSecondaryLabel(encounter.secondaryId)
+    if (operator != null && radio != null) {
+        return "$operator Cell ($radio tower)"
+    }
+    if (operator != null) {
+        return "$operator Cell"
+    }
+    if (radio != null) {
+        return "Cell ($radio tower)"
+    }
+    return existing
 }
 
 private data class PinLegendItem(
@@ -9812,6 +10301,71 @@ private fun spreadOverlappingMapPins(pins: List<MapPin>): List<MapPin> {
     }
 
     return adjusted.sortedByDescending { it.timestampEpochMs }
+}
+
+private fun spreadOverlappingMapPinsMinimal(
+    pins: List<MapPin>,
+    minSeparationMeters: Double
+): List<MapPin> {
+    if (pins.size < 2) return pins
+
+    val safeMinSeparationMeters = minSeparationMeters.coerceIn(0.5, 3.0)
+    val maxIterations = if (pins.size > 180) 4 else 8
+    val placed = mutableListOf<MapPin>()
+
+    pins
+        .sortedByDescending { it.timestampEpochMs }
+        .forEachIndexed { index, pin ->
+            var candidate = pin.position
+
+            repeat(maxIterations) { iteration ->
+                var hadConflict = false
+
+                placed.forEach { other ->
+                    val distance = distanceFromLocationMeters(
+                        fromLat = candidate.latitude,
+                        fromLon = candidate.longitude,
+                        toLat = other.position.latitude,
+                        toLon = other.position.longitude
+                    ) ?: return@forEach
+
+                    if (distance < safeMinSeparationMeters) {
+                        hadConflict = true
+                        val neededShiftMeters = (safeMinSeparationMeters - distance + 0.03).coerceAtLeast(0.04)
+                        val awayBearing = bearingDegrees(
+                            from = other.position,
+                            to = candidate
+                        ) ?: (((index * 53) + (iteration * 37)) % 360).toDouble()
+                        candidate = offsetLatLng(
+                            base = candidate,
+                            distanceMeters = neededShiftMeters,
+                            bearingDegrees = awayBearing
+                        )
+                    }
+                }
+
+                if (!hadConflict) {
+                    return@repeat
+                }
+            }
+
+            placed += pin.copy(position = candidate)
+        }
+
+    return placed
+}
+
+private fun bearingDegrees(from: LatLng, to: LatLng): Double? {
+    if (from.latitude == to.latitude && from.longitude == to.longitude) return null
+
+    val lat1 = Math.toRadians(from.latitude)
+    val lat2 = Math.toRadians(to.latitude)
+    val dLon = Math.toRadians(to.longitude - from.longitude)
+    val y = kotlin.math.sin(dLon) * kotlin.math.cos(lat2)
+    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
+        kotlin.math.sin(lat1) * kotlin.math.cos(lat2) * kotlin.math.cos(dLon)
+    val raw = Math.toDegrees(kotlin.math.atan2(y, x))
+    return ((raw % 360.0) + 360.0) % 360.0
 }
 
 private suspend fun buildStartupPrewarmedDeviceMapPins(
@@ -10500,25 +11054,55 @@ private fun clusterMarkerIcon(cluster: MapRenderItem.Cluster): BitmapDescriptor 
     }
 }
 
-private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false): BitmapDescriptor {
+private fun markerIconForPin(
+    pin: MapPin,
+    useSourceOnlyPinColors: Boolean = false,
+    showTrackerFamilyBadge: Boolean = false
+): BitmapDescriptor {
     if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
         return markerAircraftIconForPin(pin, useSourceOnlyPinColors)
     }
     val glyph = markerGlyphForPin(pin)
+    val badgeLabel = if (showTrackerFamilyBadge) {
+        pin.trackerFamilyBadge
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { label -> if (label.length <= 12) label else label.take(10).trimEnd() + ".." }
+    } else {
+        null
+    }
+    val hasBadge = badgeLabel != null
     val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
-    val key = "${pin.source}|${glyph}|${bgColor.toArgb()}"
+    val key = "${pin.source}|${glyph}|${bgColor.toArgb()}|${badgeLabel.orEmpty()}"
     deviceMarkerIconCache[key]?.let { return it }
     val alpha = if (pin.isLive) 255 else 140
 
-    val width = when {
+    val bodyWidth = when {
         glyph.length > 9 -> 148
         glyph.length > 6 -> 116
         else -> 92
     }
-    val height = 42
+    val badgeWidth = if (hasBadge) {
+        ((badgeLabel!!.length * 9) + 24).coerceIn(72, 156)
+    } else {
+        0
+    }
+    val width = maxOf(bodyWidth, badgeWidth)
+    val height = if (hasBadge) 62 else 42
     val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
 
+    val badgeFillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.argb(alpha, 24, 44, 48)
+    }
+    val badgeTextPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.argb(alpha, 236, 247, 245)
+        textAlign = android.graphics.Paint.Align.CENTER
+        textSize = 14f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
+    }
     val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.FILL
         color = bgColor.toArgb()
@@ -10536,7 +11120,25 @@ private fun markerIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = fals
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
     }
 
-    val rect = android.graphics.RectF(2f, 2f, width - 2f, height - 10f)
+    val topOffset = if (hasBadge) 18f else 0f
+    if (hasBadge) {
+        val badgeRect = android.graphics.RectF(
+            (width - badgeWidth) / 2f,
+            2f,
+            (width + badgeWidth) / 2f,
+            22f
+        )
+        canvas.drawRoundRect(badgeRect, 10f, 10f, badgeFillPaint)
+        val badgeTextY = badgeRect.centerY() - (badgeTextPaint.descent() + badgeTextPaint.ascent()) / 2f
+        canvas.drawText(badgeLabel!!, badgeRect.centerX(), badgeTextY, badgeTextPaint)
+    }
+
+    val rect = android.graphics.RectF(
+        2f,
+        2f + topOffset,
+        width - 2f,
+        (height - 10f)
+    )
     canvas.drawRoundRect(rect, 18f, 18f, fillPaint)
     canvas.drawRoundRect(rect, 18f, 18f, strokePaint)
 
@@ -10692,6 +11294,21 @@ private fun markerGlyphForPin(pin: MapPin): String {
         ?: deviceGlyphForSource(pin.source)
     val normalized = raw.replace(Regex("\\s+"), " ")
     return if (normalized.length <= 14) normalized else normalized.take(11).trimEnd() + "..."
+}
+
+private fun trackerFamilyBadgeLabel(family: String?): String {
+    return when (family?.trim()?.lowercase(Locale.US)) {
+        "apple_find_my" -> "APPLE"
+        "google_find_my" -> "GOOGLE"
+        "tile" -> "TILE"
+        "unknown_tracker" -> "UNKNOWN"
+        "non_tracker_or_unknown" -> "UNKNOWN"
+        null, "" -> "UNKNOWN"
+        else -> family
+            .split('_')
+            .joinToString(" ") { token -> token.replaceFirstChar { c -> if (c.isLowerCase()) c.titlecase(Locale.US) else c.toString() } }
+            .uppercase(Locale.US)
+    }
 }
 
 private fun markerBackgroundColorForPin(pin: MapPin, useSourceOnlyPinColors: Boolean): Color {
@@ -11024,12 +11641,29 @@ private fun secondaryIdLabel(source: String): String =
 private fun listSourceLabel(source: String, secondaryId: String?): String {
     val meta = SOURCE_TYPE_UI_META_BY_SOURCE[source]
     if (source == SourceCatalog.SOURCE_CELL) {
-        if (!secondaryId.isNullOrBlank()) {
-            return "${meta?.listLabel ?: source} (${secondaryId})"
+        val normalized = normalizeCellSecondaryLabel(secondaryId)
+        if (!normalized.isNullOrBlank()) {
+            return if (normalized.contains("Cell", ignoreCase = true)) {
+                normalized
+            } else {
+                "${meta?.listLabel ?: source} ($normalized)"
+            }
         }
-        return meta?.listLabel ?: source
+        return "Cell"
     }
     return meta?.listLabel ?: source
+}
+
+private fun normalizeCellSecondaryLabel(value: String?): String? {
+    val trimmed = value?.trim().orEmpty()
+    if (trimmed.isBlank()) return null
+    if (trimmed.contains("Cell", ignoreCase = true)) return trimmed
+
+    val upper = trimmed.uppercase(Locale.US)
+    return when (upper) {
+        "NR", "LTE", "WCDMA", "GSM", "CDMA" -> "Cell ($upper tower)"
+        else -> trimmed
+    }
 }
 
 private fun provenanceLabel(provenance: EncounterProvenance, nodeId: String?): String = when (provenance) {
@@ -11111,7 +11745,13 @@ private fun readBleDeviceFields(rawPayloadJson: String): List<Pair<String, Strin
             "Record Tx Power" to "txPowerLevel",
             "Service UUIDs" to "serviceUuids",
             "Manufacturer Data Count" to "manufacturerSpecificDataSize",
-            "Service Data Count" to "serviceDataSize"
+            "Manufacturer Company IDs" to "manufacturerCompanyIds",
+            "Service Data Count" to "serviceDataSize",
+            "Remote ID Candidate" to "remoteIdCandidate",
+            "Tracker Family" to "trackerFamilyHint",
+            "Tracker Family Confidence" to "trackerFamilyConfidence",
+            "Tracker Likely" to "trackerLikely",
+            "Tracker Evidence" to "trackerEvidence"
         )
     )
 }
@@ -12002,6 +12642,41 @@ private fun locationCellKey(lat: Double, lon: Double, cellDegrees: Double = 0.00
     return "$latBucket:$lonBucket"
 }
 
+private data class BleTrackerProfile(
+    val family: String,
+    val confidence: Double,
+    val likely: Boolean
+)
+
+private fun inferBleTrackerProfile(encounters: List<Encounter>): BleTrackerProfile? {
+    return encounters
+        .asSequence()
+        .filter { it.source == EncounterSource.BLUETOOTH_LE }
+        .mapNotNull { encounter ->
+            val payload = parseEncounterPayload(encounter) ?: return@mapNotNull null
+            val family = payload.optString("trackerFamilyHint", "").trim().ifBlank { return@mapNotNull null }
+            val confidence = payload.optDouble("trackerFamilyConfidence", Double.NaN)
+                .takeIf { it.isFinite() }
+                ?.coerceIn(0.0, 1.0)
+                ?: 0.0
+            val likely = payload.optBoolean("trackerLikely", false)
+            BleTrackerProfile(
+                family = family,
+                confidence = confidence,
+                likely = likely
+            )
+        }
+        .sortedByDescending { it.confidence }
+        .firstOrNull()
+}
+
+private fun formatTrackerFamilyLabel(family: String?): String {
+    if (family.isNullOrBlank()) return "Unknown"
+    return family
+        .split('_')
+        .joinToString(" ") { token -> token.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() } }
+}
+
 private fun analyzeTrackerRisk(
     encounters: List<Encounter>,
     isOwned: Boolean,
@@ -12017,7 +12692,9 @@ private fun analyzeTrackerRisk(
             activeWindowMinutes = 0.0,
             summary = "Marked as owned by user",
             seenAtHome = false,
-            seenAwayFromHome = false
+            seenAwayFromHome = false,
+            trackerFamilyHint = null,
+            trackerFamilyConfidence = null
         )
     }
 
@@ -12052,6 +12729,7 @@ private fun analyzeTrackerRisk(
 
     var seenAtHome = false
     var seenAwayFromHome = false
+    val trackerProfile = inferBleTrackerProfile(ordered)
     if (homePoint != null) {
         val awayThresholdMeters = homePoint.radiusMeters + 120.0
         validLocations.forEach { (lat, lon) ->
@@ -12073,12 +12751,18 @@ private fun analyzeTrackerRisk(
         else -> 0.0
     }
     val homeTransitionBoost = if (seenAtHome && seenAwayFromHome) 0.12 else 0.0
+    val trackerSignatureBoost = if (trackerProfile?.likely == true) {
+        0.10 * trackerProfile.confidence
+    } else {
+        0.0
+    }
     val confidence = (
         0.35 * locationScore +
             0.30 * spreadScore +
             0.20 * durationScore +
             0.15 * approachScore +
-            homeTransitionBoost
+            homeTransitionBoost +
+            trackerSignatureBoost
         ).coerceIn(0.0, 1.0)
 
     val level = when {
@@ -12108,6 +12792,10 @@ private fun analyzeTrackerRisk(
         " (Observed both near Home Point and away from it)"
     } else {
         ""
+    } + if (trackerProfile?.likely == true) {
+        " (BLE signature: ${formatTrackerFamilyLabel(trackerProfile.family)} ${String.format(Locale.US, "%.0f%%", trackerProfile.confidence * 100.0)})"
+    } else {
+        ""
     }
 
     return TrackerRiskSignal(
@@ -12118,7 +12806,9 @@ private fun analyzeTrackerRisk(
         activeWindowMinutes = activeWindowMinutes,
         summary = summary,
         seenAtHome = seenAtHome,
-        seenAwayFromHome = seenAwayFromHome
+        seenAwayFromHome = seenAwayFromHome,
+        trackerFamilyHint = trackerProfile?.family,
+        trackerFamilyConfidence = trackerProfile?.confidence
     )
 }
 
@@ -12880,6 +13570,22 @@ private fun ensureTrackerNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureFlockNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(FLOCK_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        FLOCK_ALERT_CHANNEL_ID,
+        "Flock Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when likely related devices are detected traveling together"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun ensureNoFlyPassThroughNotificationChannel(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -13004,6 +13710,32 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
         .build()
 
     val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
+    NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun sendFlockNotification(context: android.content.Context, flock: DeviceFlock) {
+    val title = "Flock detected"
+    val memberPreview = flock.members
+        .take(3)
+        .joinToString(separator = ", ") { member -> "${member.source}:${member.primaryId}" }
+    val overflow = (flock.members.size - 3).coerceAtLeast(0)
+    val overflowLabel = if (overflow > 0) " +$overflow" else ""
+    val content = "${flock.members.size} devices • ${flock.coTravelEventCount} co-travel events • Span ${formatDistanceFeetMiles(flock.travelSpanMeters)} • $memberPreview$overflowLabel"
+
+    val notification = NotificationCompat.Builder(context, FLOCK_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_sys_warning)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val signature = flock.members
+        .map { member -> "${member.source}|${member.primaryId}" }
+        .sorted()
+        .joinToString(separator = ",")
+    val notificationId = ("flock:$signature").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
@@ -13285,6 +14017,18 @@ private fun DevicesPage(
     val topSpeedByDevice = remember(selectedEncounters) {
         DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
+    var flocks by remember { mutableStateOf<List<DeviceFlock>>(emptyList()) }
+    var flocksComputing by remember { mutableStateOf(false) }
+    LaunchedEffect(allEncounters) {
+        flocksComputing = true
+        flocks = withContext(Dispatchers.Default) {
+            detectDeviceFlocks(
+                encounters = allEncounters,
+                minTravelSpanMeters = 10.0
+            )
+        }
+        flocksComputing = false
+    }
     var filteredDeviceCount by remember { mutableStateOf(0) }
     var displayedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var deviceDisplayComputing by remember { mutableStateOf(false) }
@@ -13347,6 +14091,44 @@ private fun DevicesPage(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Flocks", style = MaterialTheme.typography.titleMedium)
+                Text("Likely related devices that co-travel together across different places.")
+                if (flocksComputing) {
+                    Text("Analyzing co-travel graph...")
+                } else if (flocks.isEmpty()) {
+                    Text("No flocks detected yet. More repeated sightings across locations are needed.")
+                } else {
+                    flocks.take(8).forEach { flock ->
+                        val membersPreview = flock.members
+                            .take(6)
+                            .joinToString(separator = " • ") { member ->
+                                "${member.source}:${member.primaryId}"
+                            }
+                        val overflowCount = (flock.members.size - 6).coerceAtLeast(0)
+                        val overflowLabel = if (overflowCount > 0) {
+                            " +$overflowCount more"
+                        } else {
+                            ""
+                        }
+                        val timeRange = "${formatEpoch(flock.firstSeenEpochMs)} -> ${formatEpoch(flock.lastSeenEpochMs)}"
+                        Text(
+                            text = "Flock ${flock.id} • ${flock.members.size} devices • ${flock.coTravelEventCount} co-travel events • Span ${formatDistanceFeetMiles(flock.travelSpanMeters)}",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text("Links: ${flock.pairLinkCount} • $timeRange")
+                        Text("Members: $membersPreview$overflowLabel")
+                    }
+                    if (flocks.size > 8) {
+                        Text("Showing top 8 of ${flocks.size} flocks")
+                    }
+                }
+            }
+        }
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(12.dp),
@@ -14470,6 +15252,12 @@ private fun DeviceDetailPage(
                 )
                 if (item.trackerRisk != null) {
                     DetailRow("Tracker Confidence", String.format(Locale.US, "%.0f%%", item.trackerRisk.confidence * 100.0))
+                    item.trackerRisk.trackerFamilyHint?.let { family ->
+                        DetailRow("Tracker Family", formatTrackerFamilyLabel(family))
+                    }
+                    item.trackerRisk.trackerFamilyConfidence?.let { familyConfidence ->
+                        DetailRow("Tracker Family Confidence", String.format(Locale.US, "%.0f%%", familyConfidence * 100.0))
+                    }
                     DetailRow("Cross-Location Cells", item.trackerRisk.uniqueLocationCells.toString())
                     DetailRow("Observed Spread", formatDistanceFeetMiles(item.trackerRisk.spreadMeters))
                     DetailRow("Observed Window", String.format(Locale.US, "%.1f min", item.trackerRisk.activeWindowMinutes))

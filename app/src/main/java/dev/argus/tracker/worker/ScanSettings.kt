@@ -31,6 +31,10 @@ object ScanSettings {
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
+    private const val KEY_FLOCK_NOTIFICATIONS_ENABLED = "flock_notifications_enabled"
+    private const val KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS = "flock_monitor_last_run_epoch_ms"
+    private const val KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS = "flock_alert_last_notification_epoch_ms"
+    private const val KEY_FLOCK_ALERT_LAST_SIGNATURE = "flock_alert_last_signature"
     private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
@@ -60,6 +64,7 @@ object ScanSettings {
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
     private const val KEY_MAP_CLUSTERING_ENABLED = "map_clustering_enabled"
     private const val KEY_MAP_CLUSTER_RANGE_LEVEL = "map_cluster_range_level"
+    private const val KEY_MAP_TRAFFIC_ENABLED = "map_traffic_enabled"
     private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
     private const val KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL = "map_no_fly_render_quality_level"
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
@@ -95,6 +100,7 @@ object ScanSettings {
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
     const val DEFAULT_MAP_CLUSTERING_ENABLED = false
     const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
+    const val DEFAULT_MAP_TRAFFIC_ENABLED = true
     const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
     const val DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL = 2
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
@@ -105,7 +111,7 @@ object ScanSettings {
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 900L
-    const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 100
+    const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 25
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
     const val DEFAULT_APP_THEME_MODE = "DARK"
@@ -384,6 +390,51 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isFlockNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_FLOCK_NOTIFICATIONS_ENABLED, true)
+
+    fun setFlockNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_FLOCK_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getFlockMonitorLastRunEpochMs(context: Context): Long =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS, 0L)
+
+    fun setFlockMonitorLastRunEpochMs(context: Context, epochMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS, epochMs)
+            .apply()
+    }
+
+    fun getFlockAlertLastNotificationEpochMs(context: Context): Long =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS, 0L)
+
+    fun setFlockAlertLastNotificationEpochMs(context: Context, epochMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS, epochMs)
+            .apply()
+    }
+
+    fun getFlockAlertLastSignature(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_FLOCK_ALERT_LAST_SIGNATURE, "")
+            .orEmpty()
+
+    fun setFlockAlertLastSignature(context: Context, signature: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_FLOCK_ALERT_LAST_SIGNATURE, signature.trim())
             .apply()
     }
 
@@ -841,6 +892,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_MAP_CLUSTER_RANGE_LEVEL, safe)
+            .apply()
+    }
+
+    fun isMapTrafficEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_TRAFFIC_ENABLED, DEFAULT_MAP_TRAFFIC_ENABLED)
+
+    fun setMapTrafficEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAP_TRAFFIC_ENABLED, enabled)
             .apply()
     }
 

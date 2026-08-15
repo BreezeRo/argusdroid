@@ -5,6 +5,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.DefaultAppContainer
+import dev.argus.tracker.data.OperationalErrorLogStore
 
 class ArgusWorker(
     appContext: Context,
@@ -26,6 +27,20 @@ class ArgusWorker(
         val scanResult = runCatching { sensingService.collectBatchWithMetrics() }
             .getOrDefault(dev.argus.tracker.sensing.ScanBatchResult(emptyList(), emptyMap(), 0L))
         runCatching { repository.insertBatch(scanResult.encounters) }
+        runCatching {
+            FlockAlertMonitor.evaluateAndNotify(
+                context = applicationContext,
+                repository = repository
+            )
+        }.onFailure { error ->
+            OperationalErrorLogStore.append(
+                context = applicationContext,
+                category = "ALERT_MONITOR",
+                source = "FLOCK",
+                message = "Background flock monitor failed: ${error.message ?: "unknown"}",
+                severity = "WARN"
+            )
+        }
         runCatching { chainLinkCoordinator.syncNow() }
         runCatching { WorkScheduler.scheduleNextIfNeeded(applicationContext) }
         ScanSettings.setLastScanDurationMs(applicationContext, scanResult.totalDurationMs)
