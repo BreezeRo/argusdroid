@@ -13,6 +13,7 @@ object SourceCatalog {
     const val KEY_WIFI_DIRECT = "wifi_direct"
     const val KEY_BLE = "ble"
     const val KEY_BT_CLASSIC = "bt_classic"
+    const val KEY_NFC = "nfc"
     const val KEY_CELLULAR = "cellular"
     const val KEY_REMOTE_ID = "remote_id"
     const val KEY_CAMERA = "camera"
@@ -28,6 +29,7 @@ object SourceCatalog {
     val SOURCE_BLUETOOTH_LE: String = EncounterSource.BLUETOOTH_LE.name
     val SOURCE_BLUETOOTH_LE_SWEEP: String = EncounterSource.BLUETOOTH_LE_SWEEP.name
     val SOURCE_BLUETOOTH_CLASSIC: String = EncounterSource.BLUETOOTH_CLASSIC.name
+    val SOURCE_NFC: String = EncounterSource.NFC.name
     val SOURCE_REMOTE_ID: String = EncounterSource.REMOTE_ID.name
     val SOURCE_CELL: String = EncounterSource.CELL.name
     val SOURCE_CAMERA: String = EncounterSource.CAMERA.name
@@ -41,6 +43,7 @@ object SourceCatalog {
         ScanSourceDefinition(KEY_WIFI_DIRECT, EncounterSource.WIFI_DIRECT),
         ScanSourceDefinition(KEY_BLE, EncounterSource.BLUETOOTH_LE),
         ScanSourceDefinition(KEY_BT_CLASSIC, EncounterSource.BLUETOOTH_CLASSIC),
+        ScanSourceDefinition(KEY_NFC, EncounterSource.NFC),
         ScanSourceDefinition(KEY_CELLULAR, EncounterSource.CELL),
         ScanSourceDefinition(KEY_REMOTE_ID, EncounterSource.REMOTE_ID),
         ScanSourceDefinition(KEY_CAMERA, EncounterSource.CAMERA),

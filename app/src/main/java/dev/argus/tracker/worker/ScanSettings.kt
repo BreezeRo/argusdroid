@@ -17,6 +17,7 @@ object ScanSettings {
     private const val KEY_SENSOR_WIFI_ENABLED = "sensor_wifi_enabled"
     private const val KEY_SENSOR_BLE_ENABLED = "sensor_ble_enabled"
     private const val KEY_SENSOR_BT_CLASSIC_ENABLED = "sensor_bt_classic_enabled"
+    private const val KEY_SENSOR_NFC_ENABLED = "sensor_nfc_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
     private const val KEY_SENSOR_UWB_ENABLED = "sensor_uwb_enabled"
@@ -29,6 +30,7 @@ object ScanSettings {
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
+    private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
     private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
     private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
     private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
@@ -236,6 +238,14 @@ object ScanSettings {
         setBleSensorEnabled(context, enabled)
     }
 
+    fun isNfcSensorEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SENSOR_NFC_ENABLED, true)
+
+    fun setNfcSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_NFC_ENABLED, enabled)
+    }
+
     fun isCellularSensorEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_SENSOR_CELLULAR_ENABLED, true)
@@ -354,6 +364,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isNfcNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, true)
+
+    fun setNfcNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 

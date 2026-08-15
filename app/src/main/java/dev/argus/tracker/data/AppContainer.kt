@@ -14,6 +14,7 @@ import dev.argus.tracker.sensing.CameraScanner
 import dev.argus.tracker.sensing.CellularScanner
 import dev.argus.tracker.sensing.ExternalFeedScanner
 import dev.argus.tracker.sensing.MagnetometerDisturbanceScanner
+import dev.argus.tracker.sensing.NfcScanner
 import dev.argus.tracker.sensing.RemoteIdScanner
 import dev.argus.tracker.sensing.WifiScanner
 import dev.argus.tracker.sensing.WifiDirectScanner
@@ -55,6 +56,7 @@ class DefaultAppContainer(
                 WifiDirectScanner(context),
                 BleScanner(context),
                 BluetoothClassicScanner(context),
+                NfcScanner(context),
                 CellularScanner(context),
                 RemoteIdScanner(context),
                 CameraScanner(context),

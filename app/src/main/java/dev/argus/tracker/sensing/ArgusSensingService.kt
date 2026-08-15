@@ -70,6 +70,13 @@ class ArgusSensingService(
                         )
                     }
                     .getOrDefault(emptyList())
+                if (scannerBatch.isNotEmpty()) {
+                    val latestRawEpochMs = scannerBatch
+                        .maxOfOrNull { encounter -> encounter.timestampEpochMs }
+                        ?.coerceAtLeast(0L)
+                        ?: nowEpochMs
+                    ScanSettings.setSourceLastRawObservationEpochMs(context, groupedSourceType, latestRawEpochMs)
+                }
                 val gatedBatch = applySourceGate(groupedSourceType, scannerBatch)
                 val durationMs = (SystemClock.elapsedRealtime() - scanStartedAt).coerceAtLeast(0L)
                 sourceDurations[groupedSourceType] = durationMs
@@ -117,6 +124,7 @@ class ArgusSensingService(
         is WifiDirectScanner -> SourceCatalog.KEY_WIFI_DIRECT
         is BleScanner -> SourceCatalog.KEY_BLE
         is BluetoothClassicScanner -> SourceCatalog.KEY_BT_CLASSIC
+        is NfcScanner -> SourceCatalog.KEY_NFC
         is CellularScanner -> SourceCatalog.KEY_CELLULAR
         is RemoteIdScanner -> SourceCatalog.KEY_REMOTE_ID
         is CameraScanner -> SourceCatalog.KEY_CAMERA

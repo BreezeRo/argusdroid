@@ -10,6 +10,7 @@ import android.telephony.TelephonyManager
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.nfc.NfcAdapter
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.worker.ScanSettings
 
@@ -44,6 +45,8 @@ object SensorStatusProvider {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val magneticAvailable = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null
         val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
+        val nfcEnabled = runCatching { NfcAdapter.getDefaultAdapter(context)?.isEnabled == true }
+            .getOrDefault(false)
 
         val ingestDir = context.filesDir.resolve("ingest")
         val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
@@ -79,6 +82,11 @@ object SensorStatusProvider {
                 name = "Cellular",
                 isOn = cellularOn,
                 factoredByArgus = ScanSettings.isCellularSensorEnabled(context)
+            ),
+            SensorStatus(
+                name = "NFC",
+                isOn = nfcEnabled,
+                factoredByArgus = ScanSettings.isNfcSensorEnabled(context)
             ),
             SensorStatus(
                 name = "UWB",
