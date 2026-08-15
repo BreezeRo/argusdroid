@@ -12,7 +12,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.DefaultAppContainer
-import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,22 +61,16 @@ class RemoteIdForegroundService : Service() {
         loopJob = serviceScope.launch {
             val repository = (applicationContext as? ArgusApplication)?.container?.repository
                 ?: DefaultAppContainer(applicationContext).repository
-            val bleScanner = BleScanner(applicationContext)
             val remoteIdScanner = RemoteIdScanner(applicationContext)
 
             while (isActive && RemoteIdForegroundServiceController.shouldRun(applicationContext)) {
                 val startedAt = System.currentTimeMillis()
 
-                val bleResults = runCatching { bleScanner.scanOnce() }
-                    .getOrDefault(emptyList())
-                    .filter { it.source == EncounterSource.REMOTE_ID }
-
                 val feedResults = runCatching { remoteIdScanner.scanOnce() }
                     .getOrDefault(emptyList())
 
-                val merged = (bleResults + feedResults)
-                if (merged.isNotEmpty()) {
-                    runCatching { repository.insertBatch(merged) }
+                if (feedResults.isNotEmpty()) {
+                    runCatching { repository.insertBatch(feedResults) }
                 }
 
                 val durationMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)

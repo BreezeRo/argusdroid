@@ -20,6 +20,10 @@ data class DetectionLocation(
 
 object LocationSnapshotProvider {
     private const val MAX_STALE_AGE_MS = 2 * 60 * 60 * 1000L
+    private const val OBSERVED_CANDIDATE_MAX_AGE_MS = 30_000L
+    private const val REQUEST_MIN_DISTANCE_METERS = 4f
+    private const val MIN_EMIT_MOVEMENT_METERS = 6f
+    private const val SIGNIFICANT_ACCURACY_GAIN_METERS = 8f
 
     fun read(context: Context): DetectionLocation? {
         val hasFine = hasFineLocationPermission(context)
@@ -76,9 +80,45 @@ object LocationSnapshotProvider {
         }
 
         val safeIntervalMs = minUpdateIntervalMs.coerceAtLeast(1_000L)
+        val recentLocationsByProvider = linkedMapOf<String, Location>()
+        var lastEmittedLocation: Location? = null
+
+        fun shouldEmit(candidate: Location): Boolean {
+            val previous = lastEmittedLocation ?: return true
+            val movedMeters = previous.distanceTo(candidate)
+            if (movedMeters >= MIN_EMIT_MOVEMENT_METERS) {
+                return true
+            }
+
+            val previousAccuracy = if (previous.hasAccuracy()) previous.accuracy else Float.MAX_VALUE
+            val candidateAccuracy = if (candidate.hasAccuracy()) candidate.accuracy else Float.MAX_VALUE
+            return (previousAccuracy - candidateAccuracy) >= SIGNIFICANT_ACCURACY_GAIN_METERS
+        }
+
+        fun emitBestCandidate(nowEpochMs: Long) {
+            val bestCandidate = recentLocationsByProvider
+                .values
+                .filter { location -> nowEpochMs - location.time in 0..OBSERVED_CANDIDATE_MAX_AGE_MS }
+                .maxByOrNull { location ->
+                    locationScore(
+                        location = location,
+                        nowEpochMs = nowEpochMs,
+                        hasFinePermission = hasFine
+                    )
+                }
+                ?: return
+
+            if (shouldEmit(bestCandidate)) {
+                lastEmittedLocation = bestCandidate
+                trySend(DetectionLocation(bestCandidate.latitude, bestCandidate.longitude))
+            }
+        }
+
         val listener = LocationListener { location ->
             if (location.latitude in -90.0..90.0 && location.longitude in -180.0..180.0) {
-                trySend(DetectionLocation(location.latitude, location.longitude))
+                val provider = location.provider ?: "unknown"
+                recentLocationsByProvider[provider] = location
+                emitBestCandidate(System.currentTimeMillis())
             }
         }
 
@@ -87,14 +127,21 @@ object LocationSnapshotProvider {
                 locationManager.requestLocationUpdates(
                     provider,
                     safeIntervalMs,
-                    0f,
+                    REQUEST_MIN_DISTANCE_METERS,
                     listener,
                     Looper.getMainLooper()
                 )
             }
         }
 
-        trySend(read(context))
+        val initial = read(context)
+        if (initial != null) {
+            lastEmittedLocation = Location("snapshot").apply {
+                latitude = initial.lat
+                longitude = initial.lon
+            }
+        }
+        trySend(initial)
 
         awaitClose {
             runCatching { locationManager.removeUpdates(listener) }

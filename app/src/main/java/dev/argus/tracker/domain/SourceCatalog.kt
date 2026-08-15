@@ -26,6 +26,7 @@ object SourceCatalog {
     val SOURCE_WIFI_SWEEP: String = EncounterSource.WIFI_SWEEP.name
     val SOURCE_WIFI_DIRECT: String = EncounterSource.WIFI_DIRECT.name
     val SOURCE_BLUETOOTH_LE: String = EncounterSource.BLUETOOTH_LE.name
+    val SOURCE_BLUETOOTH_LE_SWEEP: String = EncounterSource.BLUETOOTH_LE_SWEEP.name
     val SOURCE_BLUETOOTH_CLASSIC: String = EncounterSource.BLUETOOTH_CLASSIC.name
     val SOURCE_REMOTE_ID: String = EncounterSource.REMOTE_ID.name
     val SOURCE_CELL: String = EncounterSource.CELL.name

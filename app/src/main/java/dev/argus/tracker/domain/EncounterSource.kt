@@ -5,6 +5,7 @@ enum class EncounterSource {
     WIFI_SWEEP,
     WIFI_DIRECT,
     BLUETOOTH_LE,
+    BLUETOOTH_LE_SWEEP,
     BLUETOOTH_CLASSIC,
     REMOTE_ID,
     CELL,

@@ -58,9 +58,10 @@ class ArgusSensingService(
                     )
                 }
                 .getOrDefault(emptyList())
+            val gatedBatch = applySourceGate(sourceType, scannerBatch)
             val durationMs = (SystemClock.elapsedRealtime() - scanStartedAt).coerceAtLeast(0L)
             sourceDurations[sourceType] = durationMs
-            allEncounters += scannerBatch
+            allEncounters += gatedBatch
             ScanSettings.setSourceLastScanEpochMs(context, sourceType, nowEpochMs)
         }
 
@@ -85,5 +86,43 @@ class ArgusSensingService(
         is AcousticSignatureScanner -> SourceCatalog.KEY_ACOUSTIC
         is MagnetometerDisturbanceScanner -> SourceCatalog.KEY_MAGNETIC
         else -> scanner::class.java.simpleName.lowercase()
+    }
+
+    private fun applySourceGate(sourceType: String, encounters: List<Encounter>): List<Encounter> {
+        if (encounters.isEmpty()) return encounters
+
+        return when (sourceType) {
+            SourceCatalog.KEY_BLE -> {
+                if (ScanSettings.isBleSensorEnabled(context)) {
+                    encounters
+                } else {
+                    OperationalErrorLogStore.append(
+                        context = context,
+                        category = "SCAN_SOURCE_DIAGNOSTIC",
+                        source = sourceType,
+                        severity = "WARNING",
+                        message = "Dropped ${encounters.size} BLE scanner encounter(s) because Bluetooth LE source is disabled"
+                    )
+                    emptyList()
+                }
+            }
+
+            SourceCatalog.KEY_BT_CLASSIC -> {
+                if (ScanSettings.isBluetoothClassicSensorEnabled(context)) {
+                    encounters
+                } else {
+                    OperationalErrorLogStore.append(
+                        context = context,
+                        category = "SCAN_SOURCE_DIAGNOSTIC",
+                        source = sourceType,
+                        severity = "WARNING",
+                        message = "Dropped ${encounters.size} Bluetooth Classic scanner encounter(s) because Classic source is disabled"
+                    )
+                    emptyList()
+                }
+            }
+
+            else -> encounters
+        }
     }
 }

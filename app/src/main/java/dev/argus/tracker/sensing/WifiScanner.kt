@@ -40,8 +40,6 @@ class WifiScanner(
             location = location,
             scanRequested = scanRequested
         )
-        if (aggregateOnly) return listOf(aggregate)
-
         val perAccessPoint = results.map { result ->
             Encounter(
                 timestampEpochMs = now,
@@ -56,7 +54,25 @@ class WifiScanner(
             )
         }
 
+        if (aggregateOnly) {
+            val namedAccessPoints = perAccessPoint.filter { encounter ->
+                hasUsableSsid(encounter.secondaryId)
+            }
+            return if (namedAccessPoints.isEmpty()) {
+                listOf(aggregate)
+            } else {
+                listOf(aggregate) + namedAccessPoints
+            }
+        }
+
         return listOf(aggregate) + perAccessPoint
+    }
+
+    private fun hasUsableSsid(ssid: String?): Boolean {
+        val normalized = ssid?.trim().orEmpty()
+        if (normalized.isBlank()) return false
+        val canonical = normalized.lowercase()
+        return canonical != "<unknown ssid>" && canonical != "unknown ssid"
     }
 
     private fun buildWifiSweepEncounter(

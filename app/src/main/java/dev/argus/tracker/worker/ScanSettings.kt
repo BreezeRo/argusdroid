@@ -16,6 +16,7 @@ object ScanSettings {
     private const val KEY_TRACKING_ENABLED = "tracking_enabled"
     private const val KEY_SENSOR_WIFI_ENABLED = "sensor_wifi_enabled"
     private const val KEY_SENSOR_BLE_ENABLED = "sensor_ble_enabled"
+    private const val KEY_SENSOR_BT_CLASSIC_ENABLED = "sensor_bt_classic_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
     private const val KEY_SENSOR_UWB_ENABLED = "sensor_uwb_enabled"
@@ -59,6 +60,9 @@ object ScanSettings {
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
     private const val KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "wifi_randomized_one_off_suppression_enabled"
     private const val KEY_WIFI_AGGREGATE_ONLY_ENABLED = "wifi_aggregate_only_enabled"
+    private const val KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "ble_randomized_one_off_suppression_enabled"
+    private const val KEY_BLE_AGGREGATE_ONLY_ENABLED = "ble_aggregate_only_enabled"
+    private const val KEY_BLE_SWEEP_IDENTIFIABLE_ONLY_ENABLED = "ble_sweep_identifiable_only_enabled"
     private const val KEY_APP_THEME_MODE = "app_theme_mode"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -84,6 +88,8 @@ object ScanSettings {
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = false
     const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED = true
+    const val DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
+    const val DEFAULT_BLE_AGGREGATE_ONLY_ENABLED = true
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 1800L
@@ -213,6 +219,15 @@ object ScanSettings {
 
     fun setBleSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_BLE_ENABLED, enabled)
+    }
+
+    fun isBluetoothClassicSensorEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_SENSOR_BT_CLASSIC_ENABLED, true)
+    }
+
+    fun setBluetoothClassicSensorEnabled(context: Context, enabled: Boolean) {
+        setSensorEnabled(context, KEY_SENSOR_BT_CLASSIC_ENABLED, enabled)
     }
 
     fun isCellularSensorEnabled(context: Context): Boolean =
@@ -768,6 +783,43 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_WIFI_AGGREGATE_ONLY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isBleRandomizedOneOffSuppressionEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(
+                KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED,
+                DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+            )
+
+    fun setBleRandomizedOneOffSuppressionEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isBleAggregateOnlyEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return if (prefs.contains(KEY_BLE_AGGREGATE_ONLY_ENABLED)) {
+            prefs.getBoolean(
+                KEY_BLE_AGGREGATE_ONLY_ENABLED,
+                DEFAULT_BLE_AGGREGATE_ONLY_ENABLED
+            )
+        } else {
+            // Migration fallback from previous BLE identifiable-only setting.
+            prefs.getBoolean(
+                KEY_BLE_SWEEP_IDENTIFIABLE_ONLY_ENABLED,
+                DEFAULT_BLE_AGGREGATE_ONLY_ENABLED
+            )
+        }
+    }
+
+    fun setBleAggregateOnlyEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_BLE_AGGREGATE_ONLY_ENABLED, enabled)
             .apply()
     }
 

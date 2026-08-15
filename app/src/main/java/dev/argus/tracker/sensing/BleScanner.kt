@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
@@ -22,17 +23,29 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 class BleScanner(
     private val context: Context
 ) : SignalScanner {
+    private var lastSkipLogEpochMs: Long = 0L
+
     override suspend fun scanOnce(): List<Encounter> {
-        if (!ArgusScanSettings.isBleSensorEnabled(context)) return emptyList()
-        if (!hasBlePermissions()) return emptyList()
+        if (!ArgusScanSettings.isBleSensorEnabled(context)) {
+            logSkipped("Bluetooth LE sensor disabled in settings")
+            return emptyList()
+        }
+        if (!hasBlePermissions()) {
+            logSkipped("Missing Bluetooth LE scan permissions")
+            return emptyList()
+        }
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return emptyList()
         val adapter: BluetoothAdapter = manager.adapter ?: return emptyList()
-        if (!adapter.isEnabled) return emptyList()
+        if (!adapter.isEnabled) {
+            logSkipped("Bluetooth adapter disabled")
+            return emptyList()
+        }
         val scanner = adapter.bluetoothLeScanner ?: return emptyList()
         val location = LocationSnapshotProvider.read(context)
 
@@ -40,9 +53,11 @@ class BleScanner(
             val done = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())
             val captured = linkedMapOf<String, Encounter>()
+            var observedEvents = 0
 
             val callback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
+                    observedEvents += 1
                     val encounter = result.toEncounter(location)
                     val existing = captured[encounter.primaryId]
                     if (existing == null || (encounter.rssiDbm ?: Int.MIN_VALUE) > (existing.rssiDbm ?: Int.MIN_VALUE)) {
@@ -64,7 +79,13 @@ class BleScanner(
             val finishScan = {
                 if (done.compareAndSet(false, true)) {
                     runCatching { scanner.stopScan(callback) }
-                    if (continuation.isActive) continuation.resume(captured.values.toList())
+                    val finalized = finalizeBleSweepResults(
+                        encounters = captured.values.toList(),
+                        observedEvents = observedEvents,
+                        location = location,
+                        aggregateOnly = ArgusScanSettings.isBleAggregateOnlyEnabled(context)
+                    )
+                    if (continuation.isActive) continuation.resume(finalized)
                 }
             }
 
@@ -244,5 +265,113 @@ class BleScanner(
             }
         }
         return false
+    }
+
+    private fun finalizeBleSweepResults(
+        encounters: List<Encounter>,
+        observedEvents: Int,
+        location: DetectionLocation?,
+        aggregateOnly: Boolean
+    ): List<Encounter> {
+        if (encounters.isEmpty()) return emptyList()
+
+        val remoteIdEncounters = encounters.filter { it.source == EncounterSource.REMOTE_ID }
+        val bleEncounters = encounters.filter { it.source == EncounterSource.BLUETOOTH_LE }
+
+        val namedBleEncounters = bleEncounters.filter { encounter ->
+            hasUsableSecondaryId(encounter.secondaryId)
+        }
+        val retainedBleEncounters = if (aggregateOnly) namedBleEncounters else bleEncounters
+
+        val sweepEncounter = buildBleSweepEncounter(
+            bleEncounters = bleEncounters,
+            observedEvents = observedEvents,
+            location = location,
+            remoteIdCount = remoteIdEncounters.size,
+            retainedBleCount = retainedBleEncounters.size,
+            aggregateOnly = aggregateOnly
+        )
+
+        return buildList {
+            add(sweepEncounter)
+            addAll(remoteIdEncounters)
+            addAll(retainedBleEncounters)
+        }
+    }
+
+    private fun buildBleSweepEncounter(
+        bleEncounters: List<Encounter>,
+        observedEvents: Int,
+        location: DetectionLocation?,
+        remoteIdCount: Int,
+        retainedBleCount: Int,
+        aggregateOnly: Boolean
+    ): Encounter {
+        val strongestRssi = bleEncounters.mapNotNull { it.rssiDbm }.maxOrNull()
+        val medianRssi = median(bleEncounters.mapNotNull { it.rssiDbm })
+        val randomizedLikelyCount = bleEncounters.count { isLikelyRandomizedMacAddress(it.primaryId) }
+        val namedCount = bleEncounters.count { hasUsableSecondaryId(it.secondaryId) }
+
+        return Encounter(
+            timestampEpochMs = System.currentTimeMillis(),
+            source = EncounterSource.BLUETOOTH_LE_SWEEP,
+            primaryId = "ble-scan-aggregate",
+            secondaryId = "${bleEncounters.size} devices",
+            rssiDbm = strongestRssi,
+            frequencyMhz = null,
+            lat = location?.lat,
+            lon = location?.lon,
+            rawPayloadJson = JSONObject()
+                .put("mode", if (aggregateOnly) "aggregate_only" else "aggregate_all")
+                .put("observedEvents", observedEvents)
+                .put("uniqueBleCount", bleEncounters.size)
+                .put("retainedBleCount", retainedBleCount)
+                .put("aggregateOnlyEnabled", aggregateOnly)
+                .put("remoteIdCandidateCount", remoteIdCount)
+                .put("likelyRandomizedBleCount", randomizedLikelyCount)
+                .put("namedBleCount", namedCount)
+                .put("strongestRssiDbm", strongestRssi)
+                .put("medianRssiDbm", medianRssi)
+                .toString()
+        )
+    }
+
+    private fun hasUsableSecondaryId(value: String?): Boolean {
+        val normalized = value?.trim().orEmpty()
+        if (normalized.isBlank()) return false
+        val canonical = normalized.lowercase()
+        return canonical != "<unknown>" && canonical != "unknown"
+    }
+
+    private fun isLikelyRandomizedMacAddress(macAddress: String?): Boolean {
+        val mac = macAddress?.trim() ?: return false
+        val firstOctetHex = mac.split(':').firstOrNull()?.takeIf { it.length == 2 } ?: return false
+        val firstOctet = firstOctetHex.toIntOrNull(16) ?: return false
+        val isLocallyAdministered = (firstOctet and 0x02) != 0
+        val isUnicast = (firstOctet and 0x01) == 0
+        return isLocallyAdministered && isUnicast
+    }
+
+    private fun median(values: List<Int>): Int? {
+        if (values.isEmpty()) return null
+        val ordered = values.sorted()
+        val middle = ordered.size / 2
+        return if (ordered.size % 2 == 1) {
+            ordered[middle]
+        } else {
+            ((ordered[middle - 1] + ordered[middle]) / 2.0).roundToInt()
+        }
+    }
+
+    private fun logSkipped(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastSkipLogEpochMs < 60_000L) return
+        lastSkipLogEpochMs = now
+        OperationalErrorLogStore.append(
+            context = context,
+            category = "SCAN_SOURCE",
+            source = "ble",
+            message = "Bluetooth LE scanner skipped: $reason"
+        )
     }
 }

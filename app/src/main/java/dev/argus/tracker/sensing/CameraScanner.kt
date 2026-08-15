@@ -63,7 +63,7 @@ class CameraScanner(
         private const val FETCH_MIN_INTERVAL_MS = 5L * 60L * 1000L
         private const val MIN_RADIUS_METERS = 1000
         private const val MAX_RADIUS_METERS = 25000
-        private const val DEFAULT_RADIUS_METERS = 8000
+        private const val DEFAULT_RADIUS_METERS = 15000
         private const val MAX_PAYLOAD_BYTES = 3 * 1024 * 1024
         private const val KEY_LAST_FETCH_EPOCH_MS = "camera_public_last_fetch_epoch_ms"
         private const val KEY_LAST_FETCH_LAT = "camera_public_last_fetch_lat"
@@ -143,11 +143,25 @@ class CameraScanner(
               node["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               node["enforcement"="red_light"](around:$radius,$lat,$lon);
               node["camera:type"="red_light"](around:$radius,$lat,$lon);
+                            node["camera:type"="speed"](around:$radius,$lat,$lon);
+                            node["camera:type"="average_speed"](around:$radius,$lat,$lon);
+                            node["camera:type"="speed_check"](around:$radius,$lat,$lon);
               way["highway"="speed_camera"](around:$radius,$lat,$lon);
               way["enforcement"="speed_camera"](around:$radius,$lat,$lon);
               way["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               way["enforcement"="red_light"](around:$radius,$lat,$lon);
               way["camera:type"="red_light"](around:$radius,$lat,$lon);
+                            way["camera:type"="speed"](around:$radius,$lat,$lon);
+                            way["camera:type"="average_speed"](around:$radius,$lat,$lon);
+                            way["camera:type"="speed_check"](around:$radius,$lat,$lon);
+                            relation["highway"="speed_camera"](around:$radius,$lat,$lon);
+                            relation["enforcement"="speed_camera"](around:$radius,$lat,$lon);
+                            relation["enforcement"="maxspeed"](around:$radius,$lat,$lon);
+                            relation["enforcement"="red_light"](around:$radius,$lat,$lon);
+                            relation["camera:type"="red_light"](around:$radius,$lat,$lon);
+                            relation["camera:type"="speed"](around:$radius,$lat,$lon);
+                            relation["camera:type"="average_speed"](around:$radius,$lat,$lon);
+                            relation["camera:type"="speed_check"](around:$radius,$lat,$lon);
             );
             out center tags;
         """.trimIndent()
