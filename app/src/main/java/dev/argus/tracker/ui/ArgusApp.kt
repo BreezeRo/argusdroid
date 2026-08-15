@@ -467,11 +467,15 @@ private data class DeviceLocationCandidate(
     val isOwned: Boolean = false
 )
 
-private data class AircraftNoFlyTrackSnapshot(
+private data class NoFlyTrackSnapshot(
+    val source: EncounterSource,
     val primaryId: String,
     val secondaryId: String?,
-    val latest: Encounter,
-    val previous: Encounter?
+    val latestTimestampEpochMs: Long,
+    val latestLat: Double,
+    val latestLon: Double,
+    val previousLat: Double?,
+    val previousLon: Double?
 )
 
 private data class MeshCoverageNodeInsight(
@@ -727,8 +731,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val lastApproachNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
-    val noFlyZoneStateByAircraft = remember { mutableMapOf<String, Set<String>>() }
-    val lastNoFlyZoneNotificationEpochByAircraftZone = remember { mutableMapOf<String, Long>() }
+    val noFlyZoneStateByTrack = remember { mutableMapOf<String, Set<String>>() }
+    val lastNoFlyZoneNotificationEpochByTrackZone = remember { mutableMapOf<String, Long>() }
     val noFlyZoneDetectionCache = remember { mutableMapOf<String, List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>() }
     var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
@@ -1251,38 +1255,66 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(operationalAnalysisWindow, noFlyPassThroughNotificationsEnabled) {
         val now = System.currentTimeMillis()
-        val aircraftTracks = withContext(Dispatchers.Default) {
+        val noFlyTracks = withContext(Dispatchers.Default) {
             operationalAnalysisWindow
                 .asSequence()
                 .filter { encounter ->
-                    encounter.source == EncounterSource.AIRCRAFT &&
-                        isValidLatLon(encounter.lat, encounter.lon)
+                    encounter.source == EncounterSource.AIRCRAFT ||
+                        encounter.source == EncounterSource.REMOTE_ID
                 }
-                .groupBy { encounter -> encounter.primaryId }
+                .groupBy { encounter -> "${encounter.source.name}|${encounter.primaryId}" }
                 .values
-                .mapNotNull { encountersForAircraft ->
-                    val sorted = encountersForAircraft.sortedByDescending { encounter -> encounter.timestampEpochMs }
+                .mapNotNull { encountersForTrack ->
+                    val sorted = encountersForTrack.sortedByDescending { encounter -> encounter.timestampEpochMs }
                     val latest = sorted.firstOrNull() ?: return@mapNotNull null
-                    AircraftNoFlyTrackSnapshot(
+
+                    fun resolvedLatLon(encounter: Encounter): Pair<Double, Double>? {
+                        return when (encounter.source) {
+                            EncounterSource.REMOTE_ID -> {
+                                remoteIdBroadcastLatLon(encounter)
+                                    ?: if (isValidLatLon(encounter.lat, encounter.lon)) {
+                                        encounter.lat!! to encounter.lon!!
+                                    } else {
+                                        null
+                                    }
+                            }
+
+                            else -> if (isValidLatLon(encounter.lat, encounter.lon)) {
+                                encounter.lat!! to encounter.lon!!
+                            } else {
+                                null
+                            }
+                        }
+                    }
+
+                    val latestResolved = resolvedLatLon(latest) ?: return@mapNotNull null
+                    val previousResolved = sorted
+                        .drop(1)
+                        .asSequence()
+                        .mapNotNull { previousEncounter -> resolvedLatLon(previousEncounter) }
+                        .firstOrNull()
+
+                    NoFlyTrackSnapshot(
+                        source = latest.source,
                         primaryId = latest.primaryId,
                         secondaryId = latest.secondaryId,
-                        latest = latest,
-                        previous = sorted.getOrNull(1)
+                        latestTimestampEpochMs = latest.timestampEpochMs,
+                        latestLat = latestResolved.first,
+                        latestLon = latestResolved.second,
+                        previousLat = previousResolved?.first,
+                        previousLon = previousResolved?.second
                     )
                 }
         }
 
-        val seenAircraftKeys = mutableSetOf<String>()
+        val seenTrackKeys = mutableSetOf<String>()
         val noFlyLogsToAppend = mutableListOf<AlertLogEntry>()
 
-        for (track in aircraftTracks) {
-            val aircraftKey = "${track.latest.source.name}|${track.primaryId}"
-            seenAircraftKeys += aircraftKey
+        for (track in noFlyTracks) {
+            val trackKey = "${track.source.name}|${track.primaryId}"
+            seenTrackKeys += trackKey
 
-            val latestLat = track.latest.lat ?: continue
-            val latestLon = track.latest.lon ?: continue
-
-            val location = DetectionLocation(lat = latestLat, lon = latestLon)
+            val location = DetectionLocation(lat = track.latestLat, lon = track.latestLon)
             val zoneCacheKey = noFlyDetectionCacheKey(location)
             val zones = noFlyZoneDetectionCache[zoneCacheKey] ?: withContext(Dispatchers.IO) {
                 NoFlyZoneOverlayProvider.read(context, near = location)
@@ -1291,27 +1323,25 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             }
 
             if (zones.isEmpty()) {
-                noFlyZoneStateByAircraft[aircraftKey] = emptySet()
+                noFlyZoneStateByTrack[trackKey] = emptySet()
                 continue
             }
 
             val currentZoneIds = zones
                 .asSequence()
-                .filter { zone -> noFlyZoneContainsPoint(zone, latestLat, latestLon) }
+                .filter { zone -> noFlyZoneContainsPoint(zone, track.latestLat, track.latestLon) }
                 .map { zone -> zone.id }
                 .toSet()
 
             val previousZoneIds = run {
-                val prevLat = track.previous?.lat
-                val prevLon = track.previous?.lon
-                if (isValidLatLon(prevLat, prevLon)) {
+                if (isValidLatLon(track.previousLat, track.previousLon)) {
                     zones
                         .asSequence()
-                        .filter { zone -> noFlyZoneContainsPoint(zone, prevLat!!, prevLon!!) }
+                        .filter { zone -> noFlyZoneContainsPoint(zone, track.previousLat!!, track.previousLon!!) }
                         .map { zone -> zone.id }
                         .toSet()
                 } else {
-                    noFlyZoneStateByAircraft[aircraftKey] ?: emptySet()
+                    noFlyZoneStateByTrack[trackKey] ?: emptySet()
                 }
             }
 
@@ -1328,20 +1358,21 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 } else {
                     ""
                 }
-                val sourceLabel = listSourceLabel(track.latest.source.name, track.secondaryId)
-                val message = "Aircraft $sourceLabel ${track.primaryId} entered no-fly zone: $zoneHeadline$overflowSuffix"
+                val sourceLabel = listSourceLabel(track.source.name, track.secondaryId)
+                val platformLabel = if (track.source == EncounterSource.REMOTE_ID) "Drone" else "Aircraft"
+                val message = "$platformLabel $sourceLabel ${track.primaryId} entered no-fly zone: $zoneHeadline$overflowSuffix"
 
                 noFlyLogsToAppend += AlertLogEntry(
                     timestampEpochMs = now,
                     type = AlertLogType.NO_FLY_PASS_THROUGH,
-                    source = track.latest.source.name,
+                    source = track.source.name,
                     primaryId = track.primaryId,
                     message = message,
                     confidence = null
                 )
 
-                val zoneNotificationKey = "$aircraftKey|${enteredZoneIds.sorted().joinToString(",")}"
-                val lastNotifiedEpochMs = lastNoFlyZoneNotificationEpochByAircraftZone[zoneNotificationKey] ?: 0L
+                val zoneNotificationKey = "$trackKey|${enteredZoneIds.sorted().joinToString(",")}"
+                val lastNotifiedEpochMs = lastNoFlyZoneNotificationEpochByTrackZone[zoneNotificationKey] ?: 0L
                 if (noFlyPassThroughNotificationsEnabled &&
                     hasPostNotificationsPermission(context) &&
                     now - lastNotifiedEpochMs >= NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS
@@ -1349,15 +1380,16 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     ensureNoFlyPassThroughNotificationChannel(context)
                     sendNoFlyPassThroughNotification(
                         context = context,
+                        source = track.source,
                         primaryId = track.primaryId,
                         sourceLabel = sourceLabel,
                         zones = enteredZones
                     )
-                    lastNoFlyZoneNotificationEpochByAircraftZone[zoneNotificationKey] = now
+                    lastNoFlyZoneNotificationEpochByTrackZone[zoneNotificationKey] = now
                 }
             }
 
-            noFlyZoneStateByAircraft[aircraftKey] = currentZoneIds
+            noFlyZoneStateByTrack[trackKey] = currentZoneIds
         }
 
         if (noFlyLogsToAppend.isNotEmpty()) {
@@ -1367,12 +1399,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             alertLogs = AlertLogStore.read(context)
         }
 
-        val staleAircraftKeys = noFlyZoneStateByAircraft.keys.filter { key -> key !in seenAircraftKeys }
-        staleAircraftKeys.forEach { staleKey ->
-            noFlyZoneStateByAircraft.remove(staleKey)
-            lastNoFlyZoneNotificationEpochByAircraftZone.keys
+        val staleTrackKeys = noFlyZoneStateByTrack.keys.filter { key -> key !in seenTrackKeys }
+        staleTrackKeys.forEach { staleKey ->
+            noFlyZoneStateByTrack.remove(staleKey)
+            lastNoFlyZoneNotificationEpochByTrackZone.keys
                 .filter { key -> key.startsWith("$staleKey|") }
-                .forEach { key -> lastNoFlyZoneNotificationEpochByAircraftZone.remove(key) }
+                .forEach { key -> lastNoFlyZoneNotificationEpochByTrackZone.remove(key) }
         }
     }
 
@@ -11973,7 +12005,7 @@ private fun ensureNoFlyPassThroughNotificationChannel(context: android.content.C
         "No-Fly Zone Pass-Through Alerts",
         NotificationManager.IMPORTANCE_HIGH
     ).apply {
-        description = "Alerts when tracked aircraft enter a configured no-fly zone"
+        description = "Alerts when tracked aircraft or Remote ID drones enter a configured no-fly zone"
     }
     manager.createNotificationChannel(channel)
 }
@@ -12091,13 +12123,18 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
 
 private fun sendNoFlyPassThroughNotification(
     context: android.content.Context,
+    source: EncounterSource,
     primaryId: String,
     sourceLabel: String,
     zones: List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>
 ) {
     if (zones.isEmpty()) return
 
-    val title = "Aircraft entered no-fly zone"
+    val title = if (source == EncounterSource.REMOTE_ID) {
+        "Drone entered no-fly zone"
+    } else {
+        "Aircraft entered no-fly zone"
+    }
     val zoneHeadline = zones
         .take(2)
         .joinToString(" / ") { zone -> zone.label.takeIf { it.isNotBlank() } ?: "Unnamed zone" }

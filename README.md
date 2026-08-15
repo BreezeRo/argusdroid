@@ -1,171 +1,152 @@
 # Argusdroid
 
-Argusdroid is an Android app for local-first RF encounter intelligence. It collects detections from phone radios and optional ingest feeds, normalizes them into a shared encounter model, and surfaces activity through maps, logs, and device workflows.
+Argusdroid is a local-first Android RF and telemetry intelligence system. It ingests multi-source detections, normalizes them into a single encounter model, and provides on-device analytics, map visualization, and authenticated LAN mesh synchronization.
 
-## What it does
+## System Scope
 
-- Scans Wi-Fi, Wi-Fi Direct, Bluetooth LE, Bluetooth Classic, and Cellular.
-- Detects road enforcement cameras (speed/red-light) by combining SDR camera events with public OSM camera POIs.
-- Supports direct-channel acoustic and magnetometer sampling.
-- Supports ingest feeds for Remote ID, ADS-B aircraft, UWB, and SDR (JSONL-based).
-- Normalizes all detections into one encounter schema and stores history in Room.
-- Supports Chain Link mesh sync across LAN peers with authenticated exchange and provenance.
-- Includes local analytics for approach detection, tracker-risk scoring, and foreign-signal risk.
+- Platform: Android app module plus Wear companion and optional web dashboard bridge.
+- Storage model: Room-backed encounter timeline with shared schema across sources.
+- Processing model: source scanners plus ingest readers feed a unified encounter pipeline.
+- Sync model: authenticated peer-to-peer Chain Link mesh over LAN with provenance tagging.
 
-## App navigation
+## Core Detection Sources
 
-- Home
-- Detection
-- Logs
-- Settings
+- Wi-Fi and Wi-Fi sweep aggregate mode.
+- Wi-Fi Direct.
+- Bluetooth LE and Bluetooth LE sweep aggregate mode.
+- Bluetooth Classic.
+- Cellular.
+- NFC ingest path (intent-driven ingest + scanner integration).
+- Aircraft telemetry (ADS-B/public feed).
+- Remote ID.
+- UWB ingest.
+- SDR ingest.
+- Direct acoustic channel.
+- Direct magnetometer channel.
+- Camera events via SDR-style camera payloads and public camera POI fallback.
 
-### Detection
+## Encounter Pipeline
 
-- Status tab: readiness, source health, and quick operational state.
-- Devices tab: triage and filtering of recent/all observed devices.
-- Signal tab: channel-health and knowledge-gap diagnostics.
-- Map tab with two sub-tabs:
-	- Device Map: nearby inferred device locations, live/moving/snapshot filters.
-	- Flight Map: aircraft-focused map from ADS-B/public aviation feeds.
-- Mesh tab: peer state, link requests, sync controls, and wipe coordination.
+- Canonical model: timestamp, source, IDs, radio metadata, optional location, raw payload, and provenance metadata.
+- Provenance tracks local versus chain-linked origin and relay path metadata.
+- Source intervals are managed per source; global worker cadence aligns to fastest enabled source interval.
+- Work scheduling uses chained one-time work below 15 minutes and periodic work at or above 15 minutes.
 
-### Logs
+## Analytics and Alerting
 
-- Alerts tab
-- Errors tab (operational error stream)
-- Encounters tab
+- Approach detection with confidence and trend outputs.
+- Tracker suspicion scoring for repeated co-movement behavior.
+- Foreign signal risk scoring across channel indicators with configurable threshold.
+- NFC alert surfacing for newly observed NFC encounters.
+- Magnetometer disturbance increase alerts.
+- Aircraft no-fly zone pass-through detection:
+	- Detects aircraft transitions from outside to inside no-fly polygons.
+	- Emits dedicated notification channel alerts with cooldown guards.
+	- Writes structured alert log entries for event auditability.
 
-## Maps and flight tracking
+## Map Engine
 
-- Source-colored pins with legend filtering.
-- Live updates, pin limits, diagnostics panel, and compact control layout.
-- Device Map includes aircraft in a personal radius (25/50/75 mi selector).
-- Flight Map supports live-radius filtering up to 1000 mi.
-- Aircraft pins support heading rotation and helicopter/plane icon hints.
-- Moving-device path map is available from moving pins.
+- Detection map supports device and aircraft-focused sub-maps.
+- Source-colored pins with filtering, live controls, diagnostics, and pin budget controls.
+- Aircraft map includes heading-aware markers and large-radius filtering.
+- No-fly zone overlays:
+	- Local ingest: ingest/no_fly_zones.geojson.
+	- Public fallback: FAA ArcGIS UAS Facility Map and National Security UAS restrictions.
+	- Location-bounded fetch and on-device cache reuse.
+	- Render-quality controls with adaptive polygon simplification and marker limits.
+	- Overlay visibility and diagnostics integrated into map controls.
 
-## Mesh features
+## Mesh (Chain Link)
 
-- Authenticated Chain Link with shared passphrase.
-- Peer discovery and state tracking (including persistent channel mode).
-- Manual link request and sync-now actions.
-- Mesh-wide soft reset workflow with notices and temporary scan gate.
-- Optional precise location sharing between peers.
+- Shared-secret authenticated sync payloads.
+- Peer discovery, connectivity state, and optional persistent channel behavior.
+- Manual peer refresh and sync-now workflows.
+- Mesh wipe lifecycle controls with notification surfacing.
+- Optional precise-location sharing policy.
 
-## Ingest sources
+## UI Surfaces
 
-- Remote ID JSONL: app internal files path ingest/remote_id.jsonl
-- ADS-B JSONL: app internal files path ingest/adsb.jsonl
-- UWB JSONL: app internal files path ingest/uwb.jsonl
-- SDR JSONL: app internal files path ingest/sdr.jsonl
-- Public aviation feed: OpenSky-compatible JSON endpoint (location-bounded when available)
+- Home: sensor gates and operational controls.
+- Detection: readiness, devices, signal diagnostics, maps, and mesh operations.
+- Logs: alerts, operational errors, and encounter timeline.
+- Settings: scheduling, detection gates, alert policies, map behavior, and data reset/backup workflows.
 
-See docs/remote-id-ingest.md for payload expectations and companion intent format.
+## Ingest Interfaces
 
-### Road camera detection inputs
+- Remote ID JSONL: ingest/remote_id.jsonl
+- ADS-B JSONL: ingest/adsb.jsonl
+- UWB JSONL: ingest/uwb.jsonl
+- SDR JSONL: ingest/sdr.jsonl
+- No-fly overlay GeoJSON: ingest/no_fly_zones.geojson
+- Public aircraft feed: OpenSky-compatible endpoint (configured in settings)
 
-- SDR-style camera events are read from ingest/sdr.jsonl when they include camera-like metadata (for example: cameraType, signalClass with speed/red_light hints, or camera evidence type).
-- Public fallback POIs are queried from OpenStreetMap Overpass near current location and cached locally.
-- Camera encounters are surfaced under source CAMERA with payload schema hint argus.camera.v1.
+See docs/remote-id-ingest.md for payload expectations and companion ingest contract.
 
-### No-fly zone overlays (airspace/LAANC-style)
+## Build and Run
 
-- Argus can overlay local no-fly zone polygons on Device Map and Flight Map.
-- Default public fallback sources are official FAA ArcGIS feeds:
-	- FAA UAS Facility Map data
-	- FAA National Security UAS Flight Restrictions (NOTAM FDC 7/7282 map layer)
-- Public overlays are fetched near current map location, cached in app storage, and reused when offline.
-- Drop GeoJSON into app internal files path: ingest/no_fly_zones.geojson
-- Supported geometry types: Polygon and MultiPolygon (FeatureCollection preferred).
-- Typical properties consumed when present: name/title/label, source/provider, regulation/class, altitude floor/ceiling in feet.
-- Use the No-fly zones toggle in map controls to show/hide overlays.
+1. Install Android Studio and Android SDK Platform 36.
+2. Open repository and allow Gradle sync.
+3. Configure MAPS_API_KEY in local.properties or environment.
+4. Connect a physical device and run the app module.
+5. Grant runtime permissions requested by enabled sources.
 
-## Quick start
+MAPS_API_KEY is consumed via Gradle manifest placeholders by phone and wear modules.
 
-1. Install Android Studio (latest stable).
-2. Install Android SDK Platform 36.
-3. Open this repository and allow Gradle sync.
-4. Connect a physical Android device and run the app module.
-5. Grant runtime permissions when prompted.
-
-## Maps API key setup
-
-Google Maps SDK requires MAPS_API_KEY.
-
-Option A (recommended): add this to local.properties
-
-- MAPS_API_KEY=your_real_key
-
-Option B: set MAPS_API_KEY as an environment variable before launching Gradle/Android Studio.
-
-Phone and wear manifests consume MAPS_API_KEY via Gradle manifest placeholders.
-
-## Runtime permissions
+## Runtime Permissions
 
 - ACCESS_FINE_LOCATION
 - READ_PHONE_STATE
 - RECORD_AUDIO
-- BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-dependent)
-- NEARBY_WIFI_DEVICES (API-dependent)
+- BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-level dependent)
+- NEARBY_WIFI_DEVICES (API-level dependent)
 - POST_NOTIFICATIONS (Android 13+)
 
-If a source is disabled on Home, its scanner is skipped in scheduled and live collection.
+Disabled source gates prevent that source from participating in both scheduled and live pipelines.
 
-## Scheduling
+## Operational Notes
 
-- Under 15 minutes: chained one-time WorkManager requests.
-- 15 minutes and above: periodic WorkManager requests.
-- Global worker cadence controls scan-batch wakeups.
-- Per-source intervals gate individual sources inside those batches.
+- Scanner noise controls support aggregate-only sweeps and one-off randomized ID suppression.
+- Operational logs and source timing diagnostics are first-class in settings and logs surfaces.
+- Summary metrics include all source types across the 24h reporting window.
 
-## Troubleshooting
+## Today’s Delivered Changes (2026-08-15)
 
-### Map does not render
+- Added end-to-end NFC source integration and surfacing.
+- Expanded detection readiness and alert UX coverage.
+- Hardened map bootstrap, retention, filtering, and diagnostics.
+- Unified source interval families and Bluetooth-family gating behavior.
+- Added no-fly pass-through notification setting.
+- Added aircraft no-fly zone pass-through detection, logging, and dedicated alert channel.
+- Renamed Flight Map UX labeling to Aircraft Map.
 
-- Confirm MAPS_API_KEY is present and not placeholder text.
-- Confirm Maps SDK, billing, and key restrictions are valid.
-- Confirm Play Services and network availability.
-- Enable the map diagnostics panel in Detection map controls.
+## Web Dashboard
 
-### No/limited cellular detections
-
-- Confirm READ_PHONE_STATE permission is granted.
-- Confirm Cellular sensor toggle is enabled on Home.
-- Some OEM/carrier stacks expose limited cell metadata.
-
-### Mesh peers not connecting
-
-- Confirm both devices are on the same LAN and not guest-isolated.
-- Confirm Chain Link is enabled on both devices.
-- Confirm shared passphrase is identical on all peers.
-- Use Mesh tab controls to refresh peers or send link requests.
-
-## Web dashboard
-
-- Path: dashboard/
-- Preferred launcher: ./scripts/run-dashboard-node.ps1
+- UI path: dashboard/
+- Node bridge: dashboard-server/
+- Launch script: ./scripts/run-dashboard-node.ps1
 - Optional port: ./scripts/run-dashboard-node.ps1 -Port 8090
-- Live mesh config: dashboard/config/mesh-config.json
+- Mesh config: dashboard/config/mesh-config.json
 
-See docs/web-dashboard.md for full setup and key behavior.
+See docs/web-dashboard.md for dashboard behavior and deployment notes.
 
-## Repository layout
+## Repository Layout
 
 - app: Android application module
 - wear: Wear OS companion module
 - dashboard: static web dashboard UI
-- dashboard-server: Node server for dashboard and live mesh bridge
-- docs: architecture and operational docs
+- dashboard-server: Node bridge for dashboard and mesh relay views
+- docs: architecture and operational documentation
 
-## Tech stack
+## Stack
 
-- Kotlin + Jetpack Compose
+- Kotlin
+- Jetpack Compose
 - Room
 - WorkManager
 - Coroutines
 - Google Maps Compose
 
-## Documentation
+## Additional Documentation
 
 - docs/architecture.md
 - docs/capabilities-and-limits.md
