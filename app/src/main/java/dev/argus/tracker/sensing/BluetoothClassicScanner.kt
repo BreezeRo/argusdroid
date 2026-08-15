@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
@@ -26,19 +27,36 @@ class BluetoothClassicScanner(
     private val context: Context
 ) : SignalScanner {
 
+    private var lastSkipLogEpochMs: Long = 0L
+
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isBleSensorEnabled(context)) return emptyList()
-        if (!hasPermissions()) return emptyList()
+        if (!hasPermissions()) {
+            logSkipped("Missing Bluetooth scan/connect permissions")
+            return emptyList()
+        }
 
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return emptyList()
         val adapter = manager.adapter ?: return emptyList()
-        if (!adapter.isEnabled) return emptyList()
+        if (!adapter.isEnabled) {
+            logSkipped("Bluetooth adapter disabled")
+            return emptyList()
+        }
 
         val location = LocationSnapshotProvider.read(context)
-        val bonded = adapter.bondedDevices.orEmpty().map {
-            deviceToEncounter(device = it, location = location, discovered = false)
-        }
+        val bonded = runCatching {
+            adapter.bondedDevices.orEmpty().map {
+                deviceToEncounter(device = it, location = location, discovered = false)
+            }
+        }.onFailure { error ->
+            OperationalErrorLogStore.append(
+                context = context,
+                category = "SCAN_SOURCE",
+                source = "bt_classic",
+                message = "Unable to read bonded devices: ${error.message ?: "unknown error"}"
+            )
+        }.getOrDefault(emptyList())
 
         return suspendCancellableCoroutine { continuation ->
             val done = AtomicBoolean(false)
@@ -162,12 +180,26 @@ class BluetoothClassicScanner(
 
     private fun hasPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            val hasScan = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            val hasConnect = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            hasScan && hasConnect
         } else {
             val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
             val bt = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
             fine && bt
         }
+    }
+
+    private fun logSkipped(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastSkipLogEpochMs < 60_000L) return
+        lastSkipLogEpochMs = now
+        OperationalErrorLogStore.append(
+            context = context,
+            category = "SCAN_SOURCE",
+            source = "bt_classic",
+            message = "Bluetooth Classic scanner skipped: $reason"
+        )
     }
 
     private fun hasConnectPermission(): Boolean {

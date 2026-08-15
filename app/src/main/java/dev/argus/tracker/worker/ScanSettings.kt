@@ -2,6 +2,7 @@ package dev.argus.tracker.worker
 
 import android.content.Context
 import android.os.Build
+import dev.argus.tracker.domain.SourceCatalog
 import java.util.UUID
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -52,6 +53,11 @@ object ScanSettings {
     private const val KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME = "mesh_wipe_gate_initiator_device_name"
     private const val KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS = "mesh_wipe_gate_updated_epoch_ms"
     private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
+    private const val KEY_MAP_CLUSTERING_ENABLED = "map_clustering_enabled"
+    private const val KEY_MAP_CLUSTER_RANGE_LEVEL = "map_cluster_range_level"
+    private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
+    private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
+    private const val KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "wifi_randomized_one_off_suppression_enabled"
     private const val KEY_APP_THEME_MODE = "app_theme_mode"
     private const val KEY_LAST_SCAN_DURATION_MS = "last_scan_duration_ms"
     private const val KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED = "auto_adjust_scan_interval_enabled"
@@ -71,6 +77,11 @@ object ScanSettings {
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
+    const val DEFAULT_MAP_CLUSTERING_ENABLED = true
+    const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
+    const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
+    const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = false
+    const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 1800L
@@ -86,22 +97,10 @@ object ScanSettings {
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
+    val ALLOWED_MAP_CLUSTER_RANGE_LEVELS = (1..5).toList()
     val ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS = listOf("HIGH", "CRITICAL")
     val ALLOWED_APP_THEME_MODES = listOf("SYSTEM", "LIGHT", "DARK")
-    val SOURCE_TYPES = listOf(
-        "wifi",
-        "wifi_direct",
-        "ble",
-        "bt_classic",
-        "cellular",
-        "remote_id",
-        "camera",
-        "aircraft",
-        "uwb",
-        "sdr",
-        "acoustic",
-        "magnetic"
-    )
+    val SOURCE_TYPES = SourceCatalog.SCAN_SOURCE_KEYS
     val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
 
     data class SourceScanTiming(
@@ -690,6 +689,69 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, safeValue)
+            .apply()
+    }
+
+    fun isMapClusteringEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_CLUSTERING_ENABLED, DEFAULT_MAP_CLUSTERING_ENABLED)
+
+    fun setMapClusteringEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAP_CLUSTERING_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getMapClusterRangeLevel(context: Context): Int {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_MAP_CLUSTER_RANGE_LEVEL, DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
+        return raw.takeIf { it in ALLOWED_MAP_CLUSTER_RANGE_LEVELS }
+            ?: DEFAULT_MAP_CLUSTER_RANGE_LEVEL
+    }
+
+    fun setMapClusterRangeLevel(context: Context, level: Int) {
+        val safe = level.takeIf { it in ALLOWED_MAP_CLUSTER_RANGE_LEVELS }
+            ?: DEFAULT_MAP_CLUSTER_RANGE_LEVEL
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_MAP_CLUSTER_RANGE_LEVEL, safe)
+            .apply()
+    }
+
+    fun isMapNoFlyZonesEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_NO_FLY_ZONES_ENABLED, DEFAULT_MAP_NO_FLY_ZONES_ENABLED)
+
+    fun setMapNoFlyZonesEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAP_NO_FLY_ZONES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMapScannerSweepAnimationEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED, DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED)
+
+    fun setMapScannerSweepAnimationEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isWifiRandomizedOneOffSuppressionEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(
+                KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED,
+                DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
+            )
+
+    fun setWifiRandomizedOneOffSuppressionEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED, enabled)
             .apply()
     }
 

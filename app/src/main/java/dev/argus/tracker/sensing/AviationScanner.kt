@@ -49,7 +49,8 @@ class AviationScanner(
 
     private data class ParseOutcome(
         val encounters: List<Encounter>,
-        val filteredOutOfRadius: Int
+        val filteredOutOfRadius: Int,
+        val droppedMissingCoordinates: Int
     )
 
     override suspend fun scanOnce(): List<Encounter> {
@@ -321,7 +322,7 @@ class AviationScanner(
                     source = "aircraft_public",
                     message = "Unsupported JSON root type from $requestUrl${if (fromCache) " (cache)" else ""}"
                 )
-                ParseOutcome(emptyList(), filteredOutOfRadius = 0)
+                ParseOutcome(emptyList(), filteredOutOfRadius = 0, droppedMissingCoordinates = 0)
             }
         }
 
@@ -330,6 +331,7 @@ class AviationScanner(
             context = context,
             parsedAircraftCount = outcome.encounters.size,
             filteredOutOfRadius = outcome.filteredOutOfRadius,
+            droppedMissingCoordinates = outcome.droppedMissingCoordinates,
             parseDurationMs = parseDurationMs,
             source = if (fromCache) "cache_parse" else "network_parse"
         )
@@ -379,7 +381,7 @@ class AviationScanner(
                 message = "No states/aircraft/results/data arrays found in response"
             )
             AviationPerfStatsStore.recordParseFailure(context)
-            return ParseOutcome(emptyList(), filteredOutOfRadius = 0)
+            return ParseOutcome(emptyList(), filteredOutOfRadius = 0, droppedMissingCoordinates = 0)
         }
 
         return parseObjectArray(
@@ -401,10 +403,15 @@ class AviationScanner(
         val radiusMiles = ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 300)
         val radiusMeters = radiusMiles * 1609.344
         var skippedOutOfRadius = 0
+        var droppedMissingCoordinates = 0
         for (i in 0 until states.length()) {
             val row = states.optJSONArray(i) ?: continue
             val rowLon = row.optDoubleOrNull(5)
             val rowLat = row.optDoubleOrNull(6)
+            if (rowLat == null || rowLon == null) {
+                droppedMissingCoordinates += 1
+                continue
+            }
             if (fallbackLocation != null && rowLat != null && rowLon != null) {
                 val distanceMeters = distanceMeters(
                     lat1 = fallbackLocation.lat,
@@ -451,12 +458,14 @@ class AviationScanner(
                 context = context,
                 category = "INGEST_FILTERED",
                 source = "aircraft_public",
-                message = "OpenSky filtered out $skippedOutOfRadius aircraft outside ${radiusMiles}mi radius"
+                message = "OpenSky filtered out $skippedOutOfRadius aircraft outside ${radiusMiles}mi radius",
+                severity = "WARNING"
             )
         }
         return ParseOutcome(
             encounters = latestByPrimaryId.values.toList(),
-            filteredOutOfRadius = skippedOutOfRadius
+            filteredOutOfRadius = skippedOutOfRadius,
+            droppedMissingCoordinates = droppedMissingCoordinates
         )
     }
 
@@ -471,6 +480,7 @@ class AviationScanner(
         val radiusMiles = ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 300)
         val radiusMeters = radiusMiles * 1609.344
         var skippedOutOfRadius = 0
+        var droppedMissingCoordinates = 0
         for (i in 0 until rows.length()) {
             val payload = rows.optJSONObject(i) ?: continue
             val lat = payload.optDoubleOrNull("lat")
@@ -478,6 +488,10 @@ class AviationScanner(
             val lon = payload.optDoubleOrNull("lon")
                 ?: payload.optDoubleOrNull("lng")
                 ?: payload.optDoubleOrNull("longitude")
+            if (lat == null || lon == null) {
+                droppedMissingCoordinates += 1
+                continue
+            }
             if (fallbackLocation != null && lat != null && lon != null) {
                 val distanceMeters = distanceMeters(
                     lat1 = fallbackLocation.lat,
@@ -508,12 +522,14 @@ class AviationScanner(
                 context = context,
                 category = "INGEST_FILTERED",
                 source = "aircraft_public",
-                message = "$provider filtered out $skippedOutOfRadius aircraft outside ${radiusMiles}mi radius"
+                message = "$provider filtered out $skippedOutOfRadius aircraft outside ${radiusMiles}mi radius",
+                severity = "WARNING"
             )
         }
         return ParseOutcome(
             encounters = latestByPrimaryId.values.toList(),
-            filteredOutOfRadius = skippedOutOfRadius
+            filteredOutOfRadius = skippedOutOfRadius,
+            droppedMissingCoordinates = droppedMissingCoordinates
         )
     }
 
@@ -558,8 +574,8 @@ class AviationScanner(
         val lon = payload.optDoubleOrNull("lon")
             ?: payload.optDoubleOrNull("lng")
             ?: payload.optDoubleOrNull("longitude")
-        val resolvedLat = lat ?: fallbackLocation?.lat
-        val resolvedLon = lon ?: fallbackLocation?.lon
+        val resolvedLat = lat
+        val resolvedLon = lon
 
         val timestampEpochMs = payload.optLongOrNull("timestampEpochMs")
             ?: payload.optLongOrNull("lastContactEpochMs")

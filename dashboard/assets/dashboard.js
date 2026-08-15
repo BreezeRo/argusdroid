@@ -51,7 +51,7 @@ const state = {
 };
 
 const MAP_TYPES = ["roadmap", "hybrid", "terrain", "satellite"];
-const PIN_LIMIT_OPTIONS = [100, 250, 500, 1000, 0];
+const PIN_LIMIT_OPTIONS = [100, 250, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 0];
 const HOTSPOT_LIMIT_OPTIONS = [40, 80, 120, 200, 0];
 const LOCATION_MODES = ["PRECISE", "ZONED"];
 const MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160000;

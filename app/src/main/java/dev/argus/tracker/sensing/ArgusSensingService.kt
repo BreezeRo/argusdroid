@@ -1,6 +1,7 @@
 package dev.argus.tracker.sensing
 
 import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.domain.SignalScanner
 import android.os.SystemClock
 import android.content.Context
@@ -72,17 +73,17 @@ class ArgusSensingService(
     }
 
     private fun scannerSourceType(scanner: SignalScanner): String = when (scanner) {
-        is WifiScanner -> "wifi"
-        is WifiDirectScanner -> "wifi_direct"
-        is BleScanner -> "ble"
-        is BluetoothClassicScanner -> "bt_classic"
-        is CellularScanner -> "cellular"
-        is RemoteIdScanner -> "remote_id"
-        is CameraScanner -> "camera"
-        is AviationScanner -> "aircraft"
+        is WifiScanner -> SourceCatalog.KEY_WIFI
+        is WifiDirectScanner -> SourceCatalog.KEY_WIFI_DIRECT
+        is BleScanner -> SourceCatalog.KEY_BLE
+        is BluetoothClassicScanner -> SourceCatalog.KEY_BT_CLASSIC
+        is CellularScanner -> SourceCatalog.KEY_CELLULAR
+        is RemoteIdScanner -> SourceCatalog.KEY_REMOTE_ID
+        is CameraScanner -> SourceCatalog.KEY_CAMERA
+        is AviationScanner -> SourceCatalog.KEY_AIRCRAFT
         is ExternalFeedScanner -> scanner.sourceTypeKey
-        is AcousticSignatureScanner -> "acoustic"
-        is MagnetometerDisturbanceScanner -> "magnetic"
+        is AcousticSignatureScanner -> SourceCatalog.KEY_ACOUSTIC
+        is MagnetometerDisturbanceScanner -> SourceCatalog.KEY_MAGNETIC
         else -> scanner::class.java.simpleName.lowercase()
     }
 }

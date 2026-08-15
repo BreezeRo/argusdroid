@@ -47,8 +47,16 @@ object NoFlyZoneOverlayProvider {
     @Volatile
     private var cachedPublicPolygons: List<NoFlyZonePolygon> = emptyList()
 
-    fun read(context: Context, near: DetectionLocation? = null): List<NoFlyZonePolygon> {
-        val publicPolygons = readPublicFallback(context, near)
+    fun read(
+        context: Context,
+        near: DetectionLocation? = null,
+        allowNetworkFetch: Boolean = true
+    ): List<NoFlyZonePolygon> {
+        val publicPolygons = readPublicFallback(
+            context = context,
+            near = near,
+            allowNetworkFetch = allowNetworkFetch
+        )
 
         val file = context.filesDir.resolve(INGEST_DIR).resolve(FILE_NAME)
         if (!file.exists() || !file.isFile) return publicPolygons
@@ -67,7 +75,11 @@ object NoFlyZoneOverlayProvider {
         return publicPolygons + parsed
     }
 
-    private fun readPublicFallback(context: Context, near: DetectionLocation?): List<NoFlyZonePolygon> {
+    private fun readPublicFallback(
+        context: Context,
+        near: DetectionLocation?,
+        allowNetworkFetch: Boolean
+    ): List<NoFlyZonePolygon> {
         val cacheKey = publicCacheKey(near)
         if (cacheKey == cachedPublicCacheKey && cachedPublicPolygons.isNotEmpty()) {
             return cachedPublicPolygons
@@ -94,6 +106,12 @@ object NoFlyZoneOverlayProvider {
             return cachedFresh
         }
 
+        if (!allowNetworkFetch) {
+            cachedPublicCacheKey = cacheKey
+            cachedPublicPolygons = staleFallback(cacheFile)
+            return cachedPublicPolygons
+        }
+
         val fetched = fetchPublicGeoJson(near)
         if (fetched != null) {
             val parsed = parseGeoJson(fetched)
@@ -108,15 +126,19 @@ object NoFlyZoneOverlayProvider {
             }
         }
 
-        val staleFallback = if (cacheFile.exists() && cacheFile.isFile) {
-            runCatching { parseGeoJson(cacheFile.readText()) }.getOrDefault(emptyList())
-        } else {
-            emptyList()
-        }
+        val staleFallback = staleFallback(cacheFile)
 
         cachedPublicCacheKey = cacheKey
         cachedPublicPolygons = staleFallback
         return staleFallback
+    }
+
+    private fun staleFallback(cacheFile: java.io.File): List<NoFlyZonePolygon> {
+        return if (cacheFile.exists() && cacheFile.isFile) {
+            runCatching { parseGeoJson(cacheFile.readText()) }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
     }
 
     private fun publicCacheKey(near: DetectionLocation?): String {

@@ -8,6 +8,7 @@ data class AviationPerfSnapshot(
     val lastPayloadBytes: Int,
     val lastParsedAircraftCount: Int,
     val lastFilteredOutOfRadius: Int,
+    val lastDroppedMissingCoordinates: Int,
     val lastParseDurationMs: Long,
     val cacheHits: Int,
     val networkFetches: Int,
@@ -23,6 +24,7 @@ object AviationPerfStatsStore {
     private const val KEY_LAST_PAYLOAD_BYTES = "aviation_perf_last_payload_bytes"
     private const val KEY_LAST_PARSED_AIRCRAFT_COUNT = "aviation_perf_last_parsed_aircraft_count"
     private const val KEY_LAST_FILTERED_OUT_OF_RADIUS = "aviation_perf_last_filtered_out_of_radius"
+    private const val KEY_LAST_DROPPED_MISSING_COORDINATES = "aviation_perf_last_dropped_missing_coordinates"
     private const val KEY_LAST_PARSE_DURATION_MS = "aviation_perf_last_parse_duration_ms"
     private const val KEY_CACHE_HITS = "aviation_perf_cache_hits"
     private const val KEY_NETWORK_FETCHES = "aviation_perf_network_fetches"
@@ -38,6 +40,7 @@ object AviationPerfStatsStore {
             lastPayloadBytes = prefs.getInt(KEY_LAST_PAYLOAD_BYTES, 0),
             lastParsedAircraftCount = prefs.getInt(KEY_LAST_PARSED_AIRCRAFT_COUNT, 0),
             lastFilteredOutOfRadius = prefs.getInt(KEY_LAST_FILTERED_OUT_OF_RADIUS, 0),
+            lastDroppedMissingCoordinates = prefs.getInt(KEY_LAST_DROPPED_MISSING_COORDINATES, 0),
             lastParseDurationMs = prefs.getLong(KEY_LAST_PARSE_DURATION_MS, 0L),
             cacheHits = prefs.getInt(KEY_CACHE_HITS, 0),
             networkFetches = prefs.getInt(KEY_NETWORK_FETCHES, 0),
@@ -103,6 +106,7 @@ object AviationPerfStatsStore {
         context: Context,
         parsedAircraftCount: Int,
         filteredOutOfRadius: Int,
+        droppedMissingCoordinates: Int,
         parseDurationMs: Long,
         source: String
     ) {
@@ -112,6 +116,7 @@ object AviationPerfStatsStore {
             .putString(KEY_LAST_SOURCE, source)
             .putInt(KEY_LAST_PARSED_AIRCRAFT_COUNT, parsedAircraftCount.coerceAtLeast(0))
             .putInt(KEY_LAST_FILTERED_OUT_OF_RADIUS, filteredOutOfRadius.coerceAtLeast(0))
+            .putInt(KEY_LAST_DROPPED_MISSING_COORDINATES, droppedMissingCoordinates.coerceAtLeast(0))
             .putLong(KEY_LAST_PARSE_DURATION_MS, parseDurationMs.coerceAtLeast(0L))
             .apply()
     }

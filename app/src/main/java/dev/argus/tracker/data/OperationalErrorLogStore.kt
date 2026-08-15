@@ -8,7 +8,8 @@ data class OperationalErrorLogEntry(
     val timestampEpochMs: Long,
     val category: String,
     val source: String,
-    val message: String
+    val message: String,
+    val severity: String = "ERROR"
 )
 
 object OperationalErrorLogStore {
@@ -29,7 +30,8 @@ object OperationalErrorLogStore {
                         timestampEpochMs = item.optLong("timestampEpochMs", 0L),
                         category = item.optString("category", "UNKNOWN").ifBlank { "UNKNOWN" },
                         source = item.optString("source", "system").ifBlank { "system" },
-                        message = item.optString("message", "")
+                        message = item.optString("message", ""),
+                        severity = item.optString("severity", "ERROR").ifBlank { "ERROR" }.uppercase()
                     )
                 )
             }
@@ -41,18 +43,21 @@ object OperationalErrorLogStore {
         category: String,
         source: String,
         message: String,
+        severity: String = "ERROR",
         timestampEpochMs: Long = System.currentTimeMillis()
     ) {
         if (message.isBlank()) return
         val normalizedCategory = category.trim().ifBlank { "UNKNOWN" }.uppercase()
         val normalizedSource = source.trim().ifBlank { "system" }
         val normalizedMessage = message.trim().take(400)
+        val normalizedSeverity = severity.trim().ifBlank { "ERROR" }.uppercase()
 
         val existing = read(context)
         val latestSame = existing.firstOrNull {
             it.category == normalizedCategory &&
                 it.source == normalizedSource &&
-                it.message == normalizedMessage
+                it.message == normalizedMessage &&
+                it.severity == normalizedSeverity
         }
         if (latestSame != null && (timestampEpochMs - latestSame.timestampEpochMs) in 0..DEDUPE_WINDOW_MS) {
             return
@@ -63,7 +68,8 @@ object OperationalErrorLogStore {
                 timestampEpochMs = timestampEpochMs,
                 category = normalizedCategory,
                 source = normalizedSource,
-                message = normalizedMessage
+                message = normalizedMessage,
+                severity = normalizedSeverity
             )
         ) + existing)
             .sortedByDescending { it.timestampEpochMs }
@@ -85,6 +91,7 @@ object OperationalErrorLogStore {
                     put("category", entry.category)
                     put("source", entry.source)
                     put("message", entry.message)
+                    put("severity", entry.severity)
                 }
             )
         }

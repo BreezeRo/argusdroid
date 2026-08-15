@@ -3,12 +3,14 @@ package dev.argus.tracker.sensing
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
@@ -22,9 +24,21 @@ class WifiDirectScanner(
     private val context: Context
 ) : SignalScanner {
 
+    private var lastSkipLogEpochMs: Long = 0L
+
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isWifiSensorEnabled(context)) return emptyList()
-        if (!hasPermissions()) return emptyList()
+        if (!hasPermissions()) {
+            logSkipped("Missing Wi-Fi Direct permissions")
+            return emptyList()
+        }
+
+        val wifiEnabled = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)
+            ?.isWifiEnabled == true
+        if (!wifiEnabled) {
+            logSkipped("Wi-Fi adapter disabled")
+            return emptyList()
+        }
 
         val manager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
             ?: return emptyList()
@@ -131,5 +145,17 @@ class WifiDirectScanner(
             true
         }
         return fine && nearbyWifi
+    }
+
+    private fun logSkipped(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastSkipLogEpochMs < 60_000L) return
+        lastSkipLogEpochMs = now
+        OperationalErrorLogStore.append(
+            context = context,
+            category = "SCAN_SOURCE",
+            source = "wifi_direct",
+            message = "Wi-Fi Direct scanner skipped: $reason"
+        )
     }
 }
