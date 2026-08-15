@@ -21,7 +21,6 @@ data class SourceSummary(
 class ArgusViewModel(
     private val repository: EncounterRepository
 ) : ViewModel() {
-
     val recentEncounters: StateFlow<List<Encounter>> = repository.observeRecent(limit = 1000)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
