@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.domain.Encounter
+import dev.argus.tracker.domain.EncounterSource
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,9 +37,19 @@ class ArgusViewModel(
     fun refreshSummary(windowHours: Long = 24) {
         viewModelScope.launch {
             val since = System.currentTimeMillis() - (windowHours * 60 * 60 * 1000)
-            _summary.value = repository.sourceSummarySince(since)
-                .map { (source, count) -> SourceSummary(source, count) }
+            val sourceCounts = repository.sourceSummarySince(since)
+            val knownSourceOrder = EncounterSource.entries.toList()
+
+            val knownSources = knownSourceOrder.map { source ->
+                SourceSummary(source = source.name, count = sourceCounts[source.name] ?: 0)
+            }
+
+            val unknownSources = sourceCounts
+                .filterKeys { sourceName -> knownSourceOrder.none { it.name == sourceName } }
+                .map { (source, count) -> SourceSummary(source = source, count = count) }
                 .sortedByDescending { it.count }
+
+            _summary.value = knownSources + unknownSources
         }
     }
 
