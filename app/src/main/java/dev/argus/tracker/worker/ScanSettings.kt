@@ -73,6 +73,7 @@ object ScanSettings {
     const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 300L
+    const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 1800L
     const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 100
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
@@ -787,6 +788,7 @@ object ScanSettings {
 
     private fun defaultSourceScanIntervalSeconds(sourceType: String): Long = when (sourceType) {
         "aircraft" -> DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
+        "camera" -> DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
         else -> DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
     }
 

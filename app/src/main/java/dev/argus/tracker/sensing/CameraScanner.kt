@@ -19,6 +19,11 @@ class CameraScanner(
     private val context: Context
 ) : SignalScanner {
 
+    private data class PublicCameraProvider(
+        val key: String,
+        val endpointUrl: String
+    )
+
     private data class CameraPoi(
         val osmType: String,
         val osmId: Long,
@@ -26,7 +31,8 @@ class CameraScanner(
         val lon: Double,
         val cameraType: String,
         val label: String,
-        val tags: JSONObject
+        val tags: JSONObject,
+        val providerKey: String
     )
 
     @Volatile
@@ -36,7 +42,21 @@ class CameraScanner(
     private var cachedPois: List<CameraPoi> = emptyList()
 
     companion object {
-        private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+        private val PUBLIC_CAMERA_PROVIDERS = listOf(
+            PublicCameraProvider(
+                key = "OSM_OVERPASS_DE",
+                endpointUrl = "https://overpass-api.de/api/interpreter"
+            ),
+            PublicCameraProvider(
+                key = "OSM_OVERPASS_FR",
+                endpointUrl = "https://overpass.openstreetmap.fr/api/interpreter"
+            ),
+            PublicCameraProvider(
+                key = "OSM_OVERPASS_KUMI",
+                endpointUrl = "https://overpass.kumi.systems/api/interpreter"
+            )
+        )
+        private const val CACHE_PROVIDER_KEY = "OSM_OVERPASS_CACHE"
         private const val CACHE_DIR = "camera"
         private const val CACHE_FILE = "osm_camera_cache.json"
         private const val CACHE_TTL_MS = 30L * 60L * 1000L
@@ -74,28 +94,43 @@ class CameraScanner(
         }
 
         val query = buildOverpassQuery(location.lat, location.lon, DEFAULT_RADIUS_METERS)
-        val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-        val requestUrl = "$OVERPASS_URL?data=$encoded"
+        val fetched = fetchFromPublicProviders(query)
 
-        val fetched = runCatching {
-            val conn = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 4500
-                readTimeout = 4500
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "Argus/1.0 (Android)")
-            }
-            conn.readResponseTextChunked(MAX_PAYLOAD_BYTES)
-        }.getOrNull()
-
-        if (fetched.isNullOrBlank()) {
+        if (fetched == null || fetched.first.isBlank()) {
             return cachedEncounters
         }
 
-        writeCache(fetched)
+        val fetchedBody = fetched.first
+        val providerKey = fetched.second
+
+        writeCache(fetchedBody)
         rememberFetchLocation(location, now)
-        val parsedPois = parseOverpassToPois(fetched)
+        val parsedPois = parseOverpassToPois(fetchedBody, providerKey)
         return parsedPois.map { it.toEncounter(now) }
+    }
+
+    private fun fetchFromPublicProviders(query: String): Pair<String, String>? {
+        val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
+
+        PUBLIC_CAMERA_PROVIDERS.forEach { provider ->
+            val body = runCatching {
+                val requestUrl = "${provider.endpointUrl}?data=$encoded"
+                val conn = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 4500
+                    readTimeout = 4500
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "Argus/1.0 (Android)")
+                }
+                conn.readResponseTextChunked(MAX_PAYLOAD_BYTES)
+            }.getOrNull()
+
+            if (!body.isNullOrBlank()) {
+                return body to provider.key
+            }
+        }
+
+        return null
     }
 
     private fun buildOverpassQuery(lat: Double, lon: Double, radiusMeters: Int): String {
@@ -104,10 +139,12 @@ class CameraScanner(
             [out:json][timeout:20];
             (
               node["highway"="speed_camera"](around:$radius,$lat,$lon);
+              node["enforcement"="speed_camera"](around:$radius,$lat,$lon);
               node["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               node["enforcement"="red_light"](around:$radius,$lat,$lon);
               node["camera:type"="red_light"](around:$radius,$lat,$lon);
               way["highway"="speed_camera"](around:$radius,$lat,$lon);
+              way["enforcement"="speed_camera"](around:$radius,$lat,$lon);
               way["enforcement"="maxspeed"](around:$radius,$lat,$lon);
               way["enforcement"="red_light"](around:$radius,$lat,$lon);
               way["camera:type"="red_light"](around:$radius,$lat,$lon);
@@ -116,7 +153,7 @@ class CameraScanner(
         """.trimIndent()
     }
 
-    private fun parseOverpassToPois(body: String): List<CameraPoi> {
+    private fun parseOverpassToPois(body: String, providerKey: String = CACHE_PROVIDER_KEY): List<CameraPoi> {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
         val elements = root.optJSONArray("elements") ?: JSONArray()
         val pois = mutableListOf<CameraPoi>()
@@ -150,7 +187,8 @@ class CameraScanner(
                 lon = lon,
                 cameraType = cameraType,
                 label = label,
-                tags = tags
+                tags = tags,
+                providerKey = providerKey
             )
         }
 
@@ -277,7 +315,7 @@ class CameraScanner(
             .put("cameraSchema", "argus.camera.v1")
             .put("cameraType", cameraType)
             .put("evidenceType", "public_poi")
-            .put("provider", "OSM_OVERPASS")
+            .put("provider", providerKey)
             .put("osmType", osmType)
             .put("osmId", osmId)
             .put("lat", lat)
