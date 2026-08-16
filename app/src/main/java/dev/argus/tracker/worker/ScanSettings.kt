@@ -21,7 +21,6 @@ object ScanSettings {
     private const val KEY_SENSOR_NFC_ENABLED = "sensor_nfc_enabled"
     private const val KEY_SENSOR_CELLULAR_ENABLED = "sensor_cellular_enabled"
     private const val KEY_SENSOR_REMOTE_ID_ENABLED = "sensor_remote_id_enabled"
-    private const val KEY_SENSOR_UWB_ENABLED = "sensor_uwb_enabled"
     private const val KEY_SENSOR_SDR_ENABLED = "sensor_sdr_enabled"
     private const val KEY_SENSOR_AVIATION_ADSB_ENABLED = "sensor_aviation_adsb_enabled"
     private const val KEY_SENSOR_AVIATION_PUBLIC_ENABLED = "sensor_aviation_public_enabled"
@@ -37,12 +36,9 @@ object ScanSettings {
     private const val KEY_FLOCK_ALERT_LAST_SIGNATURE = "flock_alert_last_signature"
     private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
-    private const val KEY_FOREIGN_SIGNAL_RISK_ENABLED = "foreign_signal_risk_enabled"
-    private const val KEY_FOREIGN_SIGNAL_ALERTS_ENABLED = "foreign_signal_alerts_enabled"
     private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
     private const val KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED = "mesh_connectivity_notifications_enabled"
     private const val KEY_MESH_WIPE_NOTIFICATIONS_ENABLED = "mesh_wipe_notifications_enabled"
-    private const val KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD = "foreign_signal_alert_threshold"
     private const val KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED = "foreign_direct_acoustic_enabled"
     private const val KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED = "foreign_direct_magnetic_enabled"
     private const val KEY_CHAIN_LINK_ENABLED = "chain_link_enabled"
@@ -61,7 +57,6 @@ object ScanSettings {
     private const val KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID = "mesh_wipe_gate_initiator_node_id"
     private const val KEY_MESH_WIPE_GATE_INITIATOR_DEVICE_NAME = "mesh_wipe_gate_initiator_device_name"
     private const val KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS = "mesh_wipe_gate_updated_epoch_ms"
-    private const val KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS = "live_map_update_interval_seconds"
     private const val KEY_MAP_CLUSTERING_ENABLED = "map_clustering_enabled"
     private const val KEY_MAP_CLUSTER_RANGE_LEVEL = "map_cluster_range_level"
     private const val KEY_MAP_TRAFFIC_ENABLED = "map_traffic_enabled"
@@ -97,7 +92,6 @@ object ScanSettings {
     const val DEFAULT_CHAIN_SYNC_WINDOW_MINUTES = 120L
     const val DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = 60L
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
-    const val DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
     const val DEFAULT_MAP_CLUSTERING_ENABLED = false
     const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
     const val DEFAULT_MAP_TRAFFIC_ENABLED = true
@@ -113,7 +107,6 @@ object ScanSettings {
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 25
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
-    const val DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD = "HIGH"
     const val DEFAULT_APP_THEME_MODE = "DARK"
     const val DEFAULT_HOME_POINT_RADIUS_METERS = 160.0
     const val MIN_HOME_POINT_RADIUS_METERS = 30.0
@@ -126,10 +119,8 @@ object ScanSettings {
     val ALLOWED_INTERVALS_SECONDS = SHARED_ALLOWED_CADENCE_SECONDS
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
-    val ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = listOf(1L, 3L, 5L, 15L, 30L, 60L, 300L, 1800L, 3600L)
     val ALLOWED_MAP_CLUSTER_RANGE_LEVELS = (1..5).toList()
     val ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS = (1..3).toList()
-    val ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS = listOf("HIGH", "CRITICAL")
     val ALLOWED_APP_THEME_MODES = listOf("SYSTEM", "LIGHT", "DARK")
     val SOURCE_TYPES = SourceCatalog.SCAN_SOURCE_KEYS
     val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
@@ -285,14 +276,6 @@ object ScanSettings {
 
     fun setRemoteIdSensorEnabled(context: Context, enabled: Boolean) {
         setBleSensorEnabled(context, enabled)
-    }
-
-    fun isUwbSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SENSOR_UWB_ENABLED, true)
-
-    fun setUwbSensorEnabled(context: Context, enabled: Boolean) {
-        setSensorEnabled(context, KEY_SENSOR_UWB_ENABLED, enabled)
     }
 
     fun isSdrSensorEnabled(context: Context): Boolean =
@@ -490,47 +473,6 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_MESH_WIPE_NOTIFICATIONS_ENABLED, enabled)
-            .apply()
-    }
-
-    fun isForeignSignalRiskEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_FOREIGN_SIGNAL_RISK_ENABLED, true)
-
-    fun setForeignSignalRiskEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_FOREIGN_SIGNAL_RISK_ENABLED, enabled)
-            .apply()
-    }
-
-    fun isForeignSignalAlertsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_FOREIGN_SIGNAL_ALERTS_ENABLED, true)
-
-    fun setForeignSignalAlertsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_FOREIGN_SIGNAL_ALERTS_ENABLED, enabled)
-            .apply()
-    }
-
-    fun getForeignSignalAlertThreshold(context: Context): String {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD, DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD)
-            .orEmpty()
-            .trim()
-            .uppercase()
-        return raw.takeIf { it in ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS }
-            ?: DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
-    }
-
-    fun setForeignSignalAlertThreshold(context: Context, threshold: String) {
-        val safe = threshold.trim().uppercase().takeIf { it in ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS }
-            ?: DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_FOREIGN_SIGNAL_ALERT_THRESHOLD, safe)
             .apply()
     }
 
@@ -846,25 +788,6 @@ object ScanSettings {
             .edit()
             .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
             .putLong(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS, System.currentTimeMillis())
-            .apply()
-    }
-
-    fun getLiveMapUpdateIntervalSeconds(context: Context): Long {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS)
-        return value.takeIf { it in ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS }
-            ?: DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
-    }
-
-    fun setLiveMapUpdateIntervalSeconds(context: Context, seconds: Long) {
-        val safeValue = if (seconds in ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS) {
-            seconds
-        } else {
-            DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
-        }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putLong(KEY_LIVE_MAP_UPDATE_INTERVAL_SECONDS, safeValue)
             .apply()
     }
 

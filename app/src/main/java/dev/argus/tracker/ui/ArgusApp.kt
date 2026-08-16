@@ -171,15 +171,12 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-private enum class DataScope {
-    RECENT_100,
-    ALL
-}
-
 private enum class DeviceSortMode {
     LAST_SEEN,
     MOST_SEEN
 }
+
+private const val DETECTION_LIST_PAGE_SIZE = 250
 
 private enum class AppThemeMode {
     SYSTEM,
@@ -214,8 +211,6 @@ private const val NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID = "argus_no_fly_pass_thro
 private const val NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
 private const val NFC_ALERT_COOLDOWN_MS = 30 * 1000L
-private const val FOREIGN_SIGNAL_ALERT_CHANNEL_ID = "argus_foreign_signal_alerts"
-private const val FOREIGN_SIGNAL_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val MAGNETIC_INCREASE_ALERT_CHANNEL_ID = "argus_magnetic_increase_alerts"
 private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
@@ -248,12 +243,11 @@ private const val NO_FLY_ZONE_RENDER_COUNT_HIGH = 220
 private const val NO_FLY_ZONE_MARKER_COUNT_LOW = 24
 private const val NO_FLY_ZONE_MARKER_COUNT_BALANCED = 48
 private const val NO_FLY_ZONE_MARKER_COUNT_HIGH = 96
-private const val DETECTION_TAB_MESH_INDEX = 5
+private const val DETECTION_TAB_MESH_INDEX = 4
 private const val SIGNAL_INTEL_WINDOW_MS = 30L * 60L * 1000L
 private const val SIGNAL_INTEL_MAX_ENCOUNTERS = 4000
 private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
-private const val FOREIGN_RISK_WINDOW_MS = 30L * 60L * 1000L
-private const val FOREIGN_RISK_MAX_ENCOUNTERS = 4000
+private const val FIXED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
 private const val OPERATIONAL_ANALYSIS_WINDOW_MS = 60L * 60L * 1000L
 private const val OPERATIONAL_ANALYSIS_MAX_ENCOUNTERS = 6000
 private const val MAGNETIC_ALERT_WINDOW_MS = 30L * 60L * 1000L
@@ -326,8 +320,7 @@ private enum class AlertLogType {
     APPROACH,
     TRACKER,
     NO_FLY_PASS_THROUGH,
-    NFC,
-    FOREIGN_SIGNAL
+    NFC
 }
 
 private data class AlertLogEntry(
@@ -357,34 +350,6 @@ private data class TrackerRiskSignal(
     val seenAwayFromHome: Boolean,
     val trackerFamilyHint: String? = null,
     val trackerFamilyConfidence: Double? = null
-)
-
-private enum class ForeignSignalRiskLevel {
-    QUIET,
-    ELEVATED,
-    HIGH,
-    CRITICAL
-}
-
-private data class ForeignSignalRiskSignal(
-    val level: ForeignSignalRiskLevel,
-    val score: Int,
-    val confidence: Double,
-    val summary: String,
-    val windowMinutes: Double,
-    val sampleCount: Int,
-    val cellularAnomalyScore: Double,
-    val wifiAnomalyScore: Double,
-    val bleAnomalyScore: Double,
-    val gnssInterferenceScore: Double,
-    val nfcActivityScore: Double,
-    val uwbActivityScore: Double,
-    val rfTextureScore: Double,
-    val acousticProxyScore: Double,
-    val magneticProxyScore: Double,
-    val directAcousticObserved: Boolean,
-    val directMagneticObserved: Boolean,
-    val unavailableSignals: List<String>
 )
 
 private data class HomeSensorToggle(
@@ -445,7 +410,6 @@ private data class SensorGateSettings(
     val nfcEnabled: Boolean,
     val aviationAdsbEnabled: Boolean,
     val aviationPublicEnabled: Boolean,
-    val uwbEnabled: Boolean,
     val sdrEnabled: Boolean,
     val directAcousticEnabled: Boolean,
     val directMagneticEnabled: Boolean
@@ -509,16 +473,6 @@ private data class NoFlyTrackSnapshot(
     val previousLat: Double?,
     val previousLon: Double?,
     val previousAltitudeFeet: Double?
-)
-
-private data class MeshCoverageNodeInsight(
-    val nodeId: String,
-    val displayName: String,
-    val seenDevices: Int,
-    val uniqueContributions: Int,
-    val blindSpotsFilledByOthers: Int,
-    val coverageSharePercent: Int,
-    val blindSpotFillPercent: Int
 )
 
 private object OwnedDeviceRegistry {
@@ -674,7 +628,6 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
         nfcEnabled = ScanSettings.isNfcSensorEnabled(context),
         aviationAdsbEnabled = ScanSettings.isAviationAdsbSensorEnabled(context),
         aviationPublicEnabled = ScanSettings.isAviationPublicSensorEnabled(context),
-        uwbEnabled = ScanSettings.isUwbSensorEnabled(context),
         sdrEnabled = ScanSettings.isSdrSensorEnabled(context),
         directAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context),
         directMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
@@ -693,7 +646,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var sensorStatuses by remember { mutableStateOf(emptyList<SensorStatus>()) }
     var readinessItems by remember { mutableStateOf(emptyList<DetectionReadinessItem>()) }
     var scanIntervalSeconds by remember { mutableStateOf(ScanSettings.getScanIntervalSeconds(context)) }
-    var liveMapUpdateIntervalSeconds by remember { mutableStateOf(ScanSettings.getLiveMapUpdateIntervalSeconds(context)) }
+    val liveMapUpdateIntervalSeconds = FIXED_LIVE_MAP_UPDATE_INTERVAL_SECONDS
     var mapClusteringEnabled by remember { mutableStateOf(ScanSettings.isMapClusteringEnabled(context)) }
     var mapClusterRangeLevel by remember { mutableStateOf(ScanSettings.getMapClusterRangeLevel(context)) }
     var mapTrafficEnabled by remember { mutableStateOf(ScanSettings.isMapTrafficEnabled(context)) }
@@ -733,9 +686,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
     var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
     var meshWipeNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshWipeNotificationsEnabled(context)) }
-    var foreignSignalRiskEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalRiskEnabled(context)) }
-    var foreignSignalAlertsEnabled by remember { mutableStateOf(ScanSettings.isForeignSignalAlertsEnabled(context)) }
-    var foreignSignalAlertThreshold by remember { mutableStateOf(ScanSettings.getForeignSignalAlertThreshold(context)) }
     var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
     var foreignDirectMagneticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectMagneticEnabled(context)) }
     var homePoint by remember { mutableStateOf(ScanSettings.getHomePoint(context)) }
@@ -771,12 +721,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val noFlyZoneStateByTrack = remember { mutableMapOf<String, Set<String>>() }
     val lastNoFlyZoneNotificationEpochByTrackZone = remember { mutableMapOf<String, Long>() }
     val noFlyZoneDetectionCache = remember { mutableMapOf<String, List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>() }
-    var lastForeignSignalAlertEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcObservedEncounterEpochMs by remember { mutableStateOf(0L) }
     var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
-    var previousForeignSignalRiskLevel by remember { mutableStateOf(ForeignSignalRiskLevel.QUIET) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
     var lastWearStatusPublishEpochMs by remember { mutableStateOf(0L) }
     var lastOperationalStateSignature by remember { mutableStateOf("") }
@@ -1081,7 +1029,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
         chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
-        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
         mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
@@ -1095,9 +1042,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         sourceScanIntervals = ScanSettings.getAllSourceScanIntervalSeconds(context)
         sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
         sourceLastRawObservationEpochs = ScanSettings.getAllSourceLastRawObservationEpochMs(context)
-        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
-        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
-        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
         homePoint = ScanSettings.getHomePoint(context)
@@ -1601,56 +1545,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(
-        operationalAnalysisWindow,
-        foreignSignalRiskEnabled,
-        foreignSignalAlertsEnabled,
-        foreignSignalAlertThreshold
-    ) {
-        val risk = withContext(Dispatchers.Default) { analyzeForeignSignalRisk(operationalAnalysisWindow) }
-        val currentLevel = risk?.level ?: ForeignSignalRiskLevel.QUIET
-        val previousLevel = previousForeignSignalRiskLevel
-
-        if (!foreignSignalRiskEnabled) {
-            previousForeignSignalRiskLevel = currentLevel
-            return@LaunchedEffect
-        }
-
-        val thresholdLevel = when (foreignSignalAlertThreshold.uppercase(Locale.US)) {
-            "CRITICAL" -> ForeignSignalRiskLevel.CRITICAL
-            else -> ForeignSignalRiskLevel.HIGH
-        }
-
-        val meetsThreshold = currentLevel.ordinal >= thresholdLevel.ordinal
-        val crossedUp = previousLevel.ordinal < thresholdLevel.ordinal && meetsThreshold
-        val now = System.currentTimeMillis()
-
-        if (risk != null && crossedUp) {
-            withContext(Dispatchers.IO) {
-                AlertLogStore.append(
-                    context,
-                    AlertLogEntry(
-                        timestampEpochMs = now,
-                        type = AlertLogType.FOREIGN_SIGNAL,
-                        source = "UNKNOWN_RF",
-                        primaryId = "environment",
-                        message = "Foreign signal risk ${risk.level.name} (${risk.score}/100): ${risk.summary}",
-                        confidence = risk.confidence
-                    )
-                )
-            }
-            alertLogs = AlertLogStore.read(context)
-
-            if (foreignSignalAlertsEnabled && hasPostNotificationsPermission(context) && now - lastForeignSignalAlertEpochMs >= FOREIGN_SIGNAL_ALERT_COOLDOWN_MS) {
-                ensureForeignSignalNotificationChannel(context)
-                sendForeignSignalRiskNotification(context, risk)
-                lastForeignSignalAlertEpochMs = now
-            }
-        }
-
-        previousForeignSignalRiskLevel = currentLevel
-    }
-
     LaunchedEffect(magneticAlertWindow, foreignDirectMagneticEnabled) {
         if (!foreignDirectMagneticEnabled) return@LaunchedEffect
 
@@ -1856,7 +1750,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 "nfc" -> ScanSettings.setNfcSensorEnabled(context, enabled)
                                 "aviation_adsb" -> ScanSettings.setAviationAdsbSensorEnabled(context, enabled)
                                 "aviation_public" -> ScanSettings.setAviationPublicSensorEnabled(context, enabled)
-                                "uwb" -> ScanSettings.setUwbSensorEnabled(context, enabled)
                                 "sdr" -> ScanSettings.setSdrSensorEnabled(context, enabled)
                                 "direct_acoustic" -> ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
                                 "direct_magnetic" -> ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
@@ -1896,7 +1789,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             composable(SETTINGS_ROUTE) {
                 AppSettingsPage(
                     scanIntervalSeconds = scanIntervalSeconds,
-                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     mapClusteringEnabled = mapClusteringEnabled,
                     mapClusterRangeLevel = mapClusterRangeLevel,
                     mapTrafficEnabled = mapTrafficEnabled,
@@ -1925,9 +1817,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
                     meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
                     meshWipeNotificationsEnabled = meshWipeNotificationsEnabled,
-                    foreignSignalRiskEnabled = foreignSignalRiskEnabled,
-                    foreignSignalAlertsEnabled = foreignSignalAlertsEnabled,
-                    foreignSignalAlertThreshold = foreignSignalAlertThreshold,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
                     foreignDirectMagneticEnabled = foreignDirectMagneticEnabled,
                     homePoint = homePoint,
@@ -2019,18 +1908,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         meshWipeNotificationsEnabled = enabled
                         ScanSettings.setMeshWipeNotificationsEnabled(context, enabled)
                     },
-                    onForeignSignalRiskEnabledChanged = { enabled ->
-                        foreignSignalRiskEnabled = enabled
-                        ScanSettings.setForeignSignalRiskEnabled(context, enabled)
-                    },
-                    onForeignSignalAlertsEnabledChanged = { enabled ->
-                        foreignSignalAlertsEnabled = enabled
-                        ScanSettings.setForeignSignalAlertsEnabled(context, enabled)
-                    },
-                    onForeignSignalAlertThresholdChanged = { threshold ->
-                        foreignSignalAlertThreshold = threshold
-                        ScanSettings.setForeignSignalAlertThreshold(context, threshold)
-                    },
                     onForeignDirectAcousticEnabledChanged = { enabled ->
                         foreignDirectAcousticEnabled = enabled
                         ScanSettings.setForeignDirectAcousticEnabled(context, enabled)
@@ -2083,10 +1960,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.clearHomePoint(context)
                         homePoint = null
                         "Home point cleared."
-                    },
-                    onLiveMapUpdateIntervalSelected = { seconds ->
-                        liveMapUpdateIntervalSeconds = seconds
-                        ScanSettings.setLiveMapUpdateIntervalSeconds(context, seconds)
                     },
                     onMapClusteringEnabledChanged = { enabled ->
                         mapClusteringEnabled = enabled
@@ -2160,7 +2033,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
                         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
                         chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
-                        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
@@ -2184,9 +2056,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
-                        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
-                        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
-                        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         homePoint = ScanSettings.getHomePoint(context)
@@ -2215,7 +2084,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         chainPersistentChannelEnabled = ScanSettings.isChainPersistentChannelEnabled(context)
                         chainHeartbeatIntervalSeconds = ScanSettings.getChainHeartbeatIntervalSeconds(context)
                         chainSharePreciseLocationEnabled = ScanSettings.isChainSharePreciseLocationEnabled(context)
-                        liveMapUpdateIntervalSeconds = ScanSettings.getLiveMapUpdateIntervalSeconds(context)
                         mapClusteringEnabled = ScanSettings.isMapClusteringEnabled(context)
                         mapClusterRangeLevel = ScanSettings.getMapClusterRangeLevel(context)
                         mapTrafficEnabled = ScanSettings.isMapTrafficEnabled(context)
@@ -2239,9 +2107,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
-                        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
-                        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
-                        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         homePoint = ScanSettings.getHomePoint(context)
@@ -2260,13 +2125,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setCellularSensorEnabled(context, true)
                         ScanSettings.setAviationAdsbSensorEnabled(context, true)
                         ScanSettings.setAviationPublicSensorEnabled(context, true)
-                        ScanSettings.setUwbSensorEnabled(context, true)
                         ScanSettings.setSdrSensorEnabled(context, true)
 
-                        ScanSettings.setLiveMapUpdateIntervalSeconds(
-                            context,
-                            ScanSettings.DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
-                        )
                         ScanSettings.setMapClusteringEnabled(context, ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED)
                         ScanSettings.setMapClusterRangeLevel(context, ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
                         ScanSettings.setMapTrafficEnabled(context, ScanSettings.DEFAULT_MAP_TRAFFIC_ENABLED)
@@ -2296,12 +2156,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
                         ScanSettings.setMeshConnectivityNotificationsEnabled(context, false)
                         ScanSettings.setMeshWipeNotificationsEnabled(context, true)
-                        ScanSettings.setForeignSignalRiskEnabled(context, true)
-                        ScanSettings.setForeignSignalAlertsEnabled(context, true)
-                        ScanSettings.setForeignSignalAlertThreshold(
-                            context,
-                            ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
-                        )
                         ScanSettings.setForeignDirectAcousticEnabled(context, false)
                         ScanSettings.setForeignDirectMagneticEnabled(context, false)
                         ScanSettings.clearHomePoint(context)
@@ -2315,7 +2169,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             ScanSettings.setSourceScanIntervalSeconds(context, sourceType, defaultSeconds)
                         }
 
-                        liveMapUpdateIntervalSeconds = ScanSettings.DEFAULT_LIVE_MAP_UPDATE_INTERVAL_SECONDS
                         mapClusteringEnabled = ScanSettings.DEFAULT_MAP_CLUSTERING_ENABLED
                         mapClusterRangeLevel = ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL
                         mapTrafficEnabled = ScanSettings.DEFAULT_MAP_TRAFFIC_ENABLED
@@ -2338,9 +2191,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         magneticIncreaseNotificationsEnabled = true
                         meshConnectivityNotificationsEnabled = false
                         meshWipeNotificationsEnabled = true
-                        foreignSignalRiskEnabled = true
-                        foreignSignalAlertsEnabled = true
-                        foreignSignalAlertThreshold = ScanSettings.DEFAULT_FOREIGN_SIGNAL_ALERT_THRESHOLD
                         foreignDirectAcousticEnabled = false
                         foreignDirectMagneticEnabled = false
                         homePoint = null
@@ -2398,9 +2248,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
-                        foreignSignalRiskEnabled = ScanSettings.isForeignSignalRiskEnabled(context)
-                        foreignSignalAlertsEnabled = ScanSettings.isForeignSignalAlertsEnabled(context)
-                        foreignSignalAlertThreshold = ScanSettings.getForeignSignalAlertThreshold(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
                         foreignDirectMagneticEnabled = ScanSettings.isForeignDirectMagneticEnabled(context)
                         homePoint = ScanSettings.getHomePoint(context)
@@ -2427,7 +2274,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     readinessItems = readinessItems,
                     encounters = recentPipelineEncounters,
                     meshInsightEncounters = allPipelineEncounters,
-                    foreignSignalRiskEnabled = foreignSignalRiskEnabled,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
                     chainLinkEnabled = chainLinkEnabled,
@@ -2435,9 +2281,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     chainDeviceName = chainDeviceName,
                     chainSharedSecret = chainSharedSecret,
                     chainAutoSyncEnabled = chainAutoSyncEnabled,
-                    chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
-                    chainPersistentChannelEnabled = chainPersistentChannelEnabled,
-                    chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
                     chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                     liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     sourceScanIntervals = sourceScanIntervals,
@@ -2588,31 +2431,12 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         chainAutoSyncEnabled = enabled
                         ScanSettings.setChainAutoSyncEnabled(context, enabled)
                     },
-                    onChainAutoSyncIntervalChanged = { seconds ->
-                        chainAutoSyncIntervalSeconds = seconds
-                        ScanSettings.setChainAutoSyncIntervalSeconds(context, seconds)
-                    },
-                    onChainPersistentChannelChanged = { enabled ->
-                        chainPersistentChannelEnabled = enabled
-                        ScanSettings.setChainPersistentChannelEnabled(context, enabled)
-                        if (enabled) {
-                            app.container.chainLinkCoordinator.ensureServerRunning()
-                        }
-                        MeshForegroundServiceController.ensureState(context)
-                    },
-                    onChainHeartbeatIntervalChanged = { seconds ->
-                        chainHeartbeatIntervalSeconds = seconds
-                        ScanSettings.setChainHeartbeatIntervalSeconds(context, seconds)
-                    },
                     onChainSharePreciseLocationChanged = { enabled ->
                         chainSharePreciseLocationEnabled = enabled
                         ScanSettings.setChainSharePreciseLocationEnabled(context, enabled)
                     },
                     onRefreshPeers = {
                         app.container.chainLinkCoordinator.refreshPeers()
-                    },
-                    onSendLinkRequest = { host, message ->
-                        app.container.chainLinkCoordinator.sendLinkRequest(host, message)
                     },
                     onSyncNow = {
                         val stats = app.container.chainLinkCoordinator.syncNow()
@@ -3635,13 +3459,6 @@ private fun HomePage(
                             sensorStatusByName["Public Flight Radar"]
                         ),
                         HomeSensorToggle(
-                            "uwb",
-                            "UWB",
-                            "Ultra-wideband activity",
-                            sensorGateSettings.uwbEnabled,
-                            sensorStatusByName["UWB"]
-                        ),
-                        HomeSensorToggle(
                             "sdr",
                             "SDR",
                             "Software-defined radio ingest",
@@ -3746,7 +3563,6 @@ private fun <T> HomeResponsiveGrid(
 @Composable
 private fun AppSettingsPage(
     scanIntervalSeconds: Long,
-    liveMapUpdateIntervalSeconds: Long,
     mapClusteringEnabled: Boolean,
     mapClusterRangeLevel: Int,
     mapTrafficEnabled: Boolean,
@@ -3775,9 +3591,6 @@ private fun AppSettingsPage(
     magneticIncreaseNotificationsEnabled: Boolean,
     meshConnectivityNotificationsEnabled: Boolean,
     meshWipeNotificationsEnabled: Boolean,
-    foreignSignalRiskEnabled: Boolean,
-    foreignSignalAlertsEnabled: Boolean,
-    foreignSignalAlertThreshold: String,
     foreignDirectAcousticEnabled: Boolean,
     foreignDirectMagneticEnabled: Boolean,
     homePoint: ScanSettings.HomePoint?,
@@ -3793,15 +3606,11 @@ private fun AppSettingsPage(
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
     onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
     onMeshWipeNotificationsChanged: (Boolean) -> Unit,
-    onForeignSignalRiskEnabledChanged: (Boolean) -> Unit,
-    onForeignSignalAlertsEnabledChanged: (Boolean) -> Unit,
-    onForeignSignalAlertThresholdChanged: (String) -> Unit,
     onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
     onForeignDirectMagneticEnabledChanged: (Boolean) -> Unit,
     onSetHomePointFromCurrentLocation: () -> String,
     onSetHomePointRadiusMeters: (Double) -> String,
     onClearHomePoint: () -> String,
-    onLiveMapUpdateIntervalSelected: (Long) -> Unit,
     onMapClusteringEnabledChanged: (Boolean) -> Unit,
     onMapClusterRangeLevelSelected: (Int) -> Unit,
     onMapTrafficEnabledChanged: (Boolean) -> Unit,
@@ -3821,10 +3630,8 @@ private fun AppSettingsPage(
     onHardReset: suspend () -> String
 ) {
     val scope = rememberCoroutineScope()
-    var liveMapIntervalExpanded by remember { mutableStateOf(false) }
     var sourceIntervalExpandedFor by remember { mutableStateOf<String?>(null) }
     var allSourceIntervalsExpanded by remember { mutableStateOf(false) }
-    var foreignSignalThresholdExpanded by remember { mutableStateOf(false) }
     var homePointRadiusExpanded by remember { mutableStateOf(false) }
     var themeModeExpanded by remember { mutableStateOf(false) }
     var mapClusterRangeExpanded by remember { mutableStateOf(false) }
@@ -3889,7 +3696,7 @@ private fun AppSettingsPage(
                     Tab(
                         selected = selectedSettingsTab == index,
                         onClick = { selectedSettingsTab = index },
-                        text = { Text(label, fontSize = 12.sp) }
+                        text = { Text(label) }
                     )
                 }
             }
@@ -4243,31 +4050,6 @@ private fun AppSettingsPage(
                     }
                 }
             }
-            item {
-                Text("Live Map Updates", fontWeight = FontWeight.Bold)
-            }
-            item {
-                Text(
-                    "Current: every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)}",
-                    fontWeight = FontWeight.Medium
-                )
-            }
-            item {
-                Button(onClick = { liveMapIntervalExpanded = true }) {
-                    Text("Change live map interval")
-                }
-                DropdownMenu(expanded = liveMapIntervalExpanded, onDismissRequest = { liveMapIntervalExpanded = false }) {
-                    ScanSettings.ALLOWED_LIVE_MAP_UPDATE_INTERVAL_SECONDS.forEach { seconds ->
-                        DropdownMenuItem(
-                            text = { Text(formatLiveMapIntervalLabel(seconds)) },
-                            onClick = {
-                                onLiveMapUpdateIntervalSelected(seconds)
-                                liveMapIntervalExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
         }
         if (selectedSettingsTab == 2) {
             item {
@@ -4478,24 +4260,12 @@ private fun AppSettingsPage(
                 }
             }
             item {
-                Text("Foreign Signal Risk", fontWeight = FontWeight.Bold)
-            }
-            item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Enable foreign signal scoring")
-                            Switch(
-                                checked = foreignSignalRiskEnabled,
-                                onCheckedChange = onForeignSignalRiskEnabledChanged
-                            )
-                        }
+                        Text("Direct Signal Channels", fontWeight = FontWeight.Bold)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -4536,7 +4306,6 @@ private fun AppSettingsPage(
                             "flock",
                             "no_fly",
                             "nfc",
-                            "foreign",
                             "magnetic",
                             "mesh_connectivity",
                             "mesh_wipe"
@@ -4595,15 +4364,6 @@ private fun AppSettingsPage(
                                         )
                                     }
 
-                                    "foreign" -> {
-                                        Text("Foreign signal alerts")
-                                        Switch(
-                                            checked = foreignSignalAlertsEnabled,
-                                            onCheckedChange = onForeignSignalAlertsEnabledChanged,
-                                            enabled = foreignSignalRiskEnabled
-                                        )
-                                    }
-
                                     "magnetic" -> {
                                         Text("Magnetic disturbance alerts")
                                         Switch(
@@ -4630,33 +4390,6 @@ private fun AppSettingsPage(
                                 }
                             }
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Alert threshold")
-                            Button(
-                                onClick = { foreignSignalThresholdExpanded = true },
-                                enabled = foreignSignalRiskEnabled && foreignSignalAlertsEnabled
-                            ) {
-                                Text(foreignSignalAlertThreshold)
-                            }
-                            DropdownMenu(
-                                expanded = foreignSignalThresholdExpanded,
-                                onDismissRequest = { foreignSignalThresholdExpanded = false }
-                            ) {
-                                ScanSettings.ALLOWED_FOREIGN_SIGNAL_ALERT_THRESHOLDS.forEach { threshold ->
-                                    DropdownMenuItem(
-                                        text = { Text(threshold) },
-                                        onClick = {
-                                            onForeignSignalAlertThresholdChanged(threshold)
-                                            foreignSignalThresholdExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                        Text("HIGH triggers earlier foreign-signal alerts; CRITICAL reduces noise.")
                     }
                 }
             }
@@ -4924,162 +4657,12 @@ private fun AppSettingsPage(
 }
 
 @Composable
-private fun ChainMeshVisualizer(
-    snapshot: ChainMeshSnapshot,
-    sharePreciseLocationEnabled: Boolean
-) {
-    val context = LocalContext.current
-    val mapStyleOptions = rememberMapStyleOptionsForTheme()
-    val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
-    var localLocation by remember { mutableStateOf(LocationSnapshotProvider.read(context)) }
-    val hasLocalLocation = remember(localLocation) {
-        val currentLocation = localLocation
-        currentLocation != null && isValidLatLon(currentLocation.lat, currentLocation.lon)
-    }
-    val localLatLng = remember(localLocation, hasLocalLocation) {
-        val currentLocation = localLocation
-        if (hasLocalLocation && currentLocation != null) {
-            LatLng(currentLocation.lat, currentLocation.lon)
-        } else {
-            LatLng(37.4219999, -122.0840575)
-        }
-    }
-    val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(localLatLng, 16f)
-    }
-    val peers = remember(snapshot.peers) { snapshot.peers.take(24) }
-    val peersWithSharedLocation = remember(peers) {
-        peers.mapNotNull { peer ->
-            val lat = peer.sharedLocationLat
-            val lon = peer.sharedLocationLon
-            if (isValidLatLon(lat, lon)) {
-                peer to LatLng(lat!!, lon!!)
-            } else {
-                null
-            }
-        }
-    }
-    val peersWithoutSharedLocation = remember(peers, peersWithSharedLocation) {
-        val locatedIds = peersWithSharedLocation.map { it.first.nodeId }.toSet()
-        peers.filterNot { it.nodeId in locatedIds }
-    }
-    val relativeFallbackPositions = remember(peersWithoutSharedLocation, localLatLng) {
-        if (peersWithoutSharedLocation.isEmpty()) {
-            emptyList()
-        } else {
-            val step = 360.0 / peersWithoutSharedLocation.size.toDouble()
-            peersWithoutSharedLocation.mapIndexed { index, peer ->
-                val ringMeters = 65.0 + ((index / 8) * 25.0)
-                val bearing = step * index.toDouble()
-                peer to offsetLatLng(localLatLng, ringMeters, bearing)
-            }
-        }
-    }
-    val peerPositions = remember(peersWithSharedLocation, relativeFallbackPositions) {
-        val precise = peersWithSharedLocation.map { (peer, point) -> Triple(peer, point, true) }
-        val fallback = relativeFallbackPositions.map { (peer, point) -> Triple(peer, point, false) }
-        precise + fallback
-    }
-    val hasAnySharedPeerLocations = peersWithSharedLocation.isNotEmpty()
-
-    LaunchedEffect(context) {
-        LocationSnapshotProvider.observe(context, minUpdateIntervalMs = 5_000L).collect { latestLocation ->
-            localLocation = latestLocation
-        }
-    }
-
-    LaunchedEffect(localLatLng, peerPositions.size) {
-        if (peerPositions.isNotEmpty()) {
-            val bounds = LatLngBounds.Builder().apply {
-                if (hasLocalLocation || !hasAnySharedPeerLocations) {
-                    include(localLatLng)
-                }
-                peerPositions.forEach { (_, point, _) -> include(point) }
-            }.build()
-            runCatching {
-                cameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
-            }
-        } else {
-            runCatching {
-                cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(localLatLng, 16f))
-            }
-        }
-    }
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Mesh Visualizer", fontWeight = FontWeight.SemiBold)
-            if (!hasMapsApiKey) {
-                Text("Map overlay unavailable: Google Maps API key is missing.")
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp)
-                ) {
-                    GoogleMap(
-                        modifier = Modifier.fillMaxSize(),
-                        cameraPositionState = cameraPositionState,
-                        properties = MapProperties(mapStyleOptions = mapStyleOptions),
-                        uiSettings = MapUiSettings(
-                            zoomControlsEnabled = true,
-                            zoomGesturesEnabled = true,
-                            scrollGesturesEnabled = true,
-                            tiltGesturesEnabled = false,
-                            rotationGesturesEnabled = false,
-                            myLocationButtonEnabled = false
-                        )
-                    ) {
-                        if (hasLocalLocation || !hasAnySharedPeerLocations) {
-                            Marker(
-                                state = MarkerState(position = localLatLng),
-                                title = "This device",
-                                snippet = "${snapshot.localDeviceName} • ${snapshot.localNodeId.take(20)}",
-                                icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
-                            )
-                        }
-
-                        peerPositions.forEach { (peer, peerLatLng, isPrecise) ->
-                            if (hasLocalLocation || !isPrecise) {
-                                Polyline(
-                                    points = listOf(localLatLng, peerLatLng),
-                                    color = meshPeerColor(peer.state),
-                                    width = 4f
-                                )
-                            }
-                            Marker(
-                                state = MarkerState(position = peerLatLng),
-                                title = (peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId).take(26),
-                                snippet = "${peer.state.name} • ${peer.host.take(32)} • ${if (isPrecise) "shared precise" else "relative"}",
-                                icon = BitmapDescriptorFactory.defaultMarker(meshPeerMarkerHue(peer.state))
-                            )
-                        }
-                    }
-                }
-            }
-            if (sharePreciseLocationEnabled && hasAnySharedPeerLocations) {
-                Text("Mesh overlay includes peer-shared precise locations where available; remaining peers are shown relatively.")
-            } else if (sharePreciseLocationEnabled) {
-                Text("Precise sharing is enabled on this device. Peer markers remain relative until peers enable sharing too.")
-            } else {
-                Text("Relative mesh overlay: peers are shown topologically around your location.")
-            }
-            if (!hasLocalLocation) {
-                Text("Local location unavailable on this device right now; some link lines may be hidden until location is available.")
-            }
-            Text("Blue center is this device (${snapshot.localDeviceName}). Green nodes are connected peers.")
-        }
-    }
-}
-
-@Composable
 private fun DetectionPage(
     initialTabRequest: Int?,
     onInitialTabRequestHandled: () -> Unit,
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     meshInsightEncounters: List<Encounter>,
-    foreignSignalRiskEnabled: Boolean,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     chainLinkEnabled: Boolean,
@@ -5087,9 +4670,6 @@ private fun DetectionPage(
     chainDeviceName: String,
     chainSharedSecret: String,
     chainAutoSyncEnabled: Boolean,
-    chainAutoSyncIntervalSeconds: Long,
-    chainPersistentChannelEnabled: Boolean,
-    chainHeartbeatIntervalSeconds: Long,
     chainSharePreciseLocationEnabled: Boolean,
     liveMapUpdateIntervalSeconds: Long,
     sourceScanIntervals: Map<String, Long>,
@@ -5117,12 +4697,8 @@ private fun DetectionPage(
     onChainDeviceNameChanged: (String) -> Unit,
     onChainSharedSecretChanged: (String) -> Unit,
     onChainAutoSyncChanged: (Boolean) -> Unit,
-    onChainAutoSyncIntervalChanged: (Long) -> Unit,
-    onChainPersistentChannelChanged: (Boolean) -> Unit,
-    onChainHeartbeatIntervalChanged: (Long) -> Unit,
     onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
-    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
     onSyncNow: suspend () -> String,
     onWipeMeshData: suspend () -> String
 ) {
@@ -5152,12 +4728,12 @@ private fun DetectionPage(
     var flightMapRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
-    val tabs = listOf("Status", "Device", "Flock", "Signal", "Map", "Mesh")
+    val tabs = listOf("Status", "Device", "Flock", "Map", "Mesh")
     var mapLiveNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
-    val mapLiveTickerEnabled = selectedTab == 4 && (
+    val mapLiveTickerEnabled = selectedTab == 3 && (
         (selectedMapSubTab == 0 && liveOnlyOnDeviceMap) ||
-            (selectedMapSubTab == 2 && liveOnlyOnBluetoothMap)
+            (selectedMapSubTab == 1 && liveOnlyOnBluetoothMap)
         )
 
     LaunchedEffect(mapLiveTickerEnabled, liveMapUpdateIntervalSeconds) {
@@ -5174,9 +4750,9 @@ private fun DetectionPage(
         onInitialTabRequestHandled()
     }
 
-    val isDeviceLocationTabActive = selectedTab == 4 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)
-    val isDeviceMapActive = selectedTab == 4 && selectedMapSubTab == 0
-    val isBluetoothMapActive = selectedTab == 4 && selectedMapSubTab == 2
+    val isDeviceLocationTabActive = selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 1)
+    val isDeviceMapActive = selectedTab == 3 && selectedMapSubTab == 0
+    val isBluetoothMapActive = selectedTab == 3 && selectedMapSubTab == 1
     val useFullHistoryForActiveDeviceLocationMap =
         (isDeviceMapActive && !liveOnlyOnDeviceMap && !movingOnlyOnDeviceMap && !sinceSnapshotOnlyOnDeviceMap) ||
             (isBluetoothMapActive && !liveOnlyOnBluetoothMap && !movingOnlyOnBluetoothMap && !sinceSnapshotOnlyOnBluetoothMap)
@@ -5189,15 +4765,18 @@ private fun DetectionPage(
     } else {
         null
     }
-    val foreignSignalRisk = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
-        if (selectedTab == 0 && foreignSignalRiskEnabled) analyzeForeignSignalRisk(meshInsightEncounters) else null
+    val signalIntel = remember(selectedTab, meshInsightEncounters) {
+        if (selectedTab == 0) buildSignalIntelSnapshot(meshInsightEncounters) else null
     }
-    val signalIntel = remember(selectedTab, meshInsightEncounters, foreignSignalRiskEnabled) {
-        if (selectedTab == 3) buildSignalIntelSnapshot(meshInsightEncounters, foreignSignalRiskEnabled) else null
+    val missingReadinessItems = remember(readinessItems) {
+        readinessItems.filter { it.isMissing }
+    }
+    val readyReadinessCount = remember(readinessItems) {
+        readinessItems.count { !it.isMissing }
     }
     val flightDisplayRadiusMeters = flightMapRadiusMiles.coerceIn(10, 1000) * 1609.344
     val topSpeedRecords = remember(selectedTab, selectedMapSubTab, meshInsightEncounters.size) {
-        if (selectedTab == 4 && (selectedMapSubTab == 0 || selectedMapSubTab == 2)) {
+        if (selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 1)) {
             DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
         } else {
             emptyMap()
@@ -5344,7 +4923,7 @@ private fun DetectionPage(
         mutableStateOf(startupPrewarmedDevicePins)
     }
 
-    val flightMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 1) {
+    val flightMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 2) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5352,7 +4931,7 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val deviceMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 0) {
+    val deviceMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 0) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5360,7 +4939,7 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val bluetoothMapCurrentLocation by if (selectedTab == 4 && selectedMapSubTab == 2) {
+    val bluetoothMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 1) {
         LocationSnapshotProvider.observe(
             context,
             minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
@@ -5369,10 +4948,10 @@ private fun DetectionPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
 
-    val isFlightMapActive = selectedTab == 4 && selectedMapSubTab == 1
+    val isFlightMapActive = selectedTab == 3 && selectedMapSubTab == 2
     val activeMapLocation = when (selectedMapSubTab) {
-        1 -> flightMapCurrentLocation
-        2 -> bluetoothMapCurrentLocation
+        1 -> bluetoothMapCurrentLocation
+        2 -> flightMapCurrentLocation
         else -> deviceMapCurrentLocation
     }
     val noFlyOverlayLocationKey = remember(activeMapLocation) {
@@ -5407,7 +4986,7 @@ private fun DetectionPage(
     }
 
     LaunchedEffect(selectedTab, selectedMapSubTab, noFlyOverlayLocationKey, mapNoFlyZonesEnabled) {
-        if (selectedTab != 4) {
+        if (selectedTab != 3) {
             return@LaunchedEffect
         }
 
@@ -5753,7 +5332,7 @@ private fun DetectionPage(
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
         ) {
             Text("Detection", style = MaterialTheme.typography.headlineMedium)
-            if (selectedTab == 4) {
+            if (selectedTab == 3) {
                 Text(
                     text = "● LIVE",
                     color = Color(0xFF2E7D32),
@@ -5766,7 +5345,7 @@ private fun DetectionPage(
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
-                    text = { Text(title, fontSize = 12.sp) }
+                    text = { Text(title) }
                 )
             }
         }
@@ -5777,107 +5356,71 @@ private fun DetectionPage(
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
                 item {
-                    Text("Recommended settings and permissions for stronger detections.")
-                }
-                item {
-                    Button(onClick = onRefresh) {
-                        Text("Refresh Readiness")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("Permissions and Readiness", fontWeight = FontWeight.Bold)
+                        TextButton(onClick = onRefresh) {
+                            Text("Refresh")
+                        }
                     }
                 }
                 item {
-                    if (!foreignSignalRiskEnabled) {
-                        Card(modifier = Modifier.fillMaxWidth()) {
+                    signalIntel?.let {
+                        DetectionSignalIntelSection(intel = it)
+                    }
+                }
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = "Foreign Signal Risk: disabled in settings.",
-                                modifier = Modifier.padding(12.dp)
+                                text = "${missingReadinessItems.size} need attention • $readyReadinessCount ready",
+                                fontWeight = FontWeight.Medium
                             )
-                        }
-                    } else if (foreignSignalRisk == null) {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                text = "Foreign Signal Risk: waiting for enough recent samples.",
-                                modifier = Modifier.padding(12.dp)
-                            )
-                        }
-                    } else {
-                        val riskColor = when (foreignSignalRisk.level) {
-                            ForeignSignalRiskLevel.CRITICAL -> Color(0xFFB3261E)
-                            ForeignSignalRiskLevel.HIGH -> Color(0xFFD84315)
-                            ForeignSignalRiskLevel.ELEVATED -> Color(0xFFE65100)
-                            ForeignSignalRiskLevel.QUIET -> Color(0xFF2E7D32)
-                        }
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = "Foreign Signal Risk: ${foreignSignalRisk.level.name} (${foreignSignalRisk.score}/100)",
-                                    color = riskColor,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(foreignSignalRisk.summary)
-                                Text(
-                                    "Confidence ${String.format(Locale.US, "%.0f%%", foreignSignalRisk.confidence * 100.0)} " +
-                                        "| Window ${String.format(Locale.US, "%.1f min", foreignSignalRisk.windowMinutes)} " +
-                                        "| Samples ${foreignSignalRisk.sampleCount}"
-                                )
-                                Text(
-                                    "Cell ${formatRiskScorePct(foreignSignalRisk.cellularAnomalyScore)} | " +
-                                        "Wi-Fi ${formatRiskScorePct(foreignSignalRisk.wifiAnomalyScore)} | " +
-                                        "BLE ${formatRiskScorePct(foreignSignalRisk.bleAnomalyScore)}"
-                                )
-                                Text(
-                                    "GNSS ${formatRiskScorePct(foreignSignalRisk.gnssInterferenceScore)} | " +
-                                        "NFC ${formatRiskScorePct(foreignSignalRisk.nfcActivityScore)} | " +
-                                        "UWB ${formatRiskScorePct(foreignSignalRisk.uwbActivityScore)} | " +
-                                        "RF Texture ${formatRiskScorePct(foreignSignalRisk.rfTextureScore)}"
-                                )
-                                Text(
-                                    "Acoustic ${when {
-                                        foreignSignalRisk.directAcousticObserved -> "direct"
-                                        else -> "proxy"
-                                    }} ${formatRiskScorePct(foreignSignalRisk.acousticProxyScore)} | " +
-                                        "Magnetic ${if (foreignSignalRisk.directMagneticObserved) "direct" else "proxy"} ${formatRiskScorePct(foreignSignalRisk.magneticProxyScore)}"
-                                )
-                                if (foreignSignalRisk.unavailableSignals.isNotEmpty()) {
-                                    Text(
-                                        "Unavailable on current pipeline: ${foreignSignalRisk.unavailableSignals.joinToString(", ")}",
-                                        color = Color(0xFF5F6368)
-                                    )
-                                }
+                            if (missingReadinessItems.isEmpty()) {
+                                Text("All good", color = Color(0xFF2E7D32), fontWeight = FontWeight.SemiBold)
+                            } else {
+                                Text("Action needed", color = Color(0xFFB3261E), fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
                 }
-                item {
-                    HomeResponsiveGrid(
-                        items = readinessItems,
-                        twoColumnMinWidth = 760.dp,
-                        threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
-                    ) { item ->
-                        val statusText = if (item.isMissing) "MISSING" else "READY"
-                        val statusColor = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                if (missingReadinessItems.isNotEmpty()) {
+                    item {
+                        HomeResponsiveGrid(
+                            items = missingReadinessItems,
+                            twoColumnMinWidth = 760.dp,
+                            threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+                        ) { item ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Text(item.title, fontWeight = FontWeight.Bold)
-                                    Text(statusText, color = statusColor, fontWeight = FontWeight.Bold)
-                                }
-                                Text("Current: ${item.currentValue}")
-                                Text("Recommended: ${item.recommendedValue}")
-                                Button(onClick = { onOpenReadinessSetting(item) }) {
-                                    Text(item.openSettingsLabel)
+                                    Text(item.title, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "Now: ${item.currentValue}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "Set: ${item.recommendedValue}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    TextButton(onClick = { onOpenReadinessSetting(item) }) {
+                                        Text(item.openSettingsLabel)
+                                    }
                                 }
                             }
                         }
@@ -5886,7 +5429,6 @@ private fun DetectionPage(
             }
         } else if (selectedTab == 1) {
             DevicesPage(
-                recentEncounters = encounters,
                 allEncounters = meshInsightEncounters,
                 approachDetectionEnabled = approachDetectionEnabled,
                 ownedDeviceKeys = ownedDeviceKeys,
@@ -5896,18 +5438,9 @@ private fun DetectionPage(
             )
         } else if (selectedTab == 2) {
             FlocksPage(
-                recentEncounters = encounters,
                 allEncounters = meshInsightEncounters
             )
         } else if (selectedTab == 3) {
-            signalIntel?.let {
-                DetectionSignalIntelPage(
-                    intel = it,
-                    riskEnabled = foreignSignalRiskEnabled,
-                    onRefresh = onRefresh
-                )
-            }
-        } else if (selectedTab == 4) {
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -5921,12 +5454,12 @@ private fun DetectionPage(
                     Tab(
                         selected = selectedMapSubTab == 1,
                         onClick = { selectedMapSubTab = 1 },
-                        text = { Text("Aircraft Map") }
+                        text = { Text("Bluetooth Map") }
                     )
                     Tab(
                         selected = selectedMapSubTab == 2,
                         onClick = { selectedMapSubTab = 2 },
-                        text = { Text("Bluetooth Map") }
+                        text = { Text("Aircraft Map") }
                     )
                 }
 
@@ -6054,6 +5587,121 @@ private fun DetectionPage(
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
                 } else if (selectedMapSubTab == 1) {
+                    val bluetoothMapPins by produceState(
+                        estimatedDeviceLocationPins,
+                        bluetoothMapPinLimit,
+                        liveOnlyOnBluetoothMap,
+                        mapLiveNowEpochMs,
+                        movingOnlyOnBluetoothMap,
+                        sinceSnapshotOnlyOnBluetoothMap,
+                        bluetoothMapSnapshotEpochMs
+                    ) {
+                        value = withContext(Dispatchers.Default) {
+                            val nowEpochMs = mapLiveNowEpochMs
+                            estimatedDeviceLocationPins
+                                .asSequence()
+                                .filter { pin ->
+                                    pin.source == EncounterSource.BLUETOOTH_LE.name ||
+                                        pin.source == EncounterSource.BLUETOOTH_CLASSIC.name ||
+                                        pin.source == EncounterSource.BLUETOOTH_LE_SWEEP.name
+                                }
+                                .filter { pin ->
+                                    if (!liveOnlyOnBluetoothMap) {
+                                        true
+                                    } else {
+                                        isMapPinLiveNow(
+                                            pin = pin,
+                                            nowEpochMs = nowEpochMs,
+                                            sourceScanIntervals = sourceScanIntervals,
+                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                                        )
+                                    }
+                                }
+                                .filter { pin ->
+                                    if (!movingOnlyOnBluetoothMap) true else pin.motionBadge == "MOVING"
+                                }
+                                .filter { pin ->
+                                    if (!sinceSnapshotOnlyOnBluetoothMap) {
+                                        true
+                                    } else {
+                                        val snapshotEpoch = bluetoothMapSnapshotEpochMs
+                                        snapshotEpoch == null || pin.timestampEpochMs >= snapshotEpoch
+                                    }
+                                }
+                                .toList()
+                                .let { pins ->
+                                    val preLimit = (bluetoothMapPinLimit.coerceAtLeast(1) * 2)
+                                        .coerceAtMost(MAP_RENDER_PIN_LIMIT_MID)
+                                    val bounded = selectVisiblePinsWithSourceCoverage(
+                                        pins = pins,
+                                        pinLimit = preLimit
+                                    )
+                                    runCatching {
+                                        spreadOverlappingMapPinsMinimal(
+                                            pins = bounded,
+                                            minSeparationMeters = 1.2
+                                        )
+                                    }.getOrElse { bounded }
+                                }
+                        }
+                    }
+
+                    DetectionMapPage(
+                        mapTitle = "Bluetooth Map",
+                        mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
+                        currentLocationOverride = bluetoothMapCurrentLocation,
+                        noFlyZones = noFlyZoneOverlays,
+                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                        pins = bluetoothMapPins,
+                        pinLimit = bluetoothMapPinLimit,
+                        onPinLimitChange = { bluetoothMapPinLimit = it },
+                        mapClusteringEnabled = mapClusteringEnabled,
+                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                        mapClusterRangeLevel = mapClusterRangeLevel,
+                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                        onPinDetailsClick = { pin ->
+                            if (pin.motionBadge == "MOVING") {
+                                onMovingDeviceMapPinClick(pin.source, pin.primaryId)
+                            } else {
+                                onDeviceMapPinClick(
+                                    pin.source,
+                                    pin.primaryId,
+                                    pin.position.latitude,
+                                    pin.position.longitude,
+                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
+                                )
+                            }
+                        },
+                        liveUpdatesAllowed = true,
+                        useSourceOnlyPinColors = true,
+                        enableVerticalScroll = true,
+                        showLiveOnlyControl = true,
+                        liveOnlyEnabled = liveOnlyOnBluetoothMap,
+                        onLiveOnlyEnabledChange = { liveOnlyOnBluetoothMap = it },
+                        identityModeEnabled = identityModeOnBluetoothMap,
+                        onIdentityModeEnabledChange = { identityModeOnBluetoothMap = it },
+                        showMovingOnlyControl = true,
+                        movingOnlyEnabled = movingOnlyOnBluetoothMap,
+                        onMovingOnlyEnabledChange = { movingOnlyOnBluetoothMap = it },
+                        showSinceSnapshotControl = true,
+                        sinceSnapshotEnabled = sinceSnapshotOnlyOnBluetoothMap,
+                        snapshotEpochMs = bluetoothMapSnapshotEpochMs,
+                        onSinceSnapshotEnabledChange = { enabled ->
+                            sinceSnapshotOnlyOnBluetoothMap = enabled
+                            if (enabled && bluetoothMapSnapshotEpochMs == null) {
+                                bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
+                            }
+                        },
+                        onCaptureSnapshot = {
+                            bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
+                        },
+                        showTrackerFamilyBadge = true,
+                        onLiveCollect = onLiveCollect,
+                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                    )
+                } else {
                     val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
                         ScanSettings.isAviationPublicSensorEnabled(context)
                     if (!flightSensorsEnabled) {
@@ -6173,146 +5821,23 @@ private fun DetectionPage(
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
                     }
-                } else {
-                    val bluetoothMapPins by produceState(
-                        estimatedDeviceLocationPins,
-                        bluetoothMapPinLimit,
-                        liveOnlyOnBluetoothMap,
-                        mapLiveNowEpochMs,
-                        movingOnlyOnBluetoothMap,
-                        sinceSnapshotOnlyOnBluetoothMap,
-                        bluetoothMapSnapshotEpochMs
-                    ) {
-                        value = withContext(Dispatchers.Default) {
-                            val nowEpochMs = mapLiveNowEpochMs
-                            estimatedDeviceLocationPins
-                                .asSequence()
-                                .filter { pin ->
-                                    pin.source == EncounterSource.BLUETOOTH_LE.name ||
-                                        pin.source == EncounterSource.BLUETOOTH_CLASSIC.name ||
-                                        pin.source == EncounterSource.BLUETOOTH_LE_SWEEP.name
-                                }
-                                .filter { pin ->
-                                    if (!liveOnlyOnBluetoothMap) {
-                                        true
-                                    } else {
-                                        isMapPinLiveNow(
-                                            pin = pin,
-                                            nowEpochMs = nowEpochMs,
-                                            sourceScanIntervals = sourceScanIntervals,
-                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                                        )
-                                    }
-                                }
-                                .filter { pin ->
-                                    if (!movingOnlyOnBluetoothMap) true else pin.motionBadge == "MOVING"
-                                }
-                                .filter { pin ->
-                                    if (!sinceSnapshotOnlyOnBluetoothMap) {
-                                        true
-                                    } else {
-                                        val snapshotEpoch = bluetoothMapSnapshotEpochMs
-                                        snapshotEpoch == null || pin.timestampEpochMs >= snapshotEpoch
-                                    }
-                                }
-                                .toList()
-                                .let { pins ->
-                                    val preLimit = (bluetoothMapPinLimit.coerceAtLeast(1) * 2)
-                                        .coerceAtMost(MAP_RENDER_PIN_LIMIT_MID)
-                                    val bounded = selectVisiblePinsWithSourceCoverage(
-                                        pins = pins,
-                                        pinLimit = preLimit
-                                    )
-                                    runCatching {
-                                        spreadOverlappingMapPinsMinimal(
-                                            pins = bounded,
-                                            minSeparationMeters = 1.2
-                                        )
-                                    }.getOrElse { bounded }
-                                }
-                        }
-                    }
-
-                    DetectionMapPage(
-                        mapTitle = "Bluetooth Map",
-                        mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
-                        currentLocationOverride = bluetoothMapCurrentLocation,
-                        noFlyZones = noFlyZoneOverlays,
-                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
-                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
-                        pins = bluetoothMapPins,
-                        pinLimit = bluetoothMapPinLimit,
-                        onPinLimitChange = { bluetoothMapPinLimit = it },
-                        mapClusteringEnabled = mapClusteringEnabled,
-                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
-                        mapClusterRangeLevel = mapClusterRangeLevel,
-                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
-                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
-                        onPinDetailsClick = { pin ->
-                            if (pin.motionBadge == "MOVING") {
-                                onMovingDeviceMapPinClick(pin.source, pin.primaryId)
-                            } else {
-                                onDeviceMapPinClick(
-                                    pin.source,
-                                    pin.primaryId,
-                                    pin.position.latitude,
-                                    pin.position.longitude,
-                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
-                                )
-                            }
-                        },
-                        liveUpdatesAllowed = true,
-                        useSourceOnlyPinColors = true,
-                        enableVerticalScroll = true,
-                        showLiveOnlyControl = true,
-                        liveOnlyEnabled = liveOnlyOnBluetoothMap,
-                        onLiveOnlyEnabledChange = { liveOnlyOnBluetoothMap = it },
-                        identityModeEnabled = identityModeOnBluetoothMap,
-                        onIdentityModeEnabledChange = { identityModeOnBluetoothMap = it },
-                        showMovingOnlyControl = true,
-                        movingOnlyEnabled = movingOnlyOnBluetoothMap,
-                        onMovingOnlyEnabledChange = { movingOnlyOnBluetoothMap = it },
-                        showSinceSnapshotControl = true,
-                        sinceSnapshotEnabled = sinceSnapshotOnlyOnBluetoothMap,
-                        snapshotEpochMs = bluetoothMapSnapshotEpochMs,
-                        onSinceSnapshotEnabledChange = { enabled ->
-                            sinceSnapshotOnlyOnBluetoothMap = enabled
-                            if (enabled && bluetoothMapSnapshotEpochMs == null) {
-                                bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
-                            }
-                        },
-                        onCaptureSnapshot = {
-                            bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
-                        },
-                        showTrackerFamilyBadge = true,
-                        onLiveCollect = onLiveCollect,
-                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                    )
                 }
             }
         } else {
             DetectionMeshNetworkPage(
-                encounters = meshInsightEncounters,
                 chainLinkEnabled = chainLinkEnabled,
                 chainNodeId = chainNodeId,
                 chainDeviceName = chainDeviceName,
                 chainSharedSecret = chainSharedSecret,
                 chainAutoSyncEnabled = chainAutoSyncEnabled,
-                chainAutoSyncIntervalSeconds = chainAutoSyncIntervalSeconds,
-                chainPersistentChannelEnabled = chainPersistentChannelEnabled,
-                chainHeartbeatIntervalSeconds = chainHeartbeatIntervalSeconds,
                 chainSharePreciseLocationEnabled = chainSharePreciseLocationEnabled,
                 chainMeshSnapshot = chainMeshSnapshot,
                 onChainLinkChanged = onChainLinkChanged,
                 onChainDeviceNameChanged = onChainDeviceNameChanged,
                 onChainSharedSecretChanged = onChainSharedSecretChanged,
                 onChainAutoSyncChanged = onChainAutoSyncChanged,
-                onChainAutoSyncIntervalChanged = onChainAutoSyncIntervalChanged,
-                onChainPersistentChannelChanged = onChainPersistentChannelChanged,
-                onChainHeartbeatIntervalChanged = onChainHeartbeatIntervalChanged,
                 onChainSharePreciseLocationChanged = onChainSharePreciseLocationChanged,
                 onRefreshPeers = onRefreshPeers,
-                onSendLinkRequest = onSendLinkRequest,
                 onSyncNow = onSyncNow,
                 onWipeMeshData = onWipeMeshData
             )
@@ -6325,9 +5850,6 @@ private data class SignalIntelSnapshot(
     val nfcEncounterCount: Int,
     val nfcUniqueTagCount: Int,
     val lastNfcEpochMs: Long?,
-    val uwbEncounterCount: Int,
-    val uwbUniqueDeviceCount: Int,
-    val lastUwbEpochMs: Long?,
     val gnssLocationSampleCount: Int,
     val gnssInterferenceScore: Double,
     val rfTextureScore: Double,
@@ -6338,14 +5860,11 @@ private data class SignalIntelSnapshot(
     val magneticDirectSampleCount: Int,
     val magneticDirectTotalCount: Int,
     val lastMagneticMagnitudeMicroTesla: Double?,
-    val foreignRiskScore: Int?,
-    val foreignRiskLevel: ForeignSignalRiskLevel?,
     val knowledgeGaps: List<String>
 )
 
 private fun buildSignalIntelSnapshot(
-    encounters: List<Encounter>,
-    foreignSignalRiskEnabled: Boolean
+    encounters: List<Encounter>
 ): SignalIntelSnapshot {
     val window = selectRecentEncounterWindow(
         encounters = encounters,
@@ -6355,9 +5874,6 @@ private fun buildSignalIntelSnapshot(
 
     val nfcEncounters = window.filter { it.source == EncounterSource.NFC }
     val lastNfcEpochMs = nfcEncounters.maxOfOrNull { it.timestampEpochMs }
-
-    val uwbEncounters = window.filter { it.source == EncounterSource.UWB }
-    val lastUwbEpochMs = uwbEncounters.maxOfOrNull { it.timestampEpochMs }
 
     val gnssLocations = window.count { isValidLatLon(it.lat, it.lon) }
     val gnssScore = computeGnssInterferenceScore(window)
@@ -6387,12 +5903,7 @@ private fun buildSignalIntelSnapshot(
         ?.optDouble("magnitudeMicroTesla", Double.NaN)
         ?.takeIf { it.isFinite() }
 
-    val foreignRisk = if (foreignSignalRiskEnabled) analyzeForeignSignalRisk(window) else null
-
     val gaps = buildList {
-        if (uwbEncounters.isEmpty()) {
-            add("No UWB encounters in recent window. Verify UWB source toggle or ingest feed.")
-        }
         if (nfcEncounters.isEmpty()) {
             add("No NFC encounters in recent window. NFC is event-driven and appears after Android tag intents are received.")
         }
@@ -6419,9 +5930,6 @@ private fun buildSignalIntelSnapshot(
         nfcEncounterCount = nfcEncounters.size,
         nfcUniqueTagCount = nfcEncounters.map { it.primaryId }.toSet().size,
         lastNfcEpochMs = lastNfcEpochMs,
-        uwbEncounterCount = uwbEncounters.size,
-        uwbUniqueDeviceCount = uwbEncounters.map { it.primaryId }.toSet().size,
-        lastUwbEpochMs = lastUwbEpochMs,
         gnssLocationSampleCount = gnssLocations,
         gnssInterferenceScore = gnssScore,
         rfTextureScore = rfTextureScore,
@@ -6432,121 +5940,90 @@ private fun buildSignalIntelSnapshot(
         magneticDirectSampleCount = magneticDirect.size,
         magneticDirectTotalCount = magneticDirectTotalCount,
         lastMagneticMagnitudeMicroTesla = lastMagneticMagnitudeMicroTesla,
-        foreignRiskScore = foreignRisk?.score,
-        foreignRiskLevel = foreignRisk?.level,
         knowledgeGaps = gaps
     )
 }
 
 @Composable
-private fun DetectionSignalIntelPage(
-    intel: SignalIntelSnapshot,
-    riskEnabled: Boolean,
-    onRefresh: () -> Unit
+private fun DetectionSignalIntelSection(
+    intel: SignalIntelSnapshot
 ) {
     val signalPanelKeys = listOf(
         "nfc",
         "window",
-        "uwb",
         "gnss_rf",
         "direct_acoustic",
         "direct_magnetic"
     )
 
-    LazyColumn(
+    Column(
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Signal Intel", style = MaterialTheme.typography.headlineSmall)
-                Button(onClick = onRefresh) {
-                    Text("Refresh")
-                }
-            }
-        }
-        item {
-            HomeResponsiveGrid(
-                items = signalPanelKeys,
-                twoColumnMinWidth = 760.dp,
-                threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
-            ) { panelKey ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        when (panelKey) {
-                            "nfc" -> {
-                                Text("NFC", fontWeight = FontWeight.Bold)
-                                Text("Encounters: ${intel.nfcEncounterCount}")
-                                Text("Unique tags/devices: ${intel.nfcUniqueTagCount}")
-                                Text("Last seen: ${intel.lastNfcEpochMs?.let(::formatEpoch) ?: "n/a"}")
-                            }
-
-                            "window" -> {
-                                Text("Window", fontWeight = FontWeight.Bold)
-                                Text("Recent encounters sampled (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.encounterWindowCount}")
-                                if (riskEnabled && intel.foreignRiskScore != null && intel.foreignRiskLevel != null) {
-                                    Text("Foreign signal score: ${intel.foreignRiskScore}/100 (${intel.foreignRiskLevel.name})")
-                                } else {
-                                    Text("Foreign signal scoring disabled in settings.")
-                                }
-                            }
-
-                            "uwb" -> {
-                                Text("UWB", fontWeight = FontWeight.Bold)
-                                Text("Encounters: ${intel.uwbEncounterCount}")
-                                Text("Unique devices: ${intel.uwbUniqueDeviceCount}")
-                                Text("Last seen: ${intel.lastUwbEpochMs?.let(::formatEpoch) ?: "n/a"}")
-                            }
-
-                            "gnss_rf" -> {
-                                Text("GNSS and RF Texture", fontWeight = FontWeight.Bold)
-                                Text("GNSS location samples: ${intel.gnssLocationSampleCount}")
-                                Text("GNSS interference score: ${formatRiskScorePct(intel.gnssInterferenceScore)}")
-                                Text("RF texture score: ${formatRiskScorePct(intel.rfTextureScore)}")
-                                Text("RF RSSI samples: ${intel.rfRssiSampleCount}")
-                            }
-
-                            "direct_acoustic" -> {
-                                Text("Direct Acoustic", fontWeight = FontWeight.Bold)
-                                Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticDirectSampleCount}")
-                                Text("Total stored: ${intel.acousticDirectTotalCount}")
-                                Text(
-                                    "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
-                                )
-                            }
-
-                            else -> {
-                                Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
-                                Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.magneticDirectSampleCount}")
-                                Text("Total stored: ${intel.magneticDirectTotalCount}")
-                                Text(
-                                    "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        item {
+        Text("Signal", style = MaterialTheme.typography.titleLarge)
+        HomeResponsiveGrid(
+            items = signalPanelKeys,
+            twoColumnMinWidth = 760.dp,
+            threeColumnMinWidth = HOME_THREE_COLUMN_MIN_WIDTH
+        ) { panelKey ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text("Knowledge Gaps", fontWeight = FontWeight.Bold)
-                    if (intel.knowledgeGaps.isEmpty()) {
-                        Text("No major coverage gaps detected in the current sampling window.")
-                    } else {
-                        intel.knowledgeGaps.forEach { gap ->
-                            Text("- $gap")
+                    when (panelKey) {
+                        "nfc" -> {
+                            Text("NFC", fontWeight = FontWeight.Bold)
+                            Text("Encounters: ${intel.nfcEncounterCount}")
+                            Text("Unique tags/devices: ${intel.nfcUniqueTagCount}")
+                            Text("Last seen: ${intel.lastNfcEpochMs?.let(::formatEpoch) ?: "n/a"}")
                         }
+
+                        "window" -> {
+                            Text("Window", fontWeight = FontWeight.Bold)
+                            Text("Recent encounters sampled (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.encounterWindowCount}")
+                        }
+
+                        "gnss_rf" -> {
+                            Text("GNSS and RF Texture", fontWeight = FontWeight.Bold)
+                            Text("GNSS location samples: ${intel.gnssLocationSampleCount}")
+                            Text("GNSS interference score: ${formatRiskScorePct(intel.gnssInterferenceScore)}")
+                            Text("RF texture score: ${formatRiskScorePct(intel.rfTextureScore)}")
+                            Text("RF RSSI samples: ${intel.rfRssiSampleCount}")
+                        }
+
+                        "direct_acoustic" -> {
+                            Text("Direct Acoustic", fontWeight = FontWeight.Bold)
+                            Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.acousticDirectSampleCount}")
+                            Text("Total stored: ${intel.acousticDirectTotalCount}")
+                            Text(
+                                "Latest RMS: ${intel.lastAcousticRmsDbFs?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "n/a"}"
+                            )
+                        }
+
+                        else -> {
+                            Text("Direct Magnetometer", fontWeight = FontWeight.Bold)
+                            Text("Samples (last ${SIGNAL_INTEL_WINDOW_MINUTES}m): ${intel.magneticDirectSampleCount}")
+                            Text("Total stored: ${intel.magneticDirectTotalCount}")
+                            Text(
+                                "Latest magnitude: ${intel.lastMagneticMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"}"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("Knowledge Gaps", fontWeight = FontWeight.Bold)
+                if (intel.knowledgeGaps.isEmpty()) {
+                    Text("No major coverage gaps detected in the current sampling window.")
+                } else {
+                    intel.knowledgeGaps.forEach { gap ->
+                        Text("- $gap")
                     }
                 }
             }
@@ -6602,7 +6079,6 @@ private fun LogsHubPage(
                 )
             } else {
                 EncountersPage(
-                    recentEncounters = recentEncounters,
                     allEncounters = allEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     onEncounterClick = onEncounterClick
@@ -6626,13 +6102,11 @@ private fun DetectionLogsPage(
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
     val noFlyCount = remember(logs) { logs.count { it.type == AlertLogType.NO_FLY_PASS_THROUGH } }
-    val foreignCount = remember(logs) { logs.count { it.type == AlertLogType.FOREIGN_SIGNAL } }
     val tabLabels = listOf(
         "All (${logs.size})",
         "Approach ($approachCount)",
         "Tracker ($trackerCount)",
-        "No-Fly ($noFlyCount)",
-        "Foreign ($foreignCount)"
+        "No-Fly ($noFlyCount)"
     )
     val safeSelectedLogTab = selectedLogTab.coerceIn(0, tabLabels.lastIndex)
 
@@ -6643,7 +6117,6 @@ private fun DetectionLogsPage(
                     1 -> entry.type == AlertLogType.APPROACH
                     2 -> entry.type == AlertLogType.TRACKER
                     3 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
-                    4 -> entry.type == AlertLogType.FOREIGN_SIGNAL
                     else -> true
                 }
             }
@@ -6691,7 +6164,6 @@ private fun DetectionLogsPage(
                 AssistChip(onClick = { }, label = { Text("Approach $approachCount") })
                 AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
                 AssistChip(onClick = { }, label = { Text("No-Fly $noFlyCount") })
-                AssistChip(onClick = { }, label = { Text("Foreign $foreignCount") })
             }
         }
         item {
@@ -6725,19 +6197,16 @@ private fun DetectionLogsPage(
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
                 AlertLogType.NO_FLY_PASS_THROUGH -> Color(0xFFEF6C00)
                 AlertLogType.NFC -> Color(0xFF2E7D32)
-                AlertLogType.FOREIGN_SIGNAL -> Color(0xFF6A1B9A)
             }
             val typeLabel = when (entry.type) {
                 AlertLogType.APPROACH -> "Approach"
                 AlertLogType.TRACKER -> "Tracker"
                 AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
                 AlertLogType.NFC -> "NFC"
-                AlertLogType.FOREIGN_SIGNAL -> "Foreign Signal"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
             val isNoFlyEntry = entry.type == AlertLogType.NO_FLY_PASS_THROUGH
             val opensDeviceDetails = entry.type == AlertLogType.TRACKER ||
-                entry.type == AlertLogType.FOREIGN_SIGNAL ||
                 entry.type == AlertLogType.NFC
             val noFlyZoneSummary = if (isNoFlyEntry) {
                 parseNoFlyZoneSummaryFromLogMessage(entry.message) ?: "No-fly zone"
@@ -6919,42 +6388,28 @@ private fun ErrorLogsPage(
 
 @Composable
 private fun DetectionMeshNetworkPage(
-    encounters: List<Encounter>,
     chainLinkEnabled: Boolean,
     chainNodeId: String,
     chainDeviceName: String,
     chainSharedSecret: String,
     chainAutoSyncEnabled: Boolean,
-    chainAutoSyncIntervalSeconds: Long,
-    chainPersistentChannelEnabled: Boolean,
-    chainHeartbeatIntervalSeconds: Long,
     chainSharePreciseLocationEnabled: Boolean,
     chainMeshSnapshot: ChainMeshSnapshot,
     onChainLinkChanged: (Boolean) -> Unit,
     onChainDeviceNameChanged: (String) -> Unit,
     onChainSharedSecretChanged: (String) -> Unit,
     onChainAutoSyncChanged: (Boolean) -> Unit,
-    onChainAutoSyncIntervalChanged: (Long) -> Unit,
-    onChainPersistentChannelChanged: (Boolean) -> Unit,
-    onChainHeartbeatIntervalChanged: (Long) -> Unit,
     onChainSharePreciseLocationChanged: (Boolean) -> Unit,
     onRefreshPeers: suspend () -> Unit,
-    onSendLinkRequest: suspend (host: String, message: String?) -> Boolean,
     onSyncNow: suspend () -> String,
     onWipeMeshData: suspend () -> String
 ) {
     val context = LocalContext.current
-    var chainIntervalExpanded by remember { mutableStateOf(false) }
-    var heartbeatExpanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var syncInProgress by remember { mutableStateOf(false) }
     var wipeInProgress by remember { mutableStateOf(false) }
-    var syncMessage by remember { mutableStateOf<String?>(null) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
     var refreshInProgress by remember { mutableStateOf(false) }
-    var manualLinkRequestInProgress by remember { mutableStateOf(false) }
-    var peerLinkRequestInProgress by remember { mutableStateOf(false) }
-    var linkHostInput by remember { mutableStateOf("") }
-    var linkMessageInput by remember { mutableStateOf("") }
     var meshServiceActive by remember { mutableStateOf(MeshForegroundServiceController.isActive(context)) }
     var meshWipeGateState by remember { mutableStateOf(ScanSettings.getMeshWipeGateState(context)) }
 
@@ -6973,13 +6428,11 @@ private fun DetectionMeshNetworkPage(
     val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
     val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
     val meshReady = chainLinkEnabled && chainSharedSecret.isNotBlank()
-    val wipeGateActive = meshWipeGateState.enabled
-    val meshCoverageInsights = remember(encounters, chainMeshSnapshot, chainNodeId) {
-        buildMeshCoverageInsights(
-            encounters = encounters,
-            snapshot = chainMeshSnapshot,
-            localNodeId = chainNodeId
-        )
+    val wipeGateLabel = if (meshWipeGateState.enabled) "Active" else "Inactive"
+    val connectedPeers = remember(chainMeshSnapshot.peers) {
+        chainMeshSnapshot.peers
+            .filter { it.state == ChainPeerState.CONNECTED }
+            .sortedByDescending { it.lastSeenEpochMs }
     }
 
     LazyColumn(
@@ -7010,95 +6463,18 @@ private fun DetectionMeshNetworkPage(
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text("Quick Status", fontWeight = FontWeight.Bold)
-                    Text("Chain Link: ${if (chainLinkEnabled) "On" else "Off"} • Auth: ${if (chainSharedSecret.isNotBlank()) "Set" else "Missing"}")
-                    Text("Peers: $connectedCount connected • $unconnectedCount unconnected")
-                    Text("Auto Sync: ${if (chainAutoSyncEnabled) "On" else "Off"} • Persistent Channel: ${if (chainPersistentChannelEnabled) "On" else "Off"}")
-                    Text("Wipe Gate: ${if (wipeGateActive) "Active" else "Inactive"}")
-                    if (!meshReady) {
-                        Text(
-                            "To sync with peers: enable Chain Link and set a shared passphrase.",
-                            color = Color(0xFFE65100)
-                        )
-                    }
-                }
-            }
-        }
-        item {
-            ChainMeshVisualizer(
-                snapshot = chainMeshSnapshot,
-                sharePreciseLocationEnabled = chainSharePreciseLocationEnabled
-            )
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text("Wipe Coordination", fontWeight = FontWeight.Bold)
-                    if (meshWipeGateState.enabled) {
-                        val initiator = meshWipeGateState.initiatorDeviceName
-                            ?: meshWipeGateState.initiatorNodeId
-                            ?: "unknown"
-                        Text("Scan gate: ACTIVE")
-                        Text("Initiated by: $initiator")
-                        if (meshWipeGateState.sessionId != null) {
-                            Text("Session: ${meshWipeGateState.sessionId}")
-                        }
-                    } else {
-                        Text("Scan gate: INACTIVE")
-                    }
-
-                    if (chainMeshSnapshot.wipeNotices.isEmpty()) {
-                        Text("No mesh wipe notices yet.")
-                    } else {
-                        Text("Recent wipe notices", fontWeight = FontWeight.SemiBold)
-                        chainMeshSnapshot.wipeNotices.take(8).forEach { notice ->
-                            val who = notice.initiatorDeviceName ?: notice.initiatorNodeId
-                            Text("${formatEpoch(notice.timestampEpochMs)} • $who • ${notice.detail}")
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Blind-Spot Fill Insights", fontWeight = FontWeight.Bold)
-                    Text("Last 2h across mesh-visible devices. Observations are credited to the origin node.")
-                    if (meshCoverageInsights.isEmpty()) {
-                        Text("Not enough mesh-attributed observations yet. Run sync and collect more detections.")
-                    } else {
-                        val topSpotter = meshCoverageInsights.maxByOrNull { it.seenDevices }
-                        val leastSpotter = meshCoverageInsights.minByOrNull { it.seenDevices }
-                        if (topSpotter != null) {
-                            Text("Most spotting: ${topSpotter.displayName} (${topSpotter.seenDevices} devices)")
-                        }
-                        if (leastSpotter != null) {
-                            Text("Least spotting: ${leastSpotter.displayName} (${leastSpotter.seenDevices} devices)")
-                        }
-
-                        meshCoverageInsights.forEach { insight ->
-                            Card(modifier = Modifier.fillMaxWidth()) {
-                                Column(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(insight.displayName, fontWeight = FontWeight.SemiBold)
-                                    Text("Seen ${insight.seenDevices} (${insight.coverageSharePercent}% mesh coverage) • Unique ${insight.uniqueContributions}")
-                                    Text(
-                                        "Blind spots filled by others: ${insight.blindSpotsFilledByOthers} (${insight.blindSpotFillPercent}%)",
-                                        color = if (insight.blindSpotsFilledByOthers == 0) Color(0xFF2E7D32) else Color(0xFFB3261E)
-                                    )
-                                }
-                            }
-                        }
+                    Text("Status", fontWeight = FontWeight.Bold)
+                    Text("Chain Link: ${if (chainLinkEnabled) "On" else "Off"}")
+                    Text("Passphrase: ${if (chainSharedSecret.isNotBlank()) "Set" else "Missing"}")
+                    Text("Peers: $connectedCount connected • $unconnectedCount not connected")
+                    Text("Wipe Gate: $wipeGateLabel")
+                    if (!meshReady) {
+                        Text(
+                            "Enable Chain Link and set a shared passphrase to sync.",
+                            color = Color(0xFFE65100)
+                        )
                     }
                 }
             }
@@ -7141,45 +6517,14 @@ private fun DetectionMeshNetworkPage(
                     Text("Use the same passphrase on every linked device.")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
-                        Button(
-                            enabled = chainLinkEnabled && !refreshInProgress,
-                            onClick = {
-                                scope.launch {
-                                    refreshInProgress = true
-                                    runCatching { onRefreshPeers() }
-                                    refreshInProgress = false
-                                }
-                            }
-                        ) {
-                            Text(if (refreshInProgress) "Refreshing..." else "Refresh Peers")
-                        }
-                        Text(
-                            "Connected $connectedCount | Unconnected $unconnectedCount",
-                            modifier = Modifier.padding(top = 10.dp)
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Auto sync")
+                        Text("Auto Sync")
                         Switch(
                             checked = chainAutoSyncEnabled,
                             onCheckedChange = onChainAutoSyncChanged,
                             enabled = chainLinkEnabled
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Persistent channel")
-                        Switch(
-                            checked = chainPersistentChannelEnabled,
-                            onCheckedChange = onChainPersistentChannelChanged,
-                            enabled = chainLinkEnabled && chainSharedSecret.isNotBlank()
                         )
                     }
                     Row(
@@ -7193,280 +6538,102 @@ private fun DetectionMeshNetworkPage(
                             enabled = chainLinkEnabled
                         )
                     }
-                    Text("When enabled, this device shares its current location with linked peers to improve mesh map accuracy.")
-                    Text("Operations", fontWeight = FontWeight.Bold)
+                    Text("When enabled, linked peers can place your node accurately on mesh views.")
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Actions", fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Heartbeat interval")
                         Button(
-                            enabled = chainLinkEnabled && chainPersistentChannelEnabled,
-                            onClick = { heartbeatExpanded = true }
+                            enabled = chainLinkEnabled && !refreshInProgress,
+                            onClick = {
+                                scope.launch {
+                                    refreshInProgress = true
+                                    runCatching { onRefreshPeers() }
+                                        .onFailure { actionMessage = "Peer refresh failed: ${it.message ?: "unknown error"}" }
+                                    refreshInProgress = false
+                                }
+                            }
                         ) {
-                            Text(ScanSettings.formatInterval(chainHeartbeatIntervalSeconds))
+                            Text(if (refreshInProgress) "Refreshing..." else "Refresh Peers")
                         }
-                        DropdownMenu(
-                            expanded = heartbeatExpanded,
-                            onDismissRequest = { heartbeatExpanded = false }
-                        ) {
-                            ScanSettings.ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS.forEach { seconds ->
-                                DropdownMenuItem(
-                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                                    onClick = {
-                                        onChainHeartbeatIntervalChanged(seconds)
-                                        heartbeatExpanded = false
+                        if (!chainAutoSyncEnabled) {
+                            Button(
+                                enabled = meshReady && !syncInProgress,
+                                onClick = {
+                                    scope.launch {
+                                        syncInProgress = true
+                                        actionMessage = onSyncNow()
+                                        syncInProgress = false
                                     }
-                                )
+                                }
+                            ) {
+                                Text(if (syncInProgress) "Syncing..." else "Sync Now")
                             }
                         }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Auto sync interval")
-                        Button(
-                            enabled = chainLinkEnabled && chainAutoSyncEnabled,
-                            onClick = { chainIntervalExpanded = true }
-                        ) {
-                            Text(ScanSettings.formatInterval(chainAutoSyncIntervalSeconds))
-                        }
-                        DropdownMenu(
-                            expanded = chainIntervalExpanded,
-                            onDismissRequest = { chainIntervalExpanded = false }
-                        ) {
-                            ScanSettings.ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS.forEach { seconds ->
-                                DropdownMenuItem(
-                                    text = { Text("Every ${ScanSettings.formatInterval(seconds)}") },
-                                    onClick = {
-                                        onChainAutoSyncIntervalChanged(seconds)
-                                        chainIntervalExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    Button(
-                        enabled = meshReady && !syncInProgress,
-                        onClick = {
-                            scope.launch {
-                                syncInProgress = true
-                                syncMessage = onSyncNow()
-                                syncInProgress = false
-                            }
-                        }
-                    ) {
-                        Text(if (syncInProgress) "Syncing..." else "Sync Now")
                     }
                     Button(
                         enabled = !wipeInProgress,
                         onClick = {
                             scope.launch {
                                 wipeInProgress = true
-                                syncMessage = onWipeMeshData()
+                                actionMessage = onWipeMeshData()
                                 wipeInProgress = false
                             }
                         }
                     ) {
                         Text(if (wipeInProgress) "Wiping Mesh Data..." else "Wipe Mesh Data (All Devices)")
                     }
-                    Text("Backs up then clears encounters, devices, and logs locally and on discovered authenticated peers.")
-
-                    Text("Manual Link Request", fontWeight = FontWeight.Bold)
-                    OutlinedTextField(
-                        value = linkHostInput,
-                        onValueChange = { linkHostInput = it },
-                        label = { Text("Peer Host (e.g. 192.168.1.24)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
+                    Text(
+                        "Wipe clears encounters, devices, and logs locally and on authenticated peers.",
+                        color = Color(0xFFB3261E)
                     )
-                    OutlinedTextField(
-                        value = linkMessageInput,
-                        onValueChange = { linkMessageInput = it },
-                        label = { Text("Optional message") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = chainLinkEnabled
-                    )
-                    Button(
-                        enabled = chainLinkEnabled && linkHostInput.isNotBlank() && !manualLinkRequestInProgress,
-                        onClick = {
-                            scope.launch {
-                                manualLinkRequestInProgress = true
-                                val sent = onSendLinkRequest(linkHostInput.trim(), linkMessageInput.trim().ifBlank { null })
-                                syncMessage = if (sent) {
-                                    "Link request sent to ${linkHostInput.trim()}"
-                                } else {
-                                    "Link request failed for ${linkHostInput.trim()}"
-                                }
-                                manualLinkRequestInProgress = false
-                            }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("Connected Peers", fontWeight = FontWeight.Bold)
+                    if (connectedPeers.isEmpty()) {
+                        Text("No connected peers.")
+                    } else {
+                        connectedPeers.take(8).forEach { peer ->
+                            val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                            Text("$peerDisplay @ ${peer.host}")
+                            Text(
+                                "Last seen ${formatEpoch(peer.lastSeenEpochMs)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    ) {
-                        Text(if (manualLinkRequestInProgress) "Sending..." else "Send Link Request")
-                    }
-
-                    if (chainMeshSnapshot.peers.isNotEmpty()) {
-                        Text("Known Peers", fontWeight = FontWeight.Bold)
-                        chainMeshSnapshot.peers.take(24).forEach { peer ->
-                            val canRequestPeerLink = peer.state != ChainPeerState.CONNECTED &&
-                                peer.state != ChainPeerState.REQUESTED
-                            Card(modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
-                                    Text("$peerDisplay @ ${peer.host}")
-                                    if (!peer.deviceName.isNullOrBlank()) {
-                                        Text("Node: ${peer.nodeId}")
-                                    }
-                                    Text("State: ${peer.state.name}")
-                                    Text("Last seen: ${formatEpoch(peer.lastSeenEpochMs)}")
-                                    if (isValidLatLon(peer.sharedLocationLat, peer.sharedLocationLon)) {
-                                        val lat = peer.sharedLocationLat ?: 0.0
-                                        val lon = peer.sharedLocationLon ?: 0.0
-                                        Text(
-                                            "Shared precise location: ${"%.5f".format(lat)}, ${"%.5f".format(lon)}"
-                                        )
-                                    } else {
-                                        Text("Shared precise location: not provided")
-                                    }
-                                    if (peer.lastSuccessfulSyncEpochMs != null) {
-                                        Text("Last sync: ${formatEpoch(peer.lastSuccessfulSyncEpochMs)}")
-                                    }
-                                    if (!peer.lastFailure.isNullOrBlank()) {
-                                        Text("Failure: ${peer.lastFailure}", color = Color(0xFFB3261E))
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(
-                                            enabled = chainLinkEnabled && canRequestPeerLink && !peerLinkRequestInProgress,
-                                            onClick = {
-                                                scope.launch {
-                                                    peerLinkRequestInProgress = true
-                                                    val sent = onSendLinkRequest(peer.host, "Link with $chainNodeId")
-                                                    syncMessage = if (sent) {
-                                                        "Link request sent to ${peer.host}"
-                                                    } else {
-                                                        "Link request failed for ${peer.host}"
-                                                    }
-                                                    peerLinkRequestInProgress = false
-                                                }
-                                            }
-                                        ) {
-                                            Text("Link Request")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (chainMeshSnapshot.incomingRequests.isNotEmpty()) {
-                        Text("Incoming Link Requests", fontWeight = FontWeight.SemiBold)
-                        chainMeshSnapshot.incomingRequests.take(12).forEach { request ->
-                            Card(modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    val requesterDisplay = request.requesterDeviceName?.takeIf { it.isNotBlank() } ?: request.requesterNodeId
-                                    Text("$requesterDisplay @ ${request.requesterHost}")
-                                    if (!request.requesterDeviceName.isNullOrBlank()) {
-                                        Text("Node: ${request.requesterNodeId}")
-                                    }
-                                    if (!request.message.isNullOrBlank()) {
-                                        Text("Msg: ${request.message}")
-                                    }
-                                    Text(formatEpoch(request.timestampEpochMs))
-                                }
-                            }
-                        }
-                    }
-
-                    if (syncMessage != null) {
-                        Text(syncMessage!!)
                     }
                 }
             }
         }
-    }
-}
-
-private fun buildMeshCoverageInsights(
-    encounters: List<Encounter>,
-    snapshot: ChainMeshSnapshot,
-    localNodeId: String,
-    windowMs: Long = 2L * 60L * 60L * 1000L
-): List<MeshCoverageNodeInsight> {
-    val cutoff = System.currentTimeMillis() - windowMs
-    val peersById = snapshot.peers.associateBy { it.nodeId }
-
-    val observationsByNode = linkedMapOf<String, MutableSet<String>>()
-    fun nodeSet(nodeId: String): MutableSet<String> = observationsByNode.getOrPut(nodeId) { linkedSetOf() }
-
-    encounters.asSequence()
-        .filter { it.timestampEpochMs >= cutoff }
-        .forEach { encounter ->
-            val originNode = when (encounter.provenance) {
-                EncounterProvenance.CHAIN_LINKED -> {
-                    encounter.provenanceOriginNodeId
-                        ?.trim()
-                        ?.takeIf { it.isNotBlank() }
-                        ?: parseProvenancePathNodeIds(encounter.provenancePathNodeIds).firstOrNull()
-                        ?: encounter.provenanceNodeId
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                        ?: "peer-unknown"
+        if (!actionMessage.isNullOrBlank()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = actionMessage!!,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
-
-                else -> localNodeId
             }
-            val deviceKey = "${encounter.source.name}|${encounter.primaryId}"
-            nodeSet(originNode).add(deviceKey)
         }
-
-    if (observationsByNode.isEmpty()) {
-        return emptyList()
     }
-
-    if (!observationsByNode.containsKey(localNodeId)) {
-        observationsByNode[localNodeId] = linkedSetOf()
-    }
-    snapshot.peers.forEach { peer ->
-        observationsByNode.putIfAbsent(peer.nodeId, linkedSetOf())
-    }
-
-    val allObserved = observationsByNode.values.flatten().toSet()
-    val allObservedCount = allObserved.size.coerceAtLeast(1)
-
-    return observationsByNode.map { (nodeId, seenSet) ->
-        val othersUnion = observationsByNode
-            .asSequence()
-            .filter { it.key != nodeId }
-            .flatMap { it.value.asSequence() }
-            .toSet()
-
-        val uniqueContributions = seenSet.count { it !in othersUnion }
-        val blindSpotsFilledByOthers = othersUnion.count { it !in seenSet }
-        val coverageSharePercent = ((seenSet.size * 100.0) / allObservedCount.toDouble()).toInt()
-        val blindSpotFillPercent = ((blindSpotsFilledByOthers * 100.0) / allObservedCount.toDouble()).toInt()
-        val displayName = when {
-            nodeId == localNodeId -> "${snapshot.localDeviceName} (This Device)"
-            nodeId == "peer-unknown" -> "Unknown Peer"
-            else -> peersById[nodeId]?.deviceName?.takeIf { it.isNotBlank() } ?: nodeId
-        }
-
-        MeshCoverageNodeInsight(
-            nodeId = nodeId,
-            displayName = displayName,
-            seenDevices = seenSet.size,
-            uniqueContributions = uniqueContributions,
-            blindSpotsFilledByOthers = blindSpotsFilledByOthers,
-            coverageSharePercent = coverageSharePercent,
-            blindSpotFillPercent = blindSpotFillPercent
-        )
-    }.sortedWith(
-        compareByDescending<MeshCoverageNodeInsight> { it.seenDevices }
-            .thenByDescending { it.uniqueContributions }
-            .thenBy { it.displayName.lowercase(Locale.US) }
-    )
 }
 
 @Composable
@@ -10311,20 +9478,6 @@ private fun noFlyZoneAltitudeLabel(zone: NoFlyZoneOverlayProvider.NoFlyZonePolyg
     else -> "Altitude: unspecified"
 }
 
-private fun meshPeerColor(state: ChainPeerState): Color = when (state) {
-    ChainPeerState.CONNECTED -> Color(0xFF2E7D32)
-    ChainPeerState.DISCOVERED -> Color(0xFFF9A825)
-    ChainPeerState.REQUESTED -> Color(0xFF1565C0)
-    ChainPeerState.FAILED -> Color(0xFFB3261E)
-}
-
-private fun meshPeerMarkerHue(state: ChainPeerState): Float = when (state) {
-    ChainPeerState.CONNECTED -> BitmapDescriptorFactory.HUE_GREEN
-    ChainPeerState.DISCOVERED -> BitmapDescriptorFactory.HUE_YELLOW
-    ChainPeerState.REQUESTED -> BitmapDescriptorFactory.HUE_AZURE
-    ChainPeerState.FAILED -> BitmapDescriptorFactory.HUE_RED
-}
-
 private fun selectVisiblePinsWithSourceCoverage(pins: List<MapPin>, pinLimit: Int): List<MapPin> {
     if (pins.isEmpty()) return emptyList()
     val safeLimit = pinLimit.coerceAtLeast(1)
@@ -10847,16 +10000,6 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
         color = Color(0xFF1565C0),
         supportsSecondaryId = true,
         secondaryIdLabel = "Callsign"
-    ),
-    SourceTypeUiMeta(
-        source = SourceCatalog.SOURCE_UWB,
-        scanType = SourceCatalog.KEY_UWB,
-        settingsLabel = "UWB",
-        legendLabel = "UWB",
-        listLabel = "UWB",
-        glyph = "UWB",
-        hue = BitmapDescriptorFactory.HUE_MAGENTA,
-        color = Color(0xFFAB47BC)
     ),
     SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_SDR,
@@ -11571,7 +10714,6 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
     if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)
-    if (sensorGateSettings.uwbEnabled) add(SourceCatalog.KEY_UWB)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_SDR)
     if (sensorGateSettings.directAcousticEnabled) add(SourceCatalog.KEY_ACOUSTIC)
     if (sensorGateSettings.directMagneticEnabled) add(SourceCatalog.KEY_MAGNETIC)
@@ -11583,7 +10725,6 @@ private fun enabledIntervalSourceTypes(sensorGateSettings: SensorGateSettings): 
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
     if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)
-    if (sensorGateSettings.uwbEnabled) add(SourceCatalog.KEY_UWB)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_SDR)
     if (sensorGateSettings.directAcousticEnabled) add(SourceCatalog.KEY_ACOUSTIC)
     if (sensorGateSettings.directMagneticEnabled) add(SourceCatalog.KEY_MAGNETIC)
@@ -11675,7 +10816,6 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "manual-camera" -> "Manual camera interval change"
     "manual-aircraft" -> "Manual aircraft interval change"
     "manual-wifi_direct" -> "Manual Wi-Fi Direct interval change"
-    "manual-uwb" -> "Manual UWB interval change"
     "manual-sdr" -> "Manual SDR interval change"
     "manual-acoustic" -> "Manual acoustic interval change"
     "manual-magnetic" -> "Manual magnetometer interval change"
@@ -11687,7 +10827,6 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "auto-overrun-remote_id" -> "Auto-adjust Remote ID overrun protection"
     "auto-overrun-camera" -> "Auto-adjust camera overrun protection"
     "auto-overrun-aircraft" -> "Auto-adjust aircraft overrun protection"
-    "auto-overrun-uwb" -> "Auto-adjust UWB overrun protection"
     "auto-overrun-sdr" -> "Auto-adjust SDR overrun protection"
     "auto-overrun-acoustic" -> "Auto-adjust acoustic overrun protection"
     "auto-overrun-magnetic" -> "Auto-adjust magnetometer overrun protection"
@@ -11699,7 +10838,6 @@ private fun formatIntervalChangeReason(reason: String): String = when (reason) {
     "auto-stable-remote_id" -> "Auto-adjust Remote ID stable downshift"
     "auto-stable-camera" -> "Auto-adjust camera stable downshift"
     "auto-stable-aircraft" -> "Auto-adjust aircraft stable downshift"
-    "auto-stable-uwb" -> "Auto-adjust UWB stable downshift"
     "auto-stable-sdr" -> "Auto-adjust SDR stable downshift"
     "auto-stable-acoustic" -> "Auto-adjust acoustic stable downshift"
     "auto-stable-magnetic" -> "Auto-adjust magnetometer stable downshift"
@@ -12211,7 +11349,6 @@ private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<
         EncounterSource.REMOTE_ID -> "Remote ID Details" to readRemoteIdFields(encounter.rawPayloadJson)
         EncounterSource.CAMERA -> "Road Camera Details" to readCameraFields(encounter.rawPayloadJson)
         EncounterSource.AIRCRAFT -> "Aircraft Track Details" to readAircraftFields(encounter.rawPayloadJson)
-        EncounterSource.UWB -> "UWB Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.SDR -> "SDR Device Details" to readGenericPayloadFields(encounter.rawPayloadJson)
         EncounterSource.UNKNOWN_RF -> readUnknownRfFields(encounter.rawPayloadJson)
     }
@@ -12942,144 +12079,6 @@ private fun analyzeTrackerRisk(
     )
 }
 
-private fun analyzeForeignSignalRisk(encounters: List<Encounter>): ForeignSignalRiskSignal? {
-    val ordered = selectRecentEncounterWindow(
-        encounters = encounters,
-        windowMs = FOREIGN_RISK_WINDOW_MS,
-        maxEncounters = FOREIGN_RISK_MAX_ENCOUNTERS
-    ).sortedBy { it.timestampEpochMs }
-
-    if (ordered.size < 8) return null
-
-    val firstTs = ordered.first().timestampEpochMs
-    val lastTs = ordered.last().timestampEpochMs
-    val windowMinutes = ((lastTs - firstTs).coerceAtLeast(0L) / 60_000.0)
-
-    val cellularScore = computeCellularAnomalyScore(ordered)
-    val wifiScore = computeWifiAnomalyScore(ordered)
-    val bleScore = computeBleAnomalyScore(ordered)
-    val gnssScore = computeGnssInterferenceScore(ordered)
-    val nfcScore = computeNfcActivityScore(ordered, windowMinutes)
-    val uwbScore = computeUwbActivityScore(ordered, windowMinutes)
-    val rfTextureScore = computeRfTextureScore(ordered)
-
-    val directAcousticObserved = ordered.any { isDirectSignalChannel(it, "acoustic") }
-    val directMagneticObserved = ordered.any { isDirectSignalChannel(it, "magnetic") }
-    val directAcousticScore = computeDirectAcousticScore(ordered)
-    val directMagneticScore = computeDirectMagneticScore(ordered)
-
-    val unknownEmissionScore = computeUnknownEmissionScore(ordered, windowMinutes)
-    val acousticProxyScore = if (directAcousticObserved) {
-        directAcousticScore
-    } else {
-        (unknownEmissionScore * 0.55).coerceIn(0.0, 1.0)
-    }
-    val magneticProxyScore = if (directMagneticObserved) {
-        directMagneticScore
-    } else {
-        (unknownEmissionScore * 0.45).coerceIn(0.0, 1.0)
-    }
-
-    val distinctSources = ordered.map { it.source }.toSet().size
-    val sourceDiversityScore = ((distinctSources - 1).toDouble() / 6.0).coerceIn(0.0, 1.0)
-
-    val weightedScore = (
-        0.16 * cellularScore +
-            0.13 * wifiScore +
-            0.13 * bleScore +
-            0.13 * gnssScore +
-            0.07 * nfcScore +
-            0.07 * uwbScore +
-            0.14 * rfTextureScore +
-            0.06 * acousticProxyScore +
-            0.06 * magneticProxyScore +
-            0.05 * sourceDiversityScore
-        ).coerceIn(0.0, 1.0)
-
-    val score = (weightedScore * 100.0).roundToInt().coerceIn(0, 100)
-
-    val level = when {
-        score >= 80 -> ForeignSignalRiskLevel.CRITICAL
-        score >= 60 -> ForeignSignalRiskLevel.HIGH
-        score >= 35 -> ForeignSignalRiskLevel.ELEVATED
-        else -> ForeignSignalRiskLevel.QUIET
-    }
-
-    val activeSignalFamilies = listOf(
-        cellularScore,
-        wifiScore,
-        bleScore,
-        gnssScore,
-        nfcScore,
-        uwbScore,
-        rfTextureScore
-    ).count { it > 0.0 }
-
-    val confidence = (
-        0.50 * (ordered.size.toDouble() / 180.0).coerceIn(0.0, 1.0) +
-            0.25 * (windowMinutes / 30.0).coerceIn(0.0, 1.0) +
-            0.25 * (activeSignalFamilies.toDouble() / 7.0).coerceIn(0.0, 1.0)
-        ).coerceIn(0.0, 1.0)
-
-    val unavailable = buildList {
-        if (ordered.none { it.source == EncounterSource.UWB }) {
-            add("UWB (no recent encounters)")
-        }
-        if (ordered.none { it.source == EncounterSource.NFC }) {
-            add("NFC (no recent encounters)")
-        }
-        if (!directAcousticObserved) add("Direct acoustic signature channel")
-        if (!directMagneticObserved) add("Direct magnetometer disturbance channel")
-    }
-
-    val summary = when (level) {
-        ForeignSignalRiskLevel.CRITICAL -> "Multiple channels show simultaneous foreign-signal anomalies."
-        ForeignSignalRiskLevel.HIGH -> "Cross-channel anomalies detected; likely elevated foreign-signal activity nearby."
-        ForeignSignalRiskLevel.ELEVATED -> "Early anomaly pattern detected across one or more radio channels."
-        ForeignSignalRiskLevel.QUIET -> "No strong multi-channel foreign-signal anomalies detected."
-    }
-
-    return ForeignSignalRiskSignal(
-        level = level,
-        score = score,
-        confidence = confidence,
-        summary = summary,
-        windowMinutes = windowMinutes,
-        sampleCount = ordered.size,
-        cellularAnomalyScore = cellularScore,
-        wifiAnomalyScore = wifiScore,
-        bleAnomalyScore = bleScore,
-        gnssInterferenceScore = gnssScore,
-        nfcActivityScore = nfcScore,
-        uwbActivityScore = uwbScore,
-        rfTextureScore = rfTextureScore,
-        acousticProxyScore = acousticProxyScore,
-        magneticProxyScore = magneticProxyScore,
-        directAcousticObserved = directAcousticObserved,
-        directMagneticObserved = directMagneticObserved,
-        unavailableSignals = unavailable
-    )
-}
-
-private fun computeNfcActivityScore(encounters: List<Encounter>, windowMinutes: Double): Double {
-    val nfcEncounters = encounters.filter { it.source == EncounterSource.NFC }
-    if (nfcEncounters.isEmpty()) return 0.0
-
-    val safeWindow = windowMinutes.coerceAtLeast(1.0)
-    val encounterDensityPerMinute = nfcEncounters.size.toDouble() / safeWindow
-    val densityScore = (encounterDensityPerMinute / 3.0).coerceIn(0.0, 1.0)
-    val uniqueTagScore = (nfcEncounters.map { it.primaryId }.toSet().size.toDouble() / nfcEncounters.size.toDouble())
-        .coerceIn(0.0, 1.0)
-    val latestEpoch = nfcEncounters.maxOfOrNull { it.timestampEpochMs } ?: 0L
-    val recencyScore = if ((System.currentTimeMillis() - latestEpoch) <= 120_000L) 1.0 else 0.4
-
-    return (
-        0.65 * densityScore +
-            0.25 * uniqueTagScore +
-            0.10 * recencyScore
-        ).coerceIn(0.0, 1.0)
-}
-
 private fun isDirectSignalChannel(encounter: Encounter, channel: String): Boolean {
     if (encounter.source != EncounterSource.UNKNOWN_RF) return false
     val normalizedChannel = channel.trim().lowercase(Locale.US)
@@ -13144,129 +12143,6 @@ private fun readLatestTwoMagneticSamples(encounters: List<Encounter>): Pair<Pair
     return first to second
 }
 
-private fun computeDirectAcousticScore(encounters: List<Encounter>): Double {
-    val acousticPayloads = encounters
-        .filter { isDirectSignalChannel(it, "acoustic") }
-        .mapNotNull { parseEncounterPayload(it) }
-
-    if (acousticPayloads.size < 2) return 0.0
-
-    val rmsDbFs = acousticPayloads
-        .mapNotNull { payload ->
-            if (!payload.has("rmsDbFs") || payload.isNull("rmsDbFs")) return@mapNotNull null
-            payload.optDouble("rmsDbFs", Double.NaN).takeIf { it.isFinite() }
-        }
-    if (rmsDbFs.isEmpty()) return 0.0
-
-    val loudRate = rmsDbFs.count { it >= -42.0 }.toDouble() / rmsDbFs.size.toDouble()
-    val volatility = (standardDeviation(rmsDbFs) / 20.0).coerceIn(0.0, 1.0)
-    return (0.65 * loudRate.coerceIn(0.0, 1.0) + 0.35 * volatility).coerceIn(0.0, 1.0)
-}
-
-private fun computeDirectMagneticScore(encounters: List<Encounter>): Double {
-    val magneticPayloads = encounters
-        .filter { isDirectSignalChannel(it, "magnetic") }
-        .mapNotNull { parseEncounterPayload(it) }
-
-    if (magneticPayloads.size < 2) return 0.0
-
-    val magnitudes = magneticPayloads
-        .mapNotNull { payload ->
-            if (!payload.has("magnitudeMicroTesla") || payload.isNull("magnitudeMicroTesla")) return@mapNotNull null
-            payload.optDouble("magnitudeMicroTesla", Double.NaN).takeIf { it.isFinite() }
-        }
-    if (magnitudes.isEmpty()) return 0.0
-
-    val anomalyRate = magnitudes.count { it < 25.0 || it > 65.0 }.toDouble() / magnitudes.size.toDouble()
-    val volatility = (standardDeviation(magnitudes) / 35.0).coerceIn(0.0, 1.0)
-    return (0.70 * anomalyRate.coerceIn(0.0, 1.0) + 0.30 * volatility).coerceIn(0.0, 1.0)
-}
-
-private fun computeCellularAnomalyScore(encounters: List<Encounter>): Double {
-    val cellEncounters = encounters
-        .filter { it.source == EncounterSource.CELL }
-        .sortedBy { it.timestampEpochMs }
-    if (cellEncounters.size < 4) return 0.0
-
-    val payloads = cellEncounters.mapNotNull { parseEncounterPayload(it) }
-    val operatorCodes = payloads
-        .map { it.optString("networkOperator", "").trim() }
-        .filter { it.isNotBlank() }
-    val radios = payloads
-        .map { it.optString("radio", "").uppercase(Locale.US) }
-        .filter { it.isNotBlank() }
-
-    val operatorDiversity = ((operatorCodes.toSet().size - 1).toDouble() / 3.0).coerceIn(0.0, 1.0)
-    val radioTransitions = transitionsFraction(radios)
-    val rssiVolatility = (standardDeviation(cellEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 24.0)
-        .coerceIn(0.0, 1.0)
-
-    return (
-        0.35 * operatorDiversity +
-            0.35 * radioTransitions +
-            0.30 * rssiVolatility
-        ).coerceIn(0.0, 1.0)
-}
-
-private fun computeWifiAnomalyScore(encounters: List<Encounter>): Double {
-    val wifiEncounters = encounters.filter {
-        it.source == EncounterSource.WIFI || it.source == EncounterSource.WIFI_DIRECT
-    }
-    if (wifiEncounters.size < 6) return 0.0
-
-    val payloads = wifiEncounters.mapNotNull { parseEncounterPayload(it) }
-    val ssidToBssid = mutableMapOf<String, MutableSet<String>>()
-    payloads.forEach { payload ->
-        val ssid = payload.optString("ssid", "").trim()
-        val bssid = payload.optString("bssid", "").trim()
-        if (ssid.isNotBlank() && bssid.isNotBlank()) {
-            ssidToBssid.getOrPut(ssid) { mutableSetOf() }.add(bssid)
-        }
-    }
-
-    val spoofLikeClusters = ssidToBssid.values.count { it.size >= 3 }
-    val spoofClusterScore = if (ssidToBssid.isEmpty()) {
-        0.0
-    } else {
-        (spoofLikeClusters.toDouble() / ssidToBssid.size.toDouble()).coerceIn(0.0, 1.0)
-    }
-
-    val idChurn = (wifiEncounters.map { it.primaryId }.toSet().size.toDouble() / wifiEncounters.size.toDouble())
-        .coerceIn(0.0, 1.0)
-    val rssiVolatility = (standardDeviation(wifiEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 20.0)
-        .coerceIn(0.0, 1.0)
-
-    return (
-        0.35 * spoofClusterScore +
-            0.30 * idChurn +
-            0.35 * rssiVolatility
-        ).coerceIn(0.0, 1.0)
-}
-
-private fun computeBleAnomalyScore(encounters: List<Encounter>): Double {
-    val bleEncounters = encounters.filter {
-        it.source == EncounterSource.BLUETOOTH_LE || it.source == EncounterSource.REMOTE_ID
-    }
-    if (bleEncounters.size < 6) return 0.0
-
-    val payloads = bleEncounters.mapNotNull { parseEncounterPayload(it) }
-    val unknownClassRate = payloads
-        .map { it.optString("deviceClassHint", "") }
-        .let { classes ->
-            if (classes.isEmpty()) 0.0 else classes.count { it.equals("unknown", ignoreCase = true) }.toDouble() / classes.size.toDouble()
-        }
-    val idChurn = (bleEncounters.map { it.primaryId }.toSet().size.toDouble() / bleEncounters.size.toDouble())
-        .coerceIn(0.0, 1.0)
-    val rssiVolatility = (standardDeviation(bleEncounters.mapNotNull { it.rssiDbm?.toDouble() }) / 18.0)
-        .coerceIn(0.0, 1.0)
-
-    return (
-        0.40 * idChurn +
-            0.30 * unknownClassRate.coerceIn(0.0, 1.0) +
-            0.30 * rssiVolatility
-        ).coerceIn(0.0, 1.0)
-}
-
 private fun computeGnssInterferenceScore(encounters: List<Encounter>): Double {
     data class TimedLatLon(val ts: Long, val lat: Double, val lon: Double)
 
@@ -13303,17 +12179,6 @@ private fun computeGnssInterferenceScore(encounters: List<Encounter>): Double {
         ).coerceIn(0.0, 1.0)
 }
 
-private fun computeUwbActivityScore(encounters: List<Encounter>, windowMinutes: Double): Double {
-    val uwbEncounters = encounters.filter { it.source == EncounterSource.UWB }
-    if (uwbEncounters.isEmpty()) return 0.0
-    val safeWindow = windowMinutes.coerceAtLeast(1.0)
-    val burstDensityPerMinute = uwbEncounters.size.toDouble() / safeWindow
-    val burstScore = (burstDensityPerMinute / 6.0).coerceIn(0.0, 1.0)
-    val idDiversity = (uwbEncounters.map { it.primaryId }.toSet().size.toDouble() / uwbEncounters.size.toDouble())
-        .coerceIn(0.0, 1.0)
-    return (0.70 * burstScore + 0.30 * idDiversity).coerceIn(0.0, 1.0)
-}
-
 private fun computeRfTextureScore(encounters: List<Encounter>): Double {
     val samples = encounters.mapNotNull { it.rssiDbm?.toDouble() }
     if (samples.size < 6) return 0.0
@@ -13339,29 +12204,8 @@ private fun computeRfTextureScore(encounters: List<Encounter>): Double {
         ).coerceIn(0.0, 1.0)
 }
 
-private fun computeUnknownEmissionScore(encounters: List<Encounter>, windowMinutes: Double): Double {
-    val unknown = encounters.count {
-        it.source == EncounterSource.SDR ||
-            (it.source == EncounterSource.UNKNOWN_RF &&
-                !isDirectSignalChannel(it, "acoustic") &&
-                !isDirectSignalChannel(it, "magnetic"))
-    }
-    if (unknown == 0) return 0.0
-    val safeWindow = windowMinutes.coerceAtLeast(1.0)
-    return ((unknown.toDouble() / safeWindow) / 4.0).coerceIn(0.0, 1.0)
-}
-
 private fun parseEncounterPayload(encounter: Encounter): JSONObject? =
     runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
-
-private fun transitionsFraction(values: List<String>): Double {
-    if (values.size < 2) return 0.0
-    var transitions = 0
-    for (i in 1 until values.size) {
-        if (values[i] != values[i - 1]) transitions += 1
-    }
-    return (transitions.toDouble() / (values.size - 1).toDouble()).coerceIn(0.0, 1.0)
-}
 
 private fun standardDeviation(values: List<Double>): Double {
     if (values.size < 2) return 0.0
@@ -13748,22 +12592,6 @@ private fun ensureNfcNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
-private fun ensureForeignSignalNotificationChannel(context: android.content.Context) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val manager = context.getSystemService(NotificationManager::class.java) ?: return
-    val existing = manager.getNotificationChannel(FOREIGN_SIGNAL_ALERT_CHANNEL_ID)
-    if (existing != null) return
-
-    val channel = NotificationChannel(
-        FOREIGN_SIGNAL_ALERT_CHANNEL_ID,
-        "Foreign Signal Alerts",
-        NotificationManager.IMPORTANCE_HIGH
-    ).apply {
-        description = "Alerts when multi-channel foreign-signal risk crosses threshold"
-    }
-    manager.createNotificationChannel(channel)
-}
-
 private fun ensureMagneticIncreaseNotificationChannel(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -13950,34 +12778,6 @@ private fun sendNfcNotification(context: android.content.Context, encounter: Enc
     NotificationManagerCompat.from(context).notify(notificationId, notification)
 }
 
-private fun sendForeignSignalRiskNotification(
-    context: android.content.Context,
-    risk: ForeignSignalRiskSignal
-) {
-    val title = "Foreign signal risk ${risk.level.name}"
-    val content = buildString {
-        append("Score ")
-        append(risk.score)
-        append("/100")
-        append(" • ")
-        append(String.format(Locale.US, "%.0f%% confidence", risk.confidence * 100.0))
-        append(" • ")
-        append(risk.summary)
-    }
-
-    val notification = NotificationCompat.Builder(context, FOREIGN_SIGNAL_ALERT_CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.stat_notify_error)
-        .setContentTitle(title)
-        .setContentText(content)
-        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
-        .setPriority(NotificationCompat.PRIORITY_HIGH)
-        .setAutoCancel(true)
-        .build()
-
-    val notificationId = ("foreign-signal:${risk.level.name}:${risk.score}").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
-}
-
 private fun sendMagneticIncreaseNotification(
     context: android.content.Context,
     previousMagnitudeMicroTesla: Double,
@@ -14043,7 +12843,6 @@ private fun DevicesEncountersPage(
         Box(modifier = Modifier.fillMaxSize()) {
             if (selectedTab == 0) {
                 DevicesPage(
-                    recentEncounters = recentEncounters,
                     allEncounters = allEncounters,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
@@ -14053,7 +12852,6 @@ private fun DevicesEncountersPage(
                 )
             } else {
                 EncountersPage(
-                    recentEncounters = recentEncounters,
                     allEncounters = allEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     onEncounterClick = onEncounterClick
@@ -14086,7 +12884,6 @@ private fun CompactSwitchControl(
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DevicesPage(
-    recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
@@ -14096,7 +12893,6 @@ private fun DevicesPage(
 ) {
     val context = LocalContext.current
     val homePoint = ScanSettings.getHomePoint(context)
-    var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sortMode by remember { mutableStateOf(DeviceSortMode.LAST_SEEN) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
@@ -14114,7 +12910,7 @@ private fun DevicesPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
+    val selectedEncounters = allEncounters
     var devices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var devicesComputing by remember { mutableStateOf(false) }
     LaunchedEffect(
@@ -14143,9 +12939,6 @@ private fun DevicesPage(
     }
     val sourceOptions = remember(devices) {
         orderedEncounterSourceOptions(devices.map { it.source }.toSet())
-    }
-    val topSpeedByDevice = remember(selectedEncounters) {
-        DeviceSpeedRecordStore.getAllRecordSpeedsMps(context)
     }
     var filteredDeviceCount by remember { mutableStateOf(0) }
     var displayedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
@@ -14205,6 +12998,10 @@ private fun DevicesPage(
             }
         }
     }
+    var visibleDeviceCount by rememberSaveable(displayedDevices.size) { mutableStateOf(DETECTION_LIST_PAGE_SIZE) }
+    val pagedDevices = remember(displayedDevices, visibleDeviceCount) {
+        displayedDevices.take(visibleDeviceCount.coerceAtMost(displayedDevices.size))
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
@@ -14223,36 +13020,27 @@ private fun DevicesPage(
                         Text(if (filtersExpanded) "Hide" else "Show")
                     }
                 }
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ScopeFilterDropdown(
-                        selectedScope = dataScope,
-                        onScopeSelected = {
-                            dataScope = it
-                            sourceFilter = null
-                            queryFilter = ""
-                        }
-                    )
-                    DeviceSortDropdown(
-                        selectedSort = sortMode,
-                        onSortSelected = { sortMode = it }
-                    )
-                    SourceFilterDropdown(
-                        selectedSource = sourceFilter,
-                        sourceOptions = sourceOptions,
-                        onSourceSelected = { sourceFilter = it }
-                    )
-                }
-
                 AnimatedVisibility(
                     visible = filtersExpanded,
                     enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth / 4 }),
                     exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth / 4 })
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            DeviceSortDropdown(
+                                selectedSort = sortMode,
+                                onSortSelected = { sortMode = it }
+                            )
+                            SourceFilterDropdown(
+                                selectedSource = sourceFilter,
+                                sourceOptions = sourceOptions,
+                                onSourceSelected = { sourceFilter = it }
+                            )
+                        }
                         OutlinedTextField(
                             value = queryFilter,
                             onValueChange = { queryFilter = it },
@@ -14309,10 +13097,15 @@ private fun DevicesPage(
                 Text("Refreshing device analysis...")
             }
         }
-        Text("Showing ${displayedDevices.size} of ${devices.size} (filtered ${filteredDeviceCount})")
+        Text("Showing ${pagedDevices.size} of ${displayedDevices.size} (filtered ${filteredDeviceCount})")
+        Text(
+            "Filters and search run across the full dataset; Load More only controls how many rows render at once.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         LazyColumn {
             items(
-                items = displayedDevices,
+                items = pagedDevices,
                 key = { device -> "${device.source}|${device.primaryId}" },
                 contentType = { "device" }
             ) { device ->
@@ -14385,14 +13178,6 @@ private fun DevicesPage(
                                 fontWeight = FontWeight.Medium
                             )
                         }
-                        val recordSpeed = topSpeedByDevice["${device.source}|${device.primaryId}"]
-                        if (!isCameraSource && recordSpeed != null) {
-                            Text(
-                                text = "Top Speed Record • ${formatSpeedLabel(recordSpeed)}",
-                                color = Color(0xFF2E7D32),
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
                         when (device.trackerRisk?.level) {
                             TrackerRiskLevel.HIGH -> Text(
                                 text = "Tracker Risk: HIGH",
@@ -14427,6 +13212,33 @@ private fun DevicesPage(
                     }
                 }
             }
+            if (pagedDevices.size < displayedDevices.size) {
+                item {
+                    val remaining = (displayedDevices.size - pagedDevices.size).coerceAtLeast(0)
+                    val nextBatch = remaining.coerceAtMost(DETECTION_LIST_PAGE_SIZE)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                visibleDeviceCount = (visibleDeviceCount + DETECTION_LIST_PAGE_SIZE)
+                                    .coerceAtMost(displayedDevices.size)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Load $nextBatch More")
+                        }
+                        Text(
+                            "Loaded ${pagedDevices.size} of ${displayedDevices.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -14434,11 +13246,9 @@ private fun DevicesPage(
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun FlocksPage(
-    recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>
 ) {
-    var dataScope by remember { mutableStateOf(DataScope.ALL) }
-    val selectedEncounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
+    val selectedEncounters = allEncounters
 
     var flocks by remember { mutableStateOf<List<DeviceFlock>>(emptyList()) }
     var flocksComputing by remember { mutableStateOf(false) }
@@ -14493,17 +13303,6 @@ private fun FlocksPage(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Scope", style = MaterialTheme.typography.titleMedium)
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        ScopeFilterDropdown(
-                            selectedScope = dataScope,
-                            onScopeSelected = { dataScope = it }
-                        )
-                    }
                     Text("Analyzed encounters: ${selectedEncounters.size}")
                     Text("Trusted-location encounters: $trustedLocationEncounterCount")
                     Text("Trusted-location devices: $trustedLocationDeviceCount")
@@ -14588,13 +13387,11 @@ private fun FlocksPage(
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun EncountersPage(
-    recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
     ownedDeviceKeys: Set<String>,
     onEncounterClick: (Encounter) -> Unit
 ) {
     val context = LocalContext.current
-    var dataScope by remember { mutableStateOf(DataScope.RECENT_100) }
     var sourceFilter by remember { mutableStateOf<String?>(null) }
     var queryFilter by remember { mutableStateOf("") }
     var showSecondaryIds by rememberSaveable { mutableStateOf(false) }
@@ -14609,7 +13406,7 @@ private fun EncountersPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
-    val encounters = if (dataScope == DataScope.RECENT_100) recentEncounters else allEncounters
+    val encounters = allEncounters
     val sourceOptions = remember(encounters) {
         orderedEncounterSourceOptions(encounters.map { it.source.name }.toSet())
     }
@@ -14656,6 +13453,10 @@ private fun EncountersPage(
             }
         }
     }
+    var visibleEncounterCount by rememberSaveable(displayedEncounters.size) { mutableStateOf(DETECTION_LIST_PAGE_SIZE) }
+    val pagedEncounters = remember(displayedEncounters, visibleEncounterCount) {
+        displayedEncounters.take(visibleEncounterCount.coerceAtMost(displayedEncounters.size))
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Encounters", style = MaterialTheme.typography.headlineMedium)
@@ -14674,33 +13475,17 @@ private fun EncountersPage(
                         Text(if (filtersExpanded) "Hide" else "Show")
                     }
                 }
-
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ScopeFilterDropdown(
-                        selectedScope = dataScope,
-                        onScopeSelected = {
-                            dataScope = it
-                            sourceFilter = null
-                            queryFilter = ""
-                        }
-                    )
-                    SourceFilterDropdown(
-                        selectedSource = sourceFilter,
-                        sourceOptions = sourceOptions,
-                        onSourceSelected = { sourceFilter = it }
-                    )
-                }
-
                 AnimatedVisibility(
                     visible = filtersExpanded,
                     enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth / 4 }),
                     exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth / 4 })
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SourceFilterDropdown(
+                            selectedSource = sourceFilter,
+                            sourceOptions = sourceOptions,
+                            onSourceSelected = { sourceFilter = it }
+                        )
                         OutlinedTextField(
                             value = queryFilter,
                             onValueChange = { queryFilter = it },
@@ -14746,10 +13531,15 @@ private fun EncountersPage(
                 Text("Refreshing encounter list...")
             }
         }
-        Text("Showing ${displayedEncounters.size} of ${encounters.size} (filtered ${filteredEncounterCount})")
+        Text("Showing ${pagedEncounters.size} of ${displayedEncounters.size} (filtered ${filteredEncounterCount})")
+        Text(
+            "Filters and search run across the full dataset; Load More only controls how many rows render at once.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         LazyColumn {
             items(
-                items = displayedEncounters,
+                items = pagedEncounters,
                 key = { encounter -> "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}" },
                 contentType = { "encounter" }
             ) { encounter ->
@@ -14793,6 +13583,33 @@ private fun EncountersPage(
                         }
                         Text("RSSI=${encounter.rssiDbm ?: "n/a"} dBm, Freq=${encounter.frequencyMhz ?: "n/a"} MHz")
                         Text(formatEpoch(encounter.timestampEpochMs))
+                    }
+                }
+            }
+            if (pagedEncounters.size < displayedEncounters.size) {
+                item {
+                    val remaining = (displayedEncounters.size - pagedEncounters.size).coerceAtLeast(0)
+                    val nextBatch = remaining.coerceAtMost(DETECTION_LIST_PAGE_SIZE)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                visibleEncounterCount = (visibleEncounterCount + DETECTION_LIST_PAGE_SIZE)
+                                    .coerceAtMost(displayedEncounters.size)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Load $nextBatch More")
+                        }
+                        Text(
+                            "Loaded ${pagedEncounters.size} of ${displayedEncounters.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -15234,37 +14051,6 @@ private fun DeviceSortDropdown(
 }
 
 @Composable
-private fun ScopeFilterDropdown(
-    selectedScope: DataScope,
-    onScopeSelected: (DataScope) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Data Scope", fontWeight = FontWeight.Medium)
-        Button(onClick = { expanded = true }) {
-            Text(if (selectedScope == DataScope.RECENT_100) "Recent (100)" else "All")
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text("Recent (100)") },
-                onClick = {
-                    onScopeSelected(DataScope.RECENT_100)
-                    expanded = false
-                }
-            )
-            DropdownMenuItem(
-                text = { Text("All") },
-                onClick = {
-                    onScopeSelected(DataScope.ALL)
-                    expanded = false
-                }
-            )
-        }
-    }
-}
-
-@Composable
 private fun DeviceDetailPage(
     item: DeviceItem?,
     deviceEncounters: List<Encounter>,
@@ -15338,13 +14124,6 @@ private fun DeviceDetailPage(
                 lon = it.lastLon,
                 rawPayloadJson = it.lastRawPayloadJson ?: "{}"
             )
-        }
-    }
-    val topSpeedRecordMps = remember(item?.source, item?.primaryId) {
-        if (item == null) {
-            null
-        } else {
-            DeviceSpeedRecordStore.getRecordSpeedMps(context, item.source, item.primaryId)
         }
     }
     val itemIsCameraSource = remember(item?.source) {
@@ -15467,14 +14246,6 @@ private fun DeviceDetailPage(
             },
 
             right = {
-                if (!itemIsCameraSource) {
-                    DetailRow(
-                        "Top Speed Record",
-                        topSpeedRecordMps
-                            ?.let(::formatSpeedLabel)
-                            ?: "n/a"
-                    )
-                }
                 DetailRow(
                     "Tracker Risk",
                     when (item.trackerRisk?.level) {
