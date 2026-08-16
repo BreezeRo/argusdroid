@@ -19,6 +19,8 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -92,6 +94,7 @@ import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
@@ -559,6 +562,27 @@ private data class MagneticHeatSample(
     val intensityScore: Double
 )
 
+private data class MagneticRoomBoundarySample(
+    val timestampEpochMs: Long,
+    val bearingDeg: Double,
+    val distanceMeters: Double
+)
+
+private data class SavedRoomDrawing(
+    val id: String,
+    val label: String,
+    val savedAtEpochMs: Long,
+    val corners: List<Pair<Double, Double>>,
+    val finalCornerIndex: Int,
+    val boundarySamples: List<MagneticRoomBoundarySample>
+)
+
+private enum class MagneticCalibrationPhase {
+    STILL,
+    SWEEP,
+    COMPLETE
+}
+
 private data class MagneticMeshFusionSummary(
     val localSamples: Int,
     val chainSamples: Int,
@@ -576,6 +600,158 @@ private const val RADAR_CONFIDENCE_SPOT_MIN_GAP_MS = 1_500L
 private const val RADAR_CONFIDENCE_SPOT_MIN_CONFIDENCE = 0.62
 private const val RADAR_CONFIDENCE_SPOT_MIN_WARMTH = 0.52
 private const val RADAR_HEATMAP_RETENTION_MS = 4L * 60L * 1000L
+private const val PDR_WIZARD_DEFAULT_STEP_LENGTH_METERS = 0.72
+private const val PDR_STEP_HIGH_THRESHOLD = 1.18
+private const val PDR_STEP_LOW_THRESHOLD = 0.62
+private const val PDR_STEP_MIN_GAP_MS = 320L
+
+private object RoomDrawingStore {
+    private const val PREFS_NAME = "argus_settings"
+    private const val KEY_ROOM_DRAWINGS = "saved_room_drawings"
+    private const val MAX_SAVED_DRAWINGS = 30
+
+    fun read(context: android.content.Context): List<SavedRoomDrawing> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_ROOM_DRAWINGS, "[]") ?: "[]"
+        val array = runCatching { org.json.JSONArray(raw) }.getOrElse { org.json.JSONArray() }
+        return buildList {
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val id = obj.optString("id", "")
+                if (id.isBlank()) continue
+                val label = obj.optString("label", "Room")
+                val savedAtEpochMs = obj.optLong("savedAtEpochMs", 0L)
+
+                val cornersArray = obj.optJSONArray("corners") ?: org.json.JSONArray()
+                val corners = buildList {
+                    for (j in 0 until cornersArray.length()) {
+                        val cornerObj = cornersArray.optJSONObject(j) ?: continue
+                        val x = cornerObj.optDouble("x", Double.NaN)
+                        val y = cornerObj.optDouble("y", Double.NaN)
+                        if (x.isFinite() && y.isFinite()) add(x to y)
+                    }
+                }
+                val finalCornerIndexRaw = obj.optInt("finalCornerIndex", corners.lastIndex)
+                val finalCornerIndex = finalCornerIndexRaw.coerceIn(0, (corners.lastIndex).coerceAtLeast(0))
+
+                val boundaryArray = obj.optJSONArray("boundary") ?: org.json.JSONArray()
+                val boundary = buildList {
+                    for (j in 0 until boundaryArray.length()) {
+                        val sampleObj = boundaryArray.optJSONObject(j) ?: continue
+                        val ts = sampleObj.optLong("ts", 0L)
+                        val bearing = sampleObj.optDouble("bearing", Double.NaN)
+                        val distance = sampleObj.optDouble("distance", Double.NaN)
+                        if (bearing.isFinite() && distance.isFinite() && distance >= 0.0) {
+                            add(
+                                MagneticRoomBoundarySample(
+                                    timestampEpochMs = ts,
+                                    bearingDeg = bearing,
+                                    distanceMeters = distance
+                                )
+                            )
+                        }
+                    }
+                }
+
+                if (boundary.size >= 3) {
+                    add(
+                        SavedRoomDrawing(
+                            id = id,
+                            label = label,
+                            savedAtEpochMs = savedAtEpochMs,
+                            corners = corners,
+                            finalCornerIndex = finalCornerIndex,
+                            boundarySamples = boundary
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun save(
+        context: android.content.Context,
+        drawing: SavedRoomDrawing
+    ) {
+        val existing = read(context).toMutableList()
+        existing.removeAll { item -> item.id == drawing.id }
+        existing.add(0, drawing)
+        val trimmed = existing.take(MAX_SAVED_DRAWINGS)
+
+        val array = org.json.JSONArray()
+        trimmed.forEach { item ->
+            val corners = org.json.JSONArray()
+            item.corners.forEach { corner ->
+                corners.put(
+                    JSONObject()
+                        .put("x", corner.first)
+                        .put("y", corner.second)
+                )
+            }
+            val boundary = org.json.JSONArray()
+            item.boundarySamples.forEach { sample ->
+                boundary.put(
+                    JSONObject()
+                        .put("ts", sample.timestampEpochMs)
+                        .put("bearing", sample.bearingDeg)
+                        .put("distance", sample.distanceMeters)
+                )
+            }
+
+            array.put(
+                JSONObject()
+                    .put("id", item.id)
+                    .put("label", item.label)
+                    .put("savedAtEpochMs", item.savedAtEpochMs)
+                    .put("corners", corners)
+                    .put("finalCornerIndex", item.finalCornerIndex)
+                    .put("boundary", boundary)
+            )
+        }
+
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ROOM_DRAWINGS, array.toString())
+            .apply()
+    }
+
+    fun delete(context: android.content.Context, id: String) {
+        val keep = read(context).filterNot { item -> item.id == id }
+        val array = org.json.JSONArray()
+        keep.forEach { item ->
+            val corners = org.json.JSONArray()
+            item.corners.forEach { corner ->
+                corners.put(
+                    JSONObject()
+                        .put("x", corner.first)
+                        .put("y", corner.second)
+                )
+            }
+            val boundary = org.json.JSONArray()
+            item.boundarySamples.forEach { sample ->
+                boundary.put(
+                    JSONObject()
+                        .put("ts", sample.timestampEpochMs)
+                        .put("bearing", sample.bearingDeg)
+                        .put("distance", sample.distanceMeters)
+                )
+            }
+            array.put(
+                JSONObject()
+                    .put("id", item.id)
+                    .put("label", item.label)
+                    .put("savedAtEpochMs", item.savedAtEpochMs)
+                    .put("corners", corners)
+                    .put("finalCornerIndex", item.finalCornerIndex)
+                    .put("boundary", boundary)
+            )
+        }
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ROOM_DRAWINGS, array.toString())
+            .apply()
+    }
+}
 
 private object OwnedDeviceRegistry {
     fun keyFor(source: String, primaryId: String): String = OwnedSignalRegistry.keyFor(source, primaryId)
@@ -5097,7 +5273,12 @@ private fun MagneticDeviceRadarMeshTab() {
     val freshnessLabel = summary.latestEpochMs?.let { "${formatMapPinAge(it)} ago" } ?: "no recent magnetic mesh data"
     val hasMeshData = summary.chainSamples > 0
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Text("Team Mesh Fusion", fontWeight = FontWeight.SemiBold)
         Text("Fuses local and chain-linked direct-magnetic observations for shared search coverage.")
 
@@ -5154,12 +5335,32 @@ private fun MagneticDeviceRadarMeshTab() {
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalLayoutApi::class)
 private fun MagneticDeviceRadarLiveTab(
     radarReady: Boolean,
     readinessMessage: String,
     showUi: Boolean
 ) {
     val context = LocalContext.current
+    val activityRecognitionPermissionRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    var activityRecognitionPermissionGranted by remember {
+        mutableStateOf(
+            !activityRecognitionPermissionRequired ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACTIVITY_RECOGNITION
+                ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val requestActivityRecognitionPermission = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        activityRecognitionPermissionGranted = granted ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+    }
     val currentLocation by LocationSnapshotProvider.observe(
         context,
         minUpdateIntervalMs = 2_500L
@@ -5182,6 +5383,7 @@ private fun MagneticDeviceRadarLiveTab(
     val hasMagneticSensor = magneticSensor != null
 
     var running by rememberSaveable { mutableStateOf(false) }
+    var liveSamplingEnabled by rememberSaveable { mutableStateOf(false) }
     var latestMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var smoothedMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var latestHeadingDeg by remember { mutableStateOf<Double?>(null) }
@@ -5208,7 +5410,37 @@ private fun MagneticDeviceRadarLiveTab(
     var nearSourceSignatureActive by remember { mutableStateOf(false) }
     var audioHomingEnabled by rememberSaveable { mutableStateOf(true) }
     var heatmapModeEnabled by rememberSaveable { mutableStateOf(false) }
+    var roomPlanModeEnabled by rememberSaveable { mutableStateOf(false) }
+    var roomTraceDrawingActive by remember { mutableStateOf(false) }
+    var pdrWizardEnabled by rememberSaveable { mutableStateOf(true) }
+    var pdrFreeformCornersEnabled by rememberSaveable { mutableStateOf(false) }
+    var pdrWizardActive by remember { mutableStateOf(false) }
+    var pdrWizardBaseHeadingDeg by remember { mutableStateOf<Double?>(null) }
+    var pdrWizardWallIndex by remember { mutableStateOf(0) }
+    var pdrWizardWallStepCount by remember { mutableStateOf(0) }
+    var pdrWizardTotalStepCount by remember { mutableStateOf(0) }
+    var pdrWizardX by remember { mutableStateOf(0.0) }
+    var pdrWizardY by remember { mutableStateOf(0.0) }
+    var pdrRadarAnchorSelection by rememberSaveable { mutableStateOf(0) }
+    var pdrWizardFinalCorner by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    var pdrActiveCornerIndex by remember { mutableStateOf<Int?>(null) }
+    var pdrCornerRenumberTarget by rememberSaveable { mutableStateOf(4) }
+    var pdrStepTrackingEnabled by remember { mutableStateOf(false) }
+    var pdrWizardStepArmed by remember { mutableStateOf(true) }
+    var pdrWizardLastStepEpochMs by remember { mutableStateOf(0L) }
+    val pdrWizardPathPoints: androidx.compose.runtime.snapshots.SnapshotStateList<Pair<Double, Double>> =
+        remember { androidx.compose.runtime.mutableStateListOf() }
+    var calibrationDialogVisible by rememberSaveable { mutableStateOf(false) }
+    var calibrationRunning by remember { mutableStateOf(false) }
+    var calibrationPhase by remember { mutableStateOf(MagneticCalibrationPhase.STILL) }
+    var calibrationSecondsRemaining by remember { mutableStateOf(0) }
+    var calibrationQualityLabel by remember { mutableStateOf<String?>(null) }
+    var calibrationStatusMessage by remember { mutableStateOf<String?>(null) }
     var beepSpacingScale by rememberSaveable { mutableStateOf(2.0f) }
+    var roomDrawingLabelInput by rememberSaveable { mutableStateOf("") }
+    var roomDrawingStatusMessage by remember { mutableStateOf<String?>(null) }
+    var roomDrawingStatusIsError by remember { mutableStateOf(false) }
+    var savedRoomDrawings by remember { mutableStateOf(RoomDrawingStore.read(context)) }
     var lastBeepIntervalMs by remember { mutableStateOf<Long?>(null) }
     var runtimeErrorMessage by remember { mutableStateOf<String?>(null) }
     val radarPoints: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticRadarPoint> =
@@ -5217,15 +5449,22 @@ private fun MagneticDeviceRadarLiveTab(
         remember { androidx.compose.runtime.mutableStateListOf() }
     val heatmapSamples: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticHeatSample> =
         remember { androidx.compose.runtime.mutableStateListOf() }
+    val roomBoundarySamples: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticRoomBoundarySample> =
+        remember { androidx.compose.runtime.mutableStateListOf() }
 
     val sampleTimestampsMs = remember { ArrayDeque<Long>() }
     val disturbanceTimestampsMs = remember { ArrayDeque<Long>() }
     val recentMagnitudeWindow = remember { ArrayDeque<Double>() }
     val motionNoiseWindow = remember { ArrayDeque<Double>() }
     val headingDeltaWindow = remember { ArrayDeque<Double>() }
+    val calibrationMotionSamples = remember { ArrayDeque<Double>() }
+    val calibrationJitterSamples = remember { ArrayDeque<Double>() }
+    val calibrationHeadingSamples = remember { ArrayDeque<Double>() }
     val toneGenerator = remember {
         runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
     }
+    val preCalibrationSensorCollectionEnabled = calibrationDialogVisible && liveSamplingEnabled
+    val sensorCollectionEnabled = running || preCalibrationSensorCollectionEnabled
 
     // Always stop live sampling when this composable leaves composition.
     DisposableEffect(Unit) {
@@ -5240,8 +5479,8 @@ private fun MagneticDeviceRadarLiveTab(
         }
     }
 
-    DisposableEffect(sensorManager, magneticSensor, rotationSensor, proximitySensor, accelerometerSensor, running) {
-        if (sensorManager == null || magneticSensor == null || !running) {
+    DisposableEffect(sensorManager, magneticSensor, rotationSensor, proximitySensor, accelerometerSensor, sensorCollectionEnabled) {
+        if (sensorManager == null || magneticSensor == null || !sensorCollectionEnabled) {
             onDispose { }
         } else {
             val rotationMatrix = FloatArray(9)
@@ -5285,6 +5524,9 @@ private fun MagneticDeviceRadarLiveTab(
                         }
 
                         Sensor.TYPE_MAGNETIC_FIELD -> {
+                            if (!running) {
+                                return
+                            }
                             val x = safeEvent.values.getOrNull(0)?.toDouble() ?: 0.0
                             val y = safeEvent.values.getOrNull(1)?.toDouble() ?: 0.0
                             val z = safeEvent.values.getOrNull(2)?.toDouble() ?: 0.0
@@ -5495,6 +5737,40 @@ private fun MagneticDeviceRadarLiveTab(
                             }
                             val avgLinear = if (motionNoiseWindow.isEmpty()) 0.0 else motionNoiseWindow.average()
                             motionNoiseScore = (avgLinear / 2.4).coerceIn(0.0, 1.0)
+
+                            if (pdrStepTrackingEnabled && liveSamplingEnabled) {
+                                val now = System.currentTimeMillis()
+                                if (pdrWizardStepArmed && linearMag >= PDR_STEP_HIGH_THRESHOLD && now - pdrWizardLastStepEpochMs >= PDR_STEP_MIN_GAP_MS) {
+                                    pdrWizardStepArmed = false
+                                    pdrWizardLastStepEpochMs = now
+                                    pdrWizardTotalStepCount += 1
+                                    if (pdrWizardActive) {
+                                        pdrWizardWallStepCount += 1
+                                    }
+
+                                    val targetHeading = if (pdrWizardActive) {
+                                        if (pdrFreeformCornersEnabled) {
+                                            latestHeadingDeg ?: sessionStartHeadingDeg ?: pdrWizardBaseHeadingDeg
+                                        } else {
+                                            wizardTargetHeadingDeg(
+                                                baseHeadingDeg = pdrWizardBaseHeadingDeg ?: sessionStartHeadingDeg ?: latestHeadingDeg,
+                                                wallIndex = pdrWizardWallIndex
+                                            ) ?: latestHeadingDeg
+                                        }
+                                    } else {
+                                        latestHeadingDeg ?: sessionStartHeadingDeg ?: pdrWizardBaseHeadingDeg
+                                    }
+                                    if (targetHeading != null) {
+                                        val theta = Math.toRadians(targetHeading)
+                                        val candidateX = pdrWizardX + (PDR_WIZARD_DEFAULT_STEP_LENGTH_METERS * sin(theta))
+                                        val candidateY = pdrWizardY + (PDR_WIZARD_DEFAULT_STEP_LENGTH_METERS * cos(theta))
+                                        pdrWizardX = candidateX
+                                        pdrWizardY = candidateY
+                                    }
+                                } else if (!pdrWizardStepArmed && linearMag <= PDR_STEP_LOW_THRESHOLD) {
+                                    pdrWizardStepArmed = true
+                                }
+                            }
                         }
                     }
                 }
@@ -5534,6 +5810,10 @@ private fun MagneticDeviceRadarLiveTab(
     val latestSmoothedMagnitudeMicroTesla by rememberUpdatedState(smoothedMagnitudeMicroTesla)
     val latestBaselineMagnitudeMicroTesla by rememberUpdatedState(baselineMagnitudeMicroTesla)
     val latestNearSourceSignatureActive by rememberUpdatedState(nearSourceSignatureActive)
+    val latestMotionNoiseScore by rememberUpdatedState(motionNoiseScore)
+    val latestRotationJitterDeg by rememberUpdatedState(rotationJitterDeg)
+    val latestHeadingForCalibration by rememberUpdatedState(latestHeadingDeg)
+    val latestRollingMeanForCalibration by rememberUpdatedState(rollingMeanMagnitudeMicroTesla)
 
     LaunchedEffect(radarReady, running, audioHomingEnabled, toneGenerator) {
         if (!radarReady || !running || !audioHomingEnabled || toneGenerator == null) {
@@ -5586,6 +5866,111 @@ private fun MagneticDeviceRadarLiveTab(
         }
     }
 
+    LaunchedEffect(roomTraceDrawingActive, liveSamplingEnabled, sessionStartLocation, currentLocation) {
+        if (!roomTraceDrawingActive || !liveSamplingEnabled) return@LaunchedEffect
+        while (roomTraceDrawingActive && liveSamplingEnabled) {
+            val origin = sessionStartLocation ?: currentLocation?.also { sessionStartLocation = it }
+            val current = currentLocation
+            if (origin != null && current != null) {
+                val distanceMeters = distanceFromLocationMeters(
+                    fromLat = origin.lat,
+                    fromLon = origin.lon,
+                    toLat = current.lat,
+                    toLon = current.lon
+                )
+                val bearingDeg = bearingDegrees(
+                    fromLat = origin.lat,
+                    fromLon = origin.lon,
+                    toLat = current.lat,
+                    toLon = current.lon
+                )
+                if (distanceMeters != null) {
+                    val last = roomBoundarySamples.lastOrNull()
+                    val shouldAdd =
+                        last == null ||
+                            abs(distanceMeters - last.distanceMeters) >= 0.55 ||
+                            abs(normalizeSignedAngleDeg(bearingDeg - last.bearingDeg)) >= 7.0
+                    if (shouldAdd) {
+                        roomBoundarySamples.add(
+                            MagneticRoomBoundarySample(
+                                timestampEpochMs = System.currentTimeMillis(),
+                                bearingDeg = bearingDeg,
+                                distanceMeters = distanceMeters
+                            )
+                        )
+                        while (roomBoundarySamples.size > 1800) {
+                            roomBoundarySamples.removeAt(0)
+                        }
+                    }
+                }
+            }
+            delay(250L)
+        }
+    }
+
+    LaunchedEffect(running, calibrationRunning) {
+        if (!running || !calibrationRunning) return@LaunchedEffect
+
+        fun sampleCalibrationTick() {
+            calibrationMotionSamples.addLast(latestMotionNoiseScore)
+            while (calibrationMotionSamples.size > 64) {
+                calibrationMotionSamples.removeFirst()
+            }
+            calibrationJitterSamples.addLast(latestRotationJitterDeg)
+            while (calibrationJitterSamples.size > 64) {
+                calibrationJitterSamples.removeFirst()
+            }
+            latestHeadingForCalibration?.let { heading ->
+                calibrationHeadingSamples.addLast(heading)
+                while (calibrationHeadingSamples.size > 240) {
+                    calibrationHeadingSamples.removeFirst()
+                }
+            }
+        }
+
+        calibrationPhase = MagneticCalibrationPhase.STILL
+        calibrationSecondsRemaining = 6
+        repeat(6) {
+            if (!running || !calibrationRunning) return@LaunchedEffect
+            sampleCalibrationTick()
+            delay(1_000L)
+            calibrationSecondsRemaining = (calibrationSecondsRemaining - 1).coerceAtLeast(0)
+        }
+
+        calibrationPhase = MagneticCalibrationPhase.SWEEP
+        calibrationSecondsRemaining = 10
+        repeat(10) {
+            if (!running || !calibrationRunning) return@LaunchedEffect
+            sampleCalibrationTick()
+            delay(1_000L)
+            calibrationSecondsRemaining = (calibrationSecondsRemaining - 1).coerceAtLeast(0)
+        }
+
+        calibrationPhase = MagneticCalibrationPhase.COMPLETE
+        calibrationRunning = false
+
+        val avgMotion = if (calibrationMotionSamples.isEmpty()) 1.0 else calibrationMotionSamples.average().coerceIn(0.0, 1.0)
+        val avgJitter = if (calibrationJitterSamples.isEmpty()) 45.0 else calibrationJitterSamples.average().coerceAtLeast(0.0)
+        val headingCoverageDeg = computeHeadingCoverageDeg(calibrationHeadingSamples)
+        val qualityScore = (
+            (0.45 * (1.0 - avgMotion)) +
+                (0.30 * (1.0 - (avgJitter / 32.0).coerceIn(0.0, 1.0))) +
+                (0.25 * (headingCoverageDeg / 300.0).coerceIn(0.0, 1.0))
+            ).coerceIn(0.0, 1.0)
+
+        calibrationQualityLabel = when {
+            qualityScore >= 0.75 -> "Good"
+            qualityScore >= 0.48 -> "Fair"
+            else -> "Poor"
+        }
+        calibrationStatusMessage =
+            "Quality: ${calibrationQualityLabel}. Motion ${(avgMotion * 100.0).roundToInt()}%, jitter ${avgJitter.roundToInt()} deg, sweep ${headingCoverageDeg.roundToInt()} deg."
+
+        latestRollingMeanForCalibration?.let { mean ->
+            baselineMagnitudeMicroTesla = mean
+        }
+    }
+
     if (!radarReady || !hasMagneticSensor) {
         if (showUi) {
             Text("Live Radar is not ready.", color = Color(0xFFB3261E))
@@ -5623,16 +6008,41 @@ private fun MagneticDeviceRadarLiveTab(
         motionNoiseScore = 0.0
         fusionPenaltyScore = 0.0
         nearSourceSignatureActive = false
+        calibrationDialogVisible = false
+        calibrationRunning = false
+        calibrationPhase = MagneticCalibrationPhase.STILL
+        calibrationSecondsRemaining = 0
+        calibrationQualityLabel = null
+        calibrationStatusMessage = null
+        roomDrawingStatusMessage = null
+        roomDrawingStatusIsError = false
         lastBeepIntervalMs = null
         runtimeErrorMessage = null
         radarPoints.clear()
         confidenceSpots.clear()
         heatmapSamples.clear()
+        roomBoundarySamples.clear()
+        pdrWizardActive = false
+        pdrWizardBaseHeadingDeg = null
+        pdrWizardWallIndex = 0
+        pdrWizardWallStepCount = 0
+        pdrWizardTotalStepCount = 0
+        pdrWizardX = 0.0
+        pdrWizardY = 0.0
+        pdrRadarAnchorSelection = 0
+        pdrWizardFinalCorner = null
+        pdrStepTrackingEnabled = false
+        pdrWizardStepArmed = true
+        pdrWizardLastStepEpochMs = 0L
+        pdrWizardPathPoints.clear()
         sampleTimestampsMs.clear()
         disturbanceTimestampsMs.clear()
         recentMagnitudeWindow.clear()
         motionNoiseWindow.clear()
         headingDeltaWindow.clear()
+        calibrationMotionSamples.clear()
+        calibrationJitterSamples.clear()
+        calibrationHeadingSamples.clear()
     }
 
     val headingLabel = latestHeadingDeg?.let { String.format(Locale.US, "%.0f deg", it) } ?: "n/a"
@@ -5640,6 +6050,10 @@ private fun MagneticDeviceRadarLiveTab(
     val sessionOriginLabel = sessionStartLocation?.let {
         String.format(Locale.US, "%.5f, %.5f", it.lat, it.lon)
     } ?: "waiting for location"
+    val gpsAccuracyMeters = currentLocation?.accuracyMeters?.toDouble()
+    val gpsAccuracyLabel = gpsAccuracyMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"
+    val gpsAccuracyGood = gpsAccuracyMeters != null && gpsAccuracyMeters <= 12.0
+    val gpsAccuracyColor = if (gpsAccuracyGood) Color(0xFF2E7D32) else Color(0xFFEF6C00)
     val currentMagLabel = latestMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"
     val smoothMagLabel = smoothedMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"
     val bestHeadingLabel = bestHeadingDeg?.let { String.format(Locale.US, "%.0f deg", it) } ?: "sweep pending"
@@ -5662,6 +6076,34 @@ private fun MagneticDeviceRadarLiveTab(
     val confidencePct = (signalConfidenceScore * 100.0).roundToInt().coerceIn(0, 100)
     val nowEpochMs = System.currentTimeMillis()
     val recentSpots = confidenceSpots.filter { nowEpochMs - it.timestampEpochMs <= RADAR_CONFIDENCE_SPOT_RETENTION_MS }
+    val recentHeatmapSamplesRaw = heatmapSamples.filter { nowEpochMs - it.timestampEpochMs <= RADAR_HEATMAP_RETENTION_MS }
+    val recentHeatmapSamples = filterHeatmapByRoomBoundary(recentHeatmapSamplesRaw, roomBoundarySamples)
+    val heatmapScaleMaxMeters = computeRadarHeatmapDistanceScaleMeters(recentHeatmapSamples)
+    val operatorRoomPositionCartesian: Pair<Double, Double>? = when {
+        pdrWizardEnabled && (pdrWizardPathPoints.isNotEmpty() || pdrWizardFinalCorner != null) -> pdrWizardX to pdrWizardY
+        sessionStartLocation != null && currentLocation != null -> {
+            val origin = sessionStartLocation
+            val current = currentLocation
+            val distanceMeters = distanceFromLocationMeters(
+                fromLat = origin!!.lat,
+                fromLon = origin.lon,
+                toLat = current!!.lat,
+                toLon = current.lon
+            )
+            if (distanceMeters == null) {
+                null
+            } else {
+                val bearingDeg = bearingDegrees(
+                    fromLat = origin.lat,
+                    fromLon = origin.lon,
+                    toLat = current.lat,
+                    toLon = current.lon
+                )
+                polarToCartesianMeters(bearingDeg, distanceMeters)
+            }
+        }
+        else -> null
+    }
     val likelyNearSource = nearSourceSignatureActive
     val dominantSpotHeading = recentSpots
         .groupBy { (it.headingDeg / 20.0).toInt() }
@@ -5673,8 +6115,761 @@ private fun MagneticDeviceRadarLiveTab(
         targetHeadingDeg = dominantSpotHeading ?: bestHeadingDeg,
         trendDeltaMicroTesla = trendDeltaMicroTesla
     )
+    val pdrTargetHeadingDeg = if (pdrFreeformCornersEnabled) {
+        latestHeadingDeg ?: sessionStartHeadingDeg ?: pdrWizardBaseHeadingDeg
+    } else {
+        wizardTargetHeadingDeg(pdrWizardBaseHeadingDeg, pdrWizardWallIndex)
+    }
+    val pdrTurnGuidance = buildPdrTurnGuidance(latestHeadingDeg, pdrTargetHeadingDeg)
+    val wizardCorners: List<Pair<Double, Double>> = run {
+        val corners = mutableListOf<Pair<Double, Double>>()
+        pdrWizardPathPoints.forEach { point ->
+            val shouldAdd = corners.lastOrNull()?.let { last ->
+                val dx = point.first - last.first
+                val dy = point.second - last.second
+                sqrt((dx * dx) + (dy * dy)) >= 0.35
+            } ?: true
+            if (shouldAdd) {
+                corners.add(point)
+            }
+        }
+        if (corners.size >= 2) {
+            val first = corners.first()
+            val last = corners.last()
+            val dx = first.first - last.first
+            val dy = first.second - last.second
+            if (sqrt((dx * dx) + (dy * dy)) <= 0.65) {
+                corners.removeAt(corners.lastIndex)
+            }
+        }
+        corners.take(24)
+    }
+    val applySelectedPdrAnchor: () -> Unit = {
+        val selectedAnchor = when (pdrRadarAnchorSelection) {
+            1 -> {
+                if (wizardCorners.isEmpty()) {
+                    null
+                } else {
+                    val avgX = wizardCorners.asSequence().map { it.first }.average()
+                    val avgY = wizardCorners.asSequence().map { it.second }.average()
+                    avgX to avgY
+                }
+            }
+
+            in 2..Int.MAX_VALUE -> wizardCorners.getOrNull(pdrRadarAnchorSelection - 2)
+            else -> pdrWizardFinalCorner ?: pdrWizardPathPoints.lastOrNull()
+        }
+        selectedAnchor?.let { anchor ->
+            if (roomBoundarySamples.size >= 3) {
+                val roomPolygon = roomBoundarySamples
+                    .map { sample -> polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters) }
+                    .filter { point -> point.first.isFinite() && point.second.isFinite() }
+                val snapped = constrainPointInsideRoomPolygon(
+                    point = anchor,
+                    polygon = roomPolygon,
+                    insetMeters = 0.05
+                )
+                pdrWizardX = snapped.first
+                pdrWizardY = snapped.second
+            } else {
+                pdrWizardX = anchor.first
+                pdrWizardY = anchor.second
+            }
+        }
+    }
+    val recalibrateToCorner: (Int) -> Unit = { cornerIndex ->
+        val boundedIndex = cornerIndex.coerceIn(0, (wizardCorners.size - 1).coerceAtLeast(0))
+        if (wizardCorners.isNotEmpty()) {
+            pdrActiveCornerIndex = boundedIndex
+            pdrRadarAnchorSelection = 2 + boundedIndex
+            pdrWizardFinalCorner = wizardCorners[boundedIndex]
+            applySelectedPdrAnchor()
+            pdrStepTrackingEnabled = true
+            pdrWizardStepArmed = true
+            pdrWizardLastStepEpochMs = 0L
+        }
+    }
+    val renumberSelectedCorner: () -> Unit = {
+        val activeIndex = pdrActiveCornerIndex
+        if (activeIndex != null && wizardCorners.size >= 2) {
+            val targetNumber = pdrCornerRenumberTarget.coerceIn(1, wizardCorners.size)
+            val startIndex = ((activeIndex - (targetNumber - 1)) % wizardCorners.size + wizardCorners.size) % wizardCorners.size
+            val rotated = buildList {
+                repeat(wizardCorners.size) { idx ->
+                    add(wizardCorners[(startIndex + idx) % wizardCorners.size])
+                }
+            }
+            pdrWizardPathPoints.clear()
+            rotated.forEach { corner -> pdrWizardPathPoints.add(corner) }
+            rotated.firstOrNull()?.let { first -> pdrWizardPathPoints.add(first) }
+            pdrActiveCornerIndex = targetNumber - 1
+            pdrWizardFinalCorner = rotated.getOrNull(targetNumber - 1)
+            pdrRadarAnchorSelection = 2 + (targetNumber - 1)
+            roomBoundarySamples.clear()
+            val now = System.currentTimeMillis()
+            pdrWizardPathPoints.forEachIndexed { index, point ->
+                val polar = cartesianMetersToPolarBearingDistance(point.first, point.second)
+                if (index == 0 || polar.second >= 0.25) {
+                    roomBoundarySamples.add(
+                        MagneticRoomBoundarySample(
+                            timestampEpochMs = now + index,
+                            bearingDeg = polar.first,
+                            distanceMeters = polar.second
+                        )
+                    )
+                }
+            }
+            val first = roomBoundarySamples.firstOrNull()
+            val last = roomBoundarySamples.lastOrNull()
+            if (first != null && last != null && roomBoundarySamples.size >= 3) {
+                val closureGap = computeRoomBoundaryClosureGapMeters(roomBoundarySamples) ?: 0.0
+                if (closureGap > 0.2) {
+                    roomBoundarySamples.add(
+                        MagneticRoomBoundarySample(
+                            timestampEpochMs = now + roomBoundarySamples.size,
+                            bearingDeg = first.bearingDeg,
+                            distanceMeters = first.distanceMeters
+                        )
+                    )
+                }
+            }
+            applySelectedPdrAnchor()
+        }
+    }
+    val saveCurrentRoomDrawing: () -> Unit = {
+        if (roomBoundarySamples.size < 3) {
+            roomDrawingStatusMessage = "Need at least 3 boundary points before saving."
+            roomDrawingStatusIsError = true
+        } else {
+            val label = roomDrawingLabelInput.trim().ifBlank {
+                "Room ${savedRoomDrawings.size + 1}"
+            }
+            val now = System.currentTimeMillis()
+            val finalCornerIndex = if (wizardCorners.isEmpty()) {
+                0
+            } else {
+                val finalCorner = pdrWizardFinalCorner
+                if (finalCorner == null) {
+                    wizardCorners.lastIndex
+                } else {
+                    wizardCorners.indices.minByOrNull { idx ->
+                        val dx = wizardCorners[idx].first - finalCorner.first
+                        val dy = wizardCorners[idx].second - finalCorner.second
+                        (dx * dx) + (dy * dy)
+                    } ?: wizardCorners.lastIndex
+                }
+            }
+            val drawing = SavedRoomDrawing(
+                id = "room_$now",
+                label = label,
+                savedAtEpochMs = now,
+                corners = wizardCorners,
+                finalCornerIndex = finalCornerIndex,
+                boundarySamples = roomBoundarySamples.toList()
+            )
+            RoomDrawingStore.save(context, drawing)
+            savedRoomDrawings = RoomDrawingStore.read(context)
+            roomDrawingStatusMessage = "Saved room \"$label\"."
+            roomDrawingStatusIsError = false
+            roomDrawingLabelInput = ""
+        }
+    }
+    val loadRoomDrawing: (SavedRoomDrawing) -> Unit = { drawing ->
+        roomBoundarySamples.clear()
+        roomBoundarySamples.addAll(drawing.boundarySamples)
+
+        pdrWizardPathPoints.clear()
+        drawing.corners.forEach { corner -> pdrWizardPathPoints.add(corner) }
+        drawing.corners.firstOrNull()?.let { firstCorner ->
+            pdrWizardPathPoints.add(firstCorner)
+        }
+
+        val finalCorner = drawing.corners.getOrNull(drawing.finalCornerIndex) ?: drawing.corners.lastOrNull()
+        pdrWizardFinalCorner = finalCorner
+        pdrRadarAnchorSelection = if (drawing.corners.isNotEmpty()) {
+            2 + drawing.finalCornerIndex.coerceIn(0, (drawing.corners.size - 1).coerceAtLeast(0))
+        } else {
+            0
+        }
+        applySelectedPdrAnchor()
+        pdrWizardActive = false
+        pdrStepTrackingEnabled = false
+        pdrWizardStepArmed = true
+        pdrWizardLastStepEpochMs = 0L
+        val cornerLabel = if (drawing.corners.isNotEmpty()) "${drawing.finalCornerIndex + 1}" else "4"
+        roomDrawingStatusMessage = "Loaded room \"${drawing.label}\". Walk to corner $cornerLabel and tap Start/Skip."
+        roomDrawingStatusIsError = false
+    }
+    val syncBoundaryFromPdrPath: () -> Unit = {
+        roomBoundarySamples.clear()
+        val now = System.currentTimeMillis()
+        pdrWizardPathPoints.forEachIndexed { index, point ->
+            val polar = cartesianMetersToPolarBearingDistance(point.first, point.second)
+            if (index == 0 || polar.second >= 0.25) {
+                roomBoundarySamples.add(
+                    MagneticRoomBoundarySample(
+                        timestampEpochMs = now + index,
+                        bearingDeg = polar.first,
+                        distanceMeters = polar.second
+                    )
+                )
+            }
+        }
+        val first = roomBoundarySamples.firstOrNull()
+        val last = roomBoundarySamples.lastOrNull()
+        if (first != null && last != null && roomBoundarySamples.size >= 3) {
+            val closureGap = computeRoomBoundaryClosureGapMeters(roomBoundarySamples) ?: 0.0
+            if (closureGap > 0.2) {
+                roomBoundarySamples.add(
+                    MagneticRoomBoundarySample(
+                        timestampEpochMs = now + roomBoundarySamples.size,
+                        bearingDeg = first.bearingDeg,
+                        distanceMeters = first.distanceMeters
+                    )
+                )
+            }
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (calibrationDialogVisible) {
+            val calibrationReadyToStart = !calibrationRunning && calibrationQualityLabel == null
+            val phaseTitle = when {
+                calibrationRunning && calibrationPhase == MagneticCalibrationPhase.STILL -> "Calibration: Hold Still"
+                calibrationRunning && calibrationPhase == MagneticCalibrationPhase.SWEEP -> "Calibration: Slow 360 Sweep"
+                calibrationReadyToStart -> "Calibration Ready"
+                else -> "Calibration Complete"
+            }
+            val phaseBody = when {
+                calibrationRunning && calibrationPhase == MagneticCalibrationPhase.STILL ->
+                    "Hold the phone still and flat for better baseline and motion calibration."
+                calibrationRunning && calibrationPhase == MagneticCalibrationPhase.SWEEP ->
+                    "Rotate slowly in place to map directional magnetic contrast."
+                calibrationReadyToStart ->
+                    "When you are flat and ready, tap Start to begin stillness + sweep calibration."
+                else -> (calibrationStatusMessage ?: "Calibration finished.")
+            }
+            val totalPhaseSeconds = if (calibrationPhase == MagneticCalibrationPhase.STILL) 6 else 10
+            val progress = if (!calibrationRunning) 1f else {
+                ((totalPhaseSeconds - calibrationSecondsRemaining).toFloat() / totalPhaseSeconds.toFloat()).coerceIn(0f, 1f)
+            }
+
+            AlertDialog(
+                onDismissRequest = { },
+                title = { Text(phaseTitle) },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(phaseBody)
+                        if (calibrationReadyToStart) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Room boundary trace: ${roomBoundarySamples.size} points",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (roomBoundarySamples.isNotEmpty()) {
+                                    TextButton(
+                                        onClick = {
+                                            roomBoundarySamples.clear()
+                                            pdrWizardActive = false
+                                            pdrStepTrackingEnabled = false
+                                            pdrRadarAnchorSelection = 0
+                                            pdrWizardFinalCorner = null
+                                            pdrWizardPathPoints.clear()
+                                            pdrWizardWallIndex = 0
+                                            pdrWizardWallStepCount = 0
+                                            pdrWizardTotalStepCount = 0
+                                            pdrWizardX = 0.0
+                                            pdrWizardY = 0.0
+                                            pdrWizardStepArmed = true
+                                        }
+                                    ) {
+                                        Text("Clear")
+                                    }
+                                }
+                            }
+                            OutlinedTextField(
+                                value = roomDrawingLabelInput,
+                                onValueChange = { roomDrawingLabelInput = it },
+                                label = { Text("Room label") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { saveCurrentRoomDrawing() },
+                                    enabled = roomBoundarySamples.size >= 3,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Save Room")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        savedRoomDrawings = RoomDrawingStore.read(context)
+                                        roomDrawingStatusMessage = "Refreshed saved rooms."
+                                        roomDrawingStatusIsError = false
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Refresh")
+                                }
+                            }
+                            if (!roomDrawingStatusMessage.isNullOrBlank()) {
+                                Text(
+                                    text = roomDrawingStatusMessage!!,
+                                    color = if (roomDrawingStatusIsError) Color(0xFFB3261E) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (savedRoomDrawings.isNotEmpty()) {
+                                Text("Saved rooms", fontWeight = FontWeight.Medium)
+                                savedRoomDrawings.take(8).forEach { drawing ->
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(8.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(drawing.label, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = "Saved end corner: C${drawing.finalCornerIndex + 1}",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = if (drawing.corners.isNotEmpty()) {
+                                                    drawing.corners.mapIndexed { index, corner ->
+                                                        "C${index + 1}(${String.format(Locale.US, "%.1f", corner.first)}, ${String.format(Locale.US, "%.1f", corner.second)})"
+                                                    }.joinToString("  ")
+                                                } else {
+                                                    "No corner metadata"
+                                                },
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Button(
+                                                    onClick = { loadRoomDrawing(drawing) },
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Load")
+                                                }
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        RoomDrawingStore.delete(context, drawing.id)
+                                                        savedRoomDrawings = RoomDrawingStore.read(context)
+                                                        roomDrawingStatusMessage = "Deleted \"${drawing.label}\"."
+                                                        roomDrawingStatusIsError = false
+                                                    },
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Delete")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Use 4-wall PDR wizard", fontWeight = FontWeight.Medium)
+                                Switch(
+                                    checked = pdrWizardEnabled,
+                                    onCheckedChange = { enabled ->
+                                        pdrWizardEnabled = enabled
+                                        roomTraceDrawingActive = false
+                                        pdrWizardActive = false
+                                        if (!enabled) {
+                                            pdrStepTrackingEnabled = false
+                                        }
+                                    }
+                                )
+                            }
+
+                            if (pdrWizardEnabled) {
+                                if (activityRecognitionPermissionRequired && !activityRecognitionPermissionGranted) {
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                "Activity Recognition permission is recommended for stable PDR behavior on this Android version.",
+                                                color = Color(0xFFB3261E),
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        requestActivityRecognitionPermission.launch(
+                                                            Manifest.permission.ACTIVITY_RECOGNITION
+                                                        )
+                                                    },
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Grant Permission")
+                                                }
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        runCatching {
+                                                            context.startActivity(
+                                                                Intent(
+                                                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                                    Uri.parse("package:${context.packageName}")
+                                                                )
+                                                            )
+                                                        }
+                                                    },
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Open Settings")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Card(modifier = Modifier.fillMaxWidth()) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text("Indoor Wizard: Walk wall by wall with heading guidance.", fontWeight = FontWeight.Medium)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                if (pdrFreeformCornersEnabled) {
+                                                    "Multi-corner mode"
+                                                } else {
+                                                    "4-corner mode"
+                                                },
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Switch(
+                                                checked = pdrFreeformCornersEnabled,
+                                                onCheckedChange = { enabled ->
+                                                    pdrFreeformCornersEnabled = enabled
+                                                    pdrWizardWallIndex = 0
+                                                }
+                                            )
+                                        }
+                                        Text(
+                                            if (pdrFreeformCornersEnabled) {
+                                                "Corners recorded: ${wizardCorners.size}"
+                                            } else {
+                                                "Wall ${pdrWizardWallIndex + 1} / 4"
+                                            },
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(pdrTurnGuidance)
+                                        Text(
+                                            "Steps this wall: ${pdrWizardWallStepCount}  Total: ${pdrWizardTotalStepCount}",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Button(
+                                                onClick = {
+                                                    pdrWizardActive = true
+                                                    pdrStepTrackingEnabled = true
+                                                    if (pdrWizardBaseHeadingDeg == null) {
+                                                        pdrWizardBaseHeadingDeg = latestHeadingDeg ?: sessionStartHeadingDeg
+                                                    }
+                                                    if (pdrWizardPathPoints.isEmpty()) {
+                                                        pdrWizardPathPoints.add(0.0 to 0.0)
+                                                        syncBoundaryFromPdrPath()
+                                                    }
+                                                },
+                                                enabled = liveSamplingEnabled,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(if (pdrWizardActive) "Wizard Running" else "Start Wizard")
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    pdrWizardActive = false
+                                                    pdrStepTrackingEnabled = false
+                                                    pdrWizardPathPoints.clear()
+                                                    pdrWizardPathPoints.add(0.0 to 0.0)
+                                                    pdrRadarAnchorSelection = 0
+                                                    pdrWizardFinalCorner = null
+                                                    pdrWizardBaseHeadingDeg = latestHeadingDeg ?: sessionStartHeadingDeg
+                                                    pdrWizardWallIndex = 0
+                                                    pdrWizardWallStepCount = 0
+                                                    pdrWizardTotalStepCount = 0
+                                                    pdrWizardX = 0.0
+                                                    pdrWizardY = 0.0
+                                                    pdrWizardStepArmed = true
+                                                    syncBoundaryFromPdrPath()
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text("Reset")
+                                            }
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Button(
+                                                onClick = {
+                                                    if (pdrWizardPathPoints.isEmpty()) {
+                                                        pdrWizardPathPoints.add(0.0 to 0.0)
+                                                    }
+                                                    pdrWizardPathPoints.add(pdrWizardX to pdrWizardY)
+                                                    pdrWizardWallIndex = if (pdrFreeformCornersEnabled) {
+                                                        pdrWizardWallIndex + 1
+                                                    } else {
+                                                        (pdrWizardWallIndex + 1).coerceAtMost(3)
+                                                    }
+                                                    pdrWizardWallStepCount = 0
+                                                    syncBoundaryFromPdrPath()
+                                                },
+                                                enabled = pdrWizardActive && pdrWizardWallStepCount >= 2,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text("Reached Corner")
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    pdrWizardActive = false
+                                                    pdrStepTrackingEnabled = false
+                                                    val finalCorner = pdrWizardX to pdrWizardY
+                                                    val shouldAppendFinalCorner = pdrWizardPathPoints.lastOrNull()?.let { lastCorner ->
+                                                        val dx = finalCorner.first - lastCorner.first
+                                                        val dy = finalCorner.second - lastCorner.second
+                                                        sqrt((dx * dx) + (dy * dy)) >= 0.35
+                                                    } ?: true
+                                                    if (shouldAppendFinalCorner) {
+                                                        pdrWizardPathPoints.add(finalCorner)
+                                                    }
+                                                    pdrWizardFinalCorner = pdrWizardPathPoints.lastOrNull() ?: finalCorner
+                                                    pdrRadarAnchorSelection = 0
+                                                    syncBoundaryFromPdrPath()
+                                                    applySelectedPdrAnchor()
+                                                },
+                                                enabled = wizardCorners.size >= 4 && pdrWizardWallStepCount >= 2,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text("Finish 4 Walls")
+                                            }
+                                        }
+                                        if (wizardCorners.isNotEmpty()) {
+                                            Text(
+                                                "Radar start anchor",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            FlowRow(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                FilterChip(
+                                                    selected = pdrRadarAnchorSelection == 0,
+                                                    onClick = {
+                                                        pdrRadarAnchorSelection = 0
+                                                        applySelectedPdrAnchor()
+                                                    },
+                                                    label = { Text("Last corner") }
+                                                )
+                                                FilterChip(
+                                                    selected = pdrRadarAnchorSelection == 1,
+                                                    onClick = {
+                                                        pdrRadarAnchorSelection = 1
+                                                        applySelectedPdrAnchor()
+                                                    },
+                                                    label = { Text("Room center") }
+                                                )
+                                                wizardCorners.forEachIndexed { index, _ ->
+                                                    val selection = 2 + index
+                                                    FilterChip(
+                                                        selected = pdrRadarAnchorSelection == selection,
+                                                        onClick = {
+                                                            pdrRadarAnchorSelection = selection
+                                                            applySelectedPdrAnchor()
+                                                        },
+                                                        label = { Text("Corner ${index + 1}") }
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = "PDR uses rotation-vector compass heading after wizard to keep tracking your in-room movement.",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                Button(
+                                    onClick = { },
+                                    enabled = liveSamplingEnabled && currentLocation != null,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .pointerInteropFilter { motionEvent ->
+                                            when (motionEvent.actionMasked) {
+                                                android.view.MotionEvent.ACTION_DOWN,
+                                                android.view.MotionEvent.ACTION_POINTER_DOWN,
+                                                android.view.MotionEvent.ACTION_MOVE -> {
+                                                    roomTraceDrawingActive = true
+                                                    true
+                                                }
+
+                                                android.view.MotionEvent.ACTION_UP,
+                                                android.view.MotionEvent.ACTION_POINTER_UP,
+                                                android.view.MotionEvent.ACTION_CANCEL -> {
+                                                    roomTraceDrawingActive = false
+                                                    true
+                                                }
+
+                                                else -> false
+                                            }
+                                        }
+                                ) {
+                                    Text(if (roomTraceDrawingActive) "Tracing room boundary... release to stop" else "Hold to trace room boundary")
+                                }
+                                if (roomTraceDrawingActive) {
+                                    Text(
+                                        text = if (gpsAccuracyGood) {
+                                            "GPS accuracy good ($gpsAccuracyLabel). Keep tracing."
+                                        } else {
+                                            "GPS accuracy low ($gpsAccuracyLabel). Consider pausing briefly for a stronger fix."
+                                        },
+                                        color = gpsAccuracyColor,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            if (!roomTraceDrawingActive && roomBoundarySamples.size >= 3) {
+                                MagneticRoomBoundaryPreview(
+                                    samples = roomBoundarySamples,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                val closureGapMeters = computeRoomBoundaryClosureGapMeters(roomBoundarySamples)
+                                val closureLabel = closureGapMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"
+                                Text(
+                                    text = "Preview closure gap: $closureLabel. If this looks off, clear and retrace before Start.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (calibrationRunning) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text("${calibrationSecondsRemaining}s remaining")
+                        } else {
+                            calibrationQualityLabel?.let { quality ->
+                                Text("Result: $quality", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            when {
+                                calibrationRunning -> {
+                                    calibrationRunning = false
+                                    roomTraceDrawingActive = false
+                                    calibrationDialogVisible = false
+                                }
+
+                                calibrationReadyToStart -> {
+                                    applySelectedPdrAnchor()
+                                    pdrStepTrackingEnabled = true
+                                    pdrWizardStepArmed = true
+                                    pdrWizardLastStepEpochMs = 0L
+                                    calibrationMotionSamples.clear()
+                                    calibrationJitterSamples.clear()
+                                    calibrationHeadingSamples.clear()
+                                    calibrationStatusMessage = null
+                                    calibrationPhase = MagneticCalibrationPhase.STILL
+                                    calibrationSecondsRemaining = 6
+                                    running = true
+                                    calibrationRunning = true
+                                    calibrationDialogVisible = true
+                                }
+
+                                else -> {
+                                    roomTraceDrawingActive = false
+                                    calibrationDialogVisible = false
+                                }
+                            }
+                        }
+                    ) {
+                        Text(
+                            when {
+                                calibrationRunning -> "Skip"
+                                calibrationReadyToStart -> "Start"
+                                else -> "Continue"
+                            }
+                        )
+                    }
+                },
+                dismissButton = {
+                    if (calibrationReadyToStart) {
+                        TextButton(
+                            onClick = {
+                                applySelectedPdrAnchor()
+                                pdrStepTrackingEnabled = true
+                                pdrWizardStepArmed = true
+                                pdrWizardLastStepEpochMs = 0L
+                                running = true
+                                roomTraceDrawingActive = false
+                                calibrationDialogVisible = false
+                            }
+                        ) {
+                            Text("Skip")
+                        }
+                    } else if (!calibrationRunning) {
+                        TextButton(
+                            onClick = {
+                                calibrationMotionSamples.clear()
+                                calibrationJitterSamples.clear()
+                                calibrationHeadingSamples.clear()
+                                calibrationQualityLabel = null
+                                calibrationStatusMessage = null
+                                calibrationPhase = MagneticCalibrationPhase.STILL
+                                calibrationSecondsRemaining = 6
+                                calibrationRunning = true
+                                calibrationDialogVisible = true
+                            }
+                        ) {
+                            Text("Recalibrate")
+                        }
+                    }
+                }
+            )
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -5682,12 +6877,28 @@ private fun MagneticDeviceRadarLiveTab(
         ) {
             Text("Live sampling", fontWeight = FontWeight.Medium)
             Switch(
-                checked = running,
+                checked = liveSamplingEnabled,
                 onCheckedChange = { enabled ->
-                    if (enabled != running) {
+                    if (enabled) {
+                        if (!liveSamplingEnabled) {
+                            resetLiveRadarSession()
+                        }
+                        liveSamplingEnabled = true
+                        running = false
+                        calibrationMotionSamples.clear()
+                        calibrationJitterSamples.clear()
+                        calibrationHeadingSamples.clear()
+                        calibrationQualityLabel = null
+                        calibrationStatusMessage = null
+                        calibrationPhase = MagneticCalibrationPhase.STILL
+                        calibrationSecondsRemaining = 6
+                        calibrationRunning = false
+                        calibrationDialogVisible = true
+                    } else {
+                        liveSamplingEnabled = false
+                        running = false
                         resetLiveRadarSession()
                     }
-                    running = enabled
                 }
             )
         }
@@ -5711,6 +6922,17 @@ private fun MagneticDeviceRadarLiveTab(
             Switch(
                 checked = heatmapModeEnabled,
                 onCheckedChange = { heatmapModeEnabled = it }
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Room plan map mode", fontWeight = FontWeight.Medium)
+            Switch(
+                checked = roomPlanModeEnabled,
+                onCheckedChange = { roomPlanModeEnabled = it }
             )
         }
         Text(
@@ -5766,7 +6988,7 @@ private fun MagneticDeviceRadarLiveTab(
         )
         if (heatmapModeEnabled) {
             Text(
-                text = "Heatmap hotspots (last ${RADAR_HEATMAP_RETENTION_MS / 1000}s): ${heatmapSamples.size}",
+                text = "Heatmap hotspots (last ${RADAR_HEATMAP_RETENTION_MS / 1000}s): ${recentHeatmapSamples.size} | Scale: 0-${String.format(Locale.US, "%.1f", heatmapScaleMaxMeters)} m",
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -5784,20 +7006,86 @@ private fun MagneticDeviceRadarLiveTab(
             )
         }
 
-        MagneticRadarCanvas(
-            points = radarPoints,
-            confidenceSpots = recentSpots,
-            heatmapSamples = heatmapSamples,
-            currentHeadingDeg = latestHeadingDeg,
-            sessionReferenceHeadingDeg = sessionStartHeadingDeg,
-            targetHeadingDeg = bestHeadingDeg,
-            showConfidenceSpots = likelyNearSource,
-            showHeatmap = heatmapModeEnabled
-        )
+        if (roomPlanModeEnabled) {
+            MagneticRoomPlanCanvas(
+                roomBoundarySamples = roomBoundarySamples,
+                heatmapSamples = recentHeatmapSamples,
+                operatorRoomPosition = operatorRoomPositionCartesian,
+                showHeatmap = heatmapModeEnabled
+            )
+        } else {
+            MagneticRadarCanvas(
+                points = radarPoints,
+                confidenceSpots = recentSpots,
+                heatmapSamples = recentHeatmapSamples,
+                roomBoundarySamples = roomBoundarySamples,
+                operatorRoomPosition = operatorRoomPositionCartesian,
+                currentHeadingDeg = latestHeadingDeg,
+                sessionReferenceHeadingDeg = sessionStartHeadingDeg,
+                targetHeadingDeg = bestHeadingDeg,
+                showConfidenceSpots = likelyNearSource,
+                showHeatmap = heatmapModeEnabled
+            )
+        }
+        if (wizardCorners.isNotEmpty()) {
+            Text("Corner recalibration", fontWeight = FontWeight.Medium)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                wizardCorners.forEachIndexed { index, _ ->
+                    FilterChip(
+                        selected = pdrActiveCornerIndex == index,
+                        onClick = { recalibrateToCorner(index) },
+                        label = { Text("I'm at C${index + 1}") }
+                    )
+                }
+            }
+            if (wizardCorners.size >= 2) {
+                Text("Renumber selected corner as", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val maxTarget = wizardCorners.size.coerceAtMost(12)
+                    for (cornerNumber in 1..maxTarget) {
+                        FilterChip(
+                            selected = pdrCornerRenumberTarget == cornerNumber,
+                            onClick = { pdrCornerRenumberTarget = cornerNumber },
+                            label = { Text("C$cornerNumber") }
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = { renumberSelectedCorner() },
+                    enabled = pdrActiveCornerIndex != null
+                ) {
+                    Text("Apply Corner Number")
+                }
+            }
+            Text(
+                text = "Tap the corner you are physically at to re-anchor instantly.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Text(
             text = "Tip: walk slowly while keeping the phone orientation steady. Follow stronger field and tempo increases.",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Text(
+            text = if (roomPlanModeEnabled) {
+                "Room Plan mode: scale is locked to traced room geometry; blue dot is your live in-room position."
+            } else {
+                "Blue center dot is you; room footprint and heatmap stay visible with adaptive zoom and minimum-footprint safeguards."
+            },
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (pdrWizardEnabled && !pdrWizardActive && !calibrationDialogVisible && pdrStepTrackingEnabled) {
+            Text(
+                text = "Step tracking active from selected anchor.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Text(
             text = "Samples captured: $sampleCount",
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -5828,7 +7116,7 @@ private fun MagneticRadarReadinessCard(
             Text("Radar readiness", fontWeight = FontWeight.Medium)
             Text("High sampling sensors permission: $permissionStatus")
             Text("Magnetometer sensor: $sensorStatus")
-            Text("Proximity / light / accelerometer: no runtime permission required")
+            Text("Accelerometer raw data: no runtime permission required (PDR wizard also requests Activity Recognition on supported versions)")
             Text(
                 if (ready) {
                     "Ready: live radar can sample at high speed."
@@ -5943,6 +7231,239 @@ private fun estimateRadarRelativeDistanceScore(
         ).coerceIn(0.0, 1.0)
     // 0.0 means near/center, 1.0 means far/outer rings.
     return (1.0 - closenessScore).coerceIn(0.0, 1.0)
+}
+
+private fun computeRadarHeatmapDistanceScaleMeters(samples: List<MagneticHeatSample>): Double {
+    if (samples.isEmpty()) return 6.0
+    val sorted = samples
+        .asSequence()
+        .map { sample -> sample.distanceMeters }
+        .filter { distance -> distance.isFinite() && distance >= 0.0 }
+        .sorted()
+        .toList()
+    if (sorted.isEmpty()) return 6.0
+
+    val p90 = sorted[(sorted.lastIndex * 0.90).roundToInt().coerceIn(0, sorted.lastIndex)]
+    val p60 = sorted[(sorted.lastIndex * 0.60).roundToInt().coerceIn(0, sorted.lastIndex)]
+    val adaptiveMax = maxOf(p90, p60 * 1.25)
+    return adaptiveMax.coerceIn(4.0, 80.0)
+}
+
+private fun computeHeadingCoverageDeg(samples: Collection<Double>): Double {
+    if (samples.isEmpty()) return 0.0
+    val buckets = samples
+        .asSequence()
+        .map { heading -> (((heading % 360.0) + 360.0) % 360.0) }
+        .map { normalized -> (normalized / 15.0).toInt() }
+        .toSet()
+    return (buckets.size * 15.0).coerceIn(0.0, 360.0)
+}
+
+private fun filterHeatmapByRoomBoundary(
+    heatSamples: List<MagneticHeatSample>,
+    boundarySamples: List<MagneticRoomBoundarySample>
+): List<MagneticHeatSample> {
+    if (boundarySamples.size < 3) return heatSamples
+    val polygon = boundarySamples.map { sample -> polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters) }
+    if (polygon.size < 3) return heatSamples
+    return heatSamples.filter { sample ->
+        val point = polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+        pointInPolygon(point.first, point.second, polygon)
+    }
+}
+
+private fun polarToCartesianMeters(bearingDeg: Double, distanceMeters: Double): Pair<Double, Double> {
+    val theta = Math.toRadians(bearingDeg)
+    val x = distanceMeters * sin(theta)
+    val y = distanceMeters * cos(theta)
+    return x to y
+}
+
+private fun pointInPolygon(x: Double, y: Double, polygon: List<Pair<Double, Double>>): Boolean {
+    if (polygon.size < 3) return false
+    var inside = false
+    var j = polygon.lastIndex
+    for (i in polygon.indices) {
+        val xi = polygon[i].first
+        val yi = polygon[i].second
+        val xj = polygon[j].first
+        val yj = polygon[j].second
+        val intersects = ((yi > y) != (yj > y)) &&
+            (x < ((xj - xi) * (y - yi) / ((yj - yi).takeIf { abs(it) > 1e-9 } ?: 1e-9) + xi))
+        if (intersects) inside = !inside
+        j = i
+    }
+    return inside
+}
+
+private fun closestPointOnSegment(
+    point: Pair<Double, Double>,
+    a: Pair<Double, Double>,
+    b: Pair<Double, Double>
+): Pair<Double, Double> {
+    val abX = b.first - a.first
+    val abY = b.second - a.second
+    val abLenSq = (abX * abX) + (abY * abY)
+    if (abLenSq <= 1e-12) return a
+    val apX = point.first - a.first
+    val apY = point.second - a.second
+    val t = ((apX * abX) + (apY * abY)) / abLenSq
+    val clamped = t.coerceIn(0.0, 1.0)
+    return (a.first + abX * clamped) to (a.second + abY * clamped)
+}
+
+private fun constrainPointInsideRoomPolygon(
+    point: Pair<Double, Double>,
+    polygon: List<Pair<Double, Double>>,
+    insetMeters: Double = 0.20
+): Pair<Double, Double> {
+    if (polygon.size < 3) return point
+    if (pointInPolygon(point.first, point.second, polygon)) return point
+
+    var nearest = polygon.first()
+    var nearestDistSq = Double.POSITIVE_INFINITY
+    for (i in polygon.indices) {
+        val a = polygon[i]
+        val b = polygon[(i + 1) % polygon.size]
+        val candidate = closestPointOnSegment(point, a, b)
+        val dx = point.first - candidate.first
+        val dy = point.second - candidate.second
+        val distSq = (dx * dx) + (dy * dy)
+        if (distSq < nearestDistSq) {
+            nearestDistSq = distSq
+            nearest = candidate
+        }
+    }
+
+    val centroid = centroidCartesian(polygon) ?: return nearest
+    val inX = centroid.first - nearest.first
+    val inY = centroid.second - nearest.second
+    val inLen = sqrt((inX * inX) + (inY * inY))
+    if (inLen <= 1e-9) return nearest
+
+    val insetScale = (insetMeters / inLen).coerceIn(0.0, 1.0)
+    val insetPoint = (nearest.first + inX * insetScale) to (nearest.second + inY * insetScale)
+    return if (pointInPolygon(insetPoint.first, insetPoint.second, polygon)) insetPoint else nearest
+}
+
+private fun computeRoomBoundaryClosureGapMeters(samples: List<MagneticRoomBoundarySample>): Double? {
+    if (samples.size < 2) return null
+    val first = polarToCartesianMeters(samples.first().bearingDeg, samples.first().distanceMeters)
+    val last = polarToCartesianMeters(samples.last().bearingDeg, samples.last().distanceMeters)
+    val dx = last.first - first.first
+    val dy = last.second - first.second
+    return sqrt((dx * dx) + (dy * dy))
+}
+
+private fun cartesianMetersToPolarBearingDistance(xMeters: Double, yMeters: Double): Pair<Double, Double> {
+    val distanceMeters = sqrt((xMeters * xMeters) + (yMeters * yMeters))
+    if (!distanceMeters.isFinite() || distanceMeters <= 0.0) {
+        return 0.0 to 0.0
+    }
+    val bearingDeg = ((Math.toDegrees(atan2(xMeters, yMeters)) % 360.0) + 360.0) % 360.0
+    return bearingDeg to distanceMeters
+}
+
+private fun wizardTargetHeadingDeg(baseHeadingDeg: Double?, wallIndex: Int): Double? {
+    val base = baseHeadingDeg ?: return null
+    return (base + (wallIndex.coerceAtLeast(0) % 4) * 90.0) % 360.0
+}
+
+private fun buildPdrTurnGuidance(currentHeadingDeg: Double?, targetHeadingDeg: Double?): String {
+    val target = targetHeadingDeg ?: return "Face forward to lock heading, then start walking this wall."
+    val targetLabel = String.format(Locale.US, "%.0f", target)
+    if (currentHeadingDeg == null) {
+        return "Face about $targetLabel deg, then walk forward along this wall."
+    }
+    val delta = normalizeSignedAngleDeg(target - currentHeadingDeg)
+    val absDelta = abs(delta)
+    return when {
+        absDelta <= 8.0 -> "Heading aligned. Walk forward and tap Reached Corner at the wall end."
+        absDelta >= 165.0 -> "Turn around, then align to $targetLabel deg and walk this wall."
+        delta > 0.0 -> "Turn right ${absDelta.roundToInt()} deg, then walk this wall."
+        else -> "Turn left ${absDelta.roundToInt()} deg, then walk this wall."
+    }
+}
+
+@Composable
+private fun MagneticRoomBoundaryPreview(
+    samples: List<MagneticRoomBoundarySample>,
+    modifier: Modifier = Modifier
+) {
+    Card(modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .padding(8.dp)
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val radius = (size.minDimension / 2f) * 0.88f
+                val ringColor = Color(0xFF90A4AE).copy(alpha = 0.35f)
+                drawCircle(color = ringColor, radius = radius, center = center, style = Stroke(width = 1.6f))
+                drawCircle(color = ringColor, radius = radius * 0.66f, center = center, style = Stroke(width = 1.2f))
+                drawCircle(color = ringColor, radius = radius * 0.33f, center = center, style = Stroke(width = 1.0f))
+
+                if (samples.size >= 2) {
+                    val cartesian = samples.map { sample ->
+                        polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+                    }
+                    val centroid = centroidCartesian(cartesian) ?: (0.0 to 0.0)
+                    val centered = cartesian.map { point ->
+                        (point.first - centroid.first) to (point.second - centroid.second)
+                    }
+                    val scale = centered
+                        .asSequence()
+                        .map { point -> sqrt((point.first * point.first) + (point.second * point.second)) }
+                        .maxOrNull()
+                        ?.coerceAtLeast(1.0)
+                        ?: 1.0
+
+                    val projected = centered.map { point ->
+                        val nx = (point.first / scale).coerceIn(-1.0, 1.0)
+                        val ny = (point.second / scale).coerceIn(-1.0, 1.0)
+                        Offset(
+                            x = center.x + (radius * 0.92f * nx.toFloat()),
+                            y = center.y - (radius * 0.92f * ny.toFloat())
+                        )
+                    }
+
+                    projected.zipWithNext { from, to ->
+                        drawLine(
+                            color = Color(0xFF43A047).copy(alpha = 0.85f),
+                            start = from,
+                            end = to,
+                            strokeWidth = 3.0f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                    projected.firstOrNull()?.let { start ->
+                        drawCircle(color = Color(0xFF1E88E5), radius = 4.5f, center = start)
+                    }
+                    projected.lastOrNull()?.let { end ->
+                        drawCircle(color = Color(0xFFE53935), radius = 4.5f, center = end)
+                    }
+                }
+            }
+            Text(
+                text = "Room Boundary Preview",
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.TopStart)
+                    .padding(start = 2.dp, top = 2.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+private fun centroidCartesian(points: List<Pair<Double, Double>>): Pair<Double, Double>? {
+    if (points.isEmpty()) return null
+    val meanX = points.asSequence().map { it.first }.average()
+    val meanY = points.asSequence().map { it.second }.average()
+    if (!meanX.isFinite() || !meanY.isFinite()) return null
+    return meanX to meanY
 }
 
 private fun buildMagneticMeshFusionSummary(
@@ -6087,6 +7608,8 @@ private fun MagneticRadarCanvas(
     points: List<MagneticRadarPoint>,
     confidenceSpots: List<MagneticConfidenceSpot>,
     heatmapSamples: List<MagneticHeatSample>,
+    roomBoundarySamples: List<MagneticRoomBoundarySample>,
+    operatorRoomPosition: Pair<Double, Double>?,
     currentHeadingDeg: Double?,
     sessionReferenceHeadingDeg: Double?,
     targetHeadingDeg: Double?,
@@ -6107,7 +7630,7 @@ private fun MagneticRadarCanvas(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val radius = (size.minDimension / 2f) * 0.9f
-                val referenceHeadingDeg = sessionReferenceHeadingDeg ?: currentHeadingDeg ?: 0.0
+                val referenceHeadingDeg = currentHeadingDeg ?: sessionReferenceHeadingDeg ?: 0.0
 
                 drawCircle(
                     color = ringColorStrong,
@@ -6134,40 +7657,141 @@ private fun MagneticRadarCanvas(
                 val span = (maxMagnitude - minMagnitude).coerceAtLeast(1.0)
                 val directionalContrast = computeMagneticDirectionalContrast(recent)
                 val directionalRadiusScale = (0.32f + 0.68f * directionalContrast.toFloat()).coerceIn(0.32f, 1f)
+                val boundaryCartesian = roomBoundarySamples.map { sample ->
+                    polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+                }.filter { point -> point.first.isFinite() && point.second.isFinite() }
+                val heatmapCartesian = heatmapSamples.map { sample ->
+                    polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+                }.filter { point -> point.first.isFinite() && point.second.isFinite() }
+                val roomCenter = operatorRoomPosition ?: (0.0 to 0.0)
+                val relativeBoundary = boundaryCartesian.map { point ->
+                    (point.first - roomCenter.first) to (point.second - roomCenter.second)
+                }
+                val relativeHeatmap = heatmapCartesian.map { point ->
+                    (point.first - roomCenter.first) to (point.second - roomCenter.second)
+                }
+                val allRelativePoints = relativeBoundary + relativeHeatmap
+                val nearFieldDistance = allRelativePoints
+                    .asSequence()
+                    .map { point ->
+                        sqrt((point.first * point.first) + (point.second * point.second))
+                    }
+                    .filter { distance -> distance.isFinite() }
+                    .sorted()
+                    .toList()
+                val boundaryDistances = relativeBoundary
+                    .asSequence()
+                    .map { point -> sqrt((point.first * point.first) + (point.second * point.second)) }
+                    .filter { distance -> distance.isFinite() }
+                    .sorted()
+                    .toList()
+                val roomMetersPerRadiusBase = if (boundaryDistances.size >= 3) {
+                    // Keep room footprint prominent by targeting most of the radius with boundary points.
+                    val idx = (boundaryDistances.lastIndex * 0.88).roundToInt().coerceIn(0, boundaryDistances.lastIndex)
+                    val p88 = boundaryDistances[idx]
+                    (p88 / 0.78).coerceIn(2.8, 16.0)
+                } else if (nearFieldDistance.isEmpty()) {
+                    8.0
+                } else {
+                    val p70 = nearFieldDistance[(nearFieldDistance.lastIndex * 0.70).roundToInt().coerceIn(0, nearFieldDistance.lastIndex)]
+                    val p90 = nearFieldDistance[(nearFieldDistance.lastIndex * 0.90).roundToInt().coerceIn(0, nearFieldDistance.lastIndex)]
+                    maxOf(p70 * 1.10, p90 * 0.82).coerceIn(3.0, 16.0)
+                }
+                var pixelsPerMeter = (radius * 0.88f) / roomMetersPerRadiusBase.toFloat()
+
+                // If outliers shrank the footprint too much, force a minimum visible size.
+                if (relativeBoundary.size >= 2) {
+                    val projected = relativeBoundary.map { point ->
+                        Offset(
+                            x = center.x + (point.first.toFloat() * pixelsPerMeter),
+                            y = center.y - (point.second.toFloat() * pixelsPerMeter)
+                        )
+                    }
+                    val minX = projected.minOf { it.x }
+                    val maxX = projected.maxOf { it.x }
+                    val minY = projected.minOf { it.y }
+                    val maxY = projected.maxOf { it.y }
+                    val footprint = maxOf(maxX - minX, maxY - minY)
+                    val minTarget = radius * 0.32f
+                    if (footprint.isFinite() && footprint > 1f && footprint < minTarget) {
+                        val upScale = (minTarget / footprint).coerceIn(1f, 3.2f)
+                        pixelsPerMeter *= upScale
+                    }
+                }
+                val toCanvasOffset: (Pair<Double, Double>) -> Offset = { point ->
+                    val dx = point.first - roomCenter.first
+                    val dy = point.second - roomCenter.second
+                    Offset(
+                        x = center.x + (dx.toFloat() * pixelsPerMeter),
+                        y = center.y - (dy.toFloat() * pixelsPerMeter)
+                    )
+                }
 
                 if (showHeatmap && heatmapSamples.isNotEmpty()) {
                     val now = System.currentTimeMillis()
-                    val recentHeat = heatmapSamples.filter { sample -> now - sample.timestampEpochMs <= RADAR_HEATMAP_RETENTION_MS }
-                    val distanceScaleMax = recentHeat
-                        .map { sample -> sample.distanceMeters }
-                        .maxOrNull()
-                        ?.coerceAtLeast(20.0)
-                        ?.coerceAtMost(260.0)
-                        ?: 20.0
 
-                    recentHeat.forEach { sample ->
+                    heatmapSamples.forEach { sample ->
                         val ageRatio = 1.0 - ((now - sample.timestampEpochMs).toDouble() / RADAR_HEATMAP_RETENTION_MS.toDouble())
                         val ageFade = ageRatio.coerceIn(0.08, 1.0).toFloat()
                         val intensity = sample.intensityScore.coerceIn(0.0, 1.0).toFloat()
-                        val radialNorm = (sample.distanceMeters / distanceScaleMax).coerceIn(0.0, 1.0).toFloat()
-                        val heatRadius = (radius * (0.06f + 0.88f * radialNorm)).coerceAtMost(radius)
-                        val relativeHeading = ((sample.bearingDeg - referenceHeadingDeg) + 360.0) % 360.0
-                        val theta = Math.toRadians(relativeHeading)
-                        val x = center.x + (heatRadius * sin(theta).toFloat())
-                        val y = center.y - (heatRadius * cos(theta).toFloat())
+                        val canvasPoint = toCanvasOffset(polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters))
 
                         drawCircle(
                             color = Color(0xFFFF3D00).copy(alpha = (0.05f + 0.20f * intensity) * ageFade),
                             radius = 10.0f + (22.0f * intensity),
-                            center = Offset(x, y)
+                            center = canvasPoint
                         )
                         drawCircle(
                             color = Color(0xFFFF8F00).copy(alpha = (0.06f + 0.22f * intensity) * ageFade),
                             radius = 5.0f + (12.0f * intensity),
-                            center = Offset(x, y)
+                            center = canvasPoint
                         )
                     }
                 }
+
+                if (roomBoundarySamples.size >= 2) {
+                    val path = boundaryCartesian.map { point -> toCanvasOffset(point) }
+                    if (path.size >= 3) {
+                        val polygon = Path().apply {
+                            moveTo(path.first().x, path.first().y)
+                            path.drop(1).forEach { point ->
+                                lineTo(point.x, point.y)
+                            }
+                            close()
+                        }
+                        drawPath(
+                            path = polygon,
+                            color = Color(0xFF66BB6A).copy(alpha = 0.24f)
+                        )
+                    }
+                    path.zipWithNext { from, to ->
+                        drawLine(
+                            color = Color(0xFF2E7D32).copy(alpha = 0.92f),
+                            start = from,
+                            end = to,
+                            strokeWidth = 3.2f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                    path.forEach { corner ->
+                        drawCircle(
+                            color = Color(0xFF1B5E20).copy(alpha = 0.92f),
+                            radius = 3.2f,
+                            center = corner
+                        )
+                    }
+                }
+
+                drawCircle(
+                    color = Color(0xFF1E88E5).copy(alpha = 0.30f),
+                    radius = 10f,
+                    center = center
+                )
+                drawCircle(
+                    color = Color(0xFF1E88E5),
+                    radius = 4.4f,
+                    center = center
+                )
 
                 recent.forEach { point ->
                     val normalized = ((point.magnitudeMicroTesla - minMagnitude) / span).toFloat().coerceIn(0f, 1f)
@@ -6234,8 +7858,7 @@ private fun MagneticRadarCanvas(
                 }
 
                 currentHeadingDeg?.let {
-                    val relativeHeading = ((it - referenceHeadingDeg) + 360.0) % 360.0
-                    val theta = Math.toRadians(relativeHeading)
+                    val theta = 0.0
                     val current = Offset(
                         x = center.x + (radius * 0.82f * sin(theta).toFloat()),
                         y = center.y - (radius * 0.82f * cos(theta).toFloat())
@@ -6259,6 +7882,151 @@ private fun MagneticRadarCanvas(
                 textAlign = TextAlign.Center
             )
         }
+    }
+}
+
+@Composable
+private fun MagneticRoomPlanCanvas(
+    roomBoundarySamples: List<MagneticRoomBoundarySample>,
+    heatmapSamples: List<MagneticHeatSample>,
+    operatorRoomPosition: Pair<Double, Double>?,
+    showHeatmap: Boolean
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .padding(8.dp)
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val radius = (size.minDimension / 2f) * 0.9f
+
+                val boundaryCartesian = roomBoundarySamples.map { sample ->
+                    polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+                }.filter { point -> point.first.isFinite() && point.second.isFinite() }
+                val heatmapCartesian = heatmapSamples.map { sample ->
+                    polarToCartesianMeters(sample.bearingDeg, sample.distanceMeters)
+                }.filter { point -> point.first.isFinite() && point.second.isFinite() }
+
+                if (boundaryCartesian.size < 3) {
+                    drawCircle(
+                        color = Color(0xFF90A4AE).copy(alpha = 0.28f),
+                        radius = radius,
+                        center = center,
+                        style = Stroke(width = 2f)
+                    )
+                    return@Canvas
+                }
+
+                val roomCenter = centroidCartesian(boundaryCartesian) ?: (0.0 to 0.0)
+                val relativeBoundary = boundaryCartesian.map { point ->
+                    (point.first - roomCenter.first) to (point.second - roomCenter.second)
+                }
+                val relativeHeatmap = heatmapCartesian.map { point ->
+                    (point.first - roomCenter.first) to (point.second - roomCenter.second)
+                }
+                val relativeOperator = operatorRoomPosition?.let { point ->
+                    (point.first - roomCenter.first) to (point.second - roomCenter.second)
+                }
+
+                val distances = relativeBoundary
+                    .asSequence()
+                    .map { point -> sqrt((point.first * point.first) + (point.second * point.second)) }
+                    .filter { it.isFinite() }
+                    .sorted()
+                    .toList()
+                val roomRadiusMeters = if (distances.isEmpty()) {
+                    1.0
+                } else {
+                    val idx = (distances.lastIndex * 0.94).roundToInt().coerceIn(0, distances.lastIndex)
+                    distances[idx].coerceAtLeast(0.5)
+                }
+                val pixelsPerMeter = (radius * 0.84f) / roomRadiusMeters.toFloat()
+
+                val toCanvas: (Pair<Double, Double>) -> Offset = { point ->
+                    Offset(
+                        x = center.x + (point.first.toFloat() * pixelsPerMeter),
+                        y = center.y - (point.second.toFloat() * pixelsPerMeter)
+                    )
+                }
+
+                val boundaryPath = relativeBoundary.map { point -> toCanvas(point) }
+                if (boundaryPath.size >= 3) {
+                    val polygon = Path().apply {
+                        moveTo(boundaryPath.first().x, boundaryPath.first().y)
+                        boundaryPath.drop(1).forEach { p -> lineTo(p.x, p.y) }
+                        close()
+                    }
+                    drawPath(path = polygon, color = Color(0xFF66BB6A).copy(alpha = 0.22f))
+                }
+
+                if (showHeatmap && relativeHeatmap.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    heatmapSamples.forEachIndexed { index, sample ->
+                        val point = relativeHeatmap.getOrNull(index) ?: return@forEachIndexed
+                        val ageRatio = 1.0 - ((now - sample.timestampEpochMs).toDouble() / RADAR_HEATMAP_RETENTION_MS.toDouble())
+                        val ageFade = ageRatio.coerceIn(0.08, 1.0).toFloat()
+                        val intensity = sample.intensityScore.coerceIn(0.0, 1.0).toFloat()
+                        val canvasPoint = toCanvas(point)
+                        drawCircle(
+                            color = Color(0xFFFF6F00).copy(alpha = (0.08f + 0.28f * intensity) * ageFade),
+                            radius = 5f + (14f * intensity),
+                            center = canvasPoint
+                        )
+                    }
+                }
+
+                boundaryPath.zipWithNext { from, to ->
+                    drawLine(
+                        color = Color(0xFF2E7D32).copy(alpha = 0.95f),
+                        start = from,
+                        end = to,
+                        strokeWidth = 3.4f,
+                        cap = StrokeCap.Round
+                    )
+                }
+                if (boundaryPath.size >= 3) {
+                    drawLine(
+                        color = Color(0xFF2E7D32).copy(alpha = 0.95f),
+                        start = boundaryPath.last(),
+                        end = boundaryPath.first(),
+                        strokeWidth = 3.4f,
+                        cap = StrokeCap.Round
+                    )
+                }
+
+                relativeOperator?.let { operator ->
+                    val operatorOffset = toCanvas(operator)
+                    drawCircle(
+                        color = Color(0xFF1E88E5).copy(alpha = 0.32f),
+                        radius = 10f,
+                        center = operatorOffset
+                    )
+                    drawCircle(
+                        color = Color(0xFF1E88E5),
+                        radius = 4.4f,
+                        center = operatorOffset
+                    )
+                }
+            }
+
+            Text(
+                text = "Room Plan Map",
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.TopStart)
+                    .padding(start = 4.dp, top = 2.dp),
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+    if (roomBoundarySamples.size < 3) {
+        Text(
+            text = "Room plan needs a completed boundary trace/wizard first.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
