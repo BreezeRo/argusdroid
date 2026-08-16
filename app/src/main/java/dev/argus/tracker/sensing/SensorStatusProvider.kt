@@ -44,13 +44,11 @@ object SensorStatusProvider {
 
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val magneticAvailable = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null
-        val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
         val nfcEnabled = runCatching { NfcAdapter.getDefaultAdapter(context)?.isEnabled == true }
             .getOrDefault(false)
 
         val ingestDir = context.filesDir.resolve("ingest")
         val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
-        val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val sdrFeedConfigured = ingestDir.resolve("sdr.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val activeNetwork = connectivityManager?.activeNetwork
@@ -87,11 +85,6 @@ object SensorStatusProvider {
                 name = "NFC",
                 isOn = nfcEnabled,
                 factoredByArgus = ScanSettings.isNfcSensorEnabled(context)
-            ),
-            SensorStatus(
-                name = "UWB",
-                isOn = uwbHardwareAvailable || uwbFeedConfigured,
-                factoredByArgus = ScanSettings.isUwbSensorEnabled(context)
             ),
             SensorStatus(
                 name = "SDR",

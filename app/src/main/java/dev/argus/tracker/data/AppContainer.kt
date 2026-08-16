@@ -61,7 +61,6 @@ class DefaultAppContainer(
                 RemoteIdScanner(context),
                 CameraScanner(context),
                 AviationScanner(context),
-                ExternalFeedScanner(context, EncounterSource.UWB, "uwb"),
                 ExternalFeedScanner(context, EncounterSource.SDR, "sdr"),
                 AcousticSignatureScanner(context),
                 MagnetometerDisturbanceScanner(context)

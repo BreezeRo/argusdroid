@@ -131,7 +131,6 @@ object DetectionReadinessAdvisor {
             pm?.isIgnoringBatteryOptimizations(context.packageName) == true
         }.getOrDefault(false)
 
-        val uwbHardwareAvailable = context.packageManager.hasSystemFeature("android.hardware.uwb")
         val nfcAdapter = runCatching { NfcAdapter.getDefaultAdapter(context) }.getOrNull()
         val nfcHardwareAvailable = nfcAdapter != null
         val nfcEnabled = nfcAdapter?.isEnabled == true
@@ -144,13 +143,11 @@ object DetectionReadinessAdvisor {
         }
         val ingestDir = context.filesDir.resolve("ingest")
         val adsbFeedConfigured = ingestDir.resolve("adsb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
-        val uwbFeedConfigured = ingestDir.resolve("uwb.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val sdrFeedConfigured = ingestDir.resolve("sdr.jsonl").let { it.exists() && it.isFile && it.length() > 0L }
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val activeNetwork = connectivityManager?.activeNetwork
         val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
         val internetReady = networkCapabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-        val uwbReady = uwbHardwareAvailable || uwbFeedConfigured
 
         return listOf(
             DetectionReadinessItem(
@@ -278,19 +275,6 @@ object DetectionReadinessAdvisor {
                 currentValue = if (hasMagnetometer) "Available" else "Not available",
                 isMissing = !hasMagnetometer,
                 openSettingsLabel = "Open Device Settings",
-                settingsIntent = Intent(Settings.ACTION_SETTINGS)
-            ),
-            DetectionReadinessItem(
-                id = "source_uwb",
-                title = "UWB Source Availability",
-                recommendedValue = "UWB hardware or UWB ingest feed available",
-                currentValue = when {
-                    uwbHardwareAvailable -> "UWB hardware available"
-                    uwbFeedConfigured -> "UWB ingest feed configured"
-                    else -> "No UWB source detected"
-                },
-                isMissing = !uwbReady,
-                openSettingsLabel = "Open System Settings",
                 settingsIntent = Intent(Settings.ACTION_SETTINGS)
             ),
             DetectionReadinessItem(

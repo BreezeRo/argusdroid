@@ -13,7 +13,6 @@ enum class EncounterSource {
     CELL,
     CAMERA,
     AIRCRAFT,
-    UWB,
     SDR,
     UNKNOWN_RF
 }

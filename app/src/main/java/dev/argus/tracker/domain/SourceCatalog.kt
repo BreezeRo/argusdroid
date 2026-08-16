@@ -18,7 +18,6 @@ object SourceCatalog {
     const val KEY_REMOTE_ID = "remote_id"
     const val KEY_CAMERA = "camera"
     const val KEY_AIRCRAFT = "aircraft"
-    const val KEY_UWB = "uwb"
     const val KEY_SDR = "sdr"
     const val KEY_ACOUSTIC = "acoustic"
     const val KEY_MAGNETIC = "magnetic"
@@ -34,7 +33,6 @@ object SourceCatalog {
     val SOURCE_CELL: String = EncounterSource.CELL.name
     val SOURCE_CAMERA: String = EncounterSource.CAMERA.name
     val SOURCE_AIRCRAFT: String = EncounterSource.AIRCRAFT.name
-    val SOURCE_UWB: String = EncounterSource.UWB.name
     val SOURCE_SDR: String = EncounterSource.SDR.name
     val SOURCE_ARGUS_MESH: String = EncounterSource.ARGUS_MESH.name
     val SOURCE_UNKNOWN_RF: String = EncounterSource.UNKNOWN_RF.name
@@ -49,7 +47,6 @@ object SourceCatalog {
         ScanSourceDefinition(KEY_REMOTE_ID, EncounterSource.REMOTE_ID),
         ScanSourceDefinition(KEY_CAMERA, EncounterSource.CAMERA),
         ScanSourceDefinition(KEY_AIRCRAFT, EncounterSource.AIRCRAFT),
-        ScanSourceDefinition(KEY_UWB, EncounterSource.UWB),
         ScanSourceDefinition(KEY_SDR, EncounterSource.SDR),
         ScanSourceDefinition(KEY_ACOUSTIC, null),
         ScanSourceDefinition(KEY_MAGNETIC, null)

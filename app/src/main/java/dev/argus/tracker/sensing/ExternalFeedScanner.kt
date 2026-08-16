@@ -101,7 +101,6 @@ class ExternalFeedScanner(
     }
 
     private fun isSourceEnabled(): Boolean = when (source) {
-        EncounterSource.UWB -> ScanSettings.isUwbSensorEnabled(context)
         EncounterSource.SDR -> ScanSettings.isSdrSensorEnabled(context)
         else -> true
     }

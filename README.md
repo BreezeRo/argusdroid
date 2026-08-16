@@ -19,7 +19,6 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - NFC ingest path (intent-driven ingest + scanner integration).
 - Aircraft telemetry (ADS-B/public feed).
 - Remote ID.
-- UWB ingest.
 - SDR ingest.
 - Direct acoustic channel.
 - Direct magnetometer channel.
@@ -39,7 +38,6 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Tracker suspicion scoring for repeated co-movement behavior.
 - Flock graph analysis for repeated co-travel correlation across trusted moving sources.
 - Background flock alert monitor with persisted signature/cooldown state to avoid alert storms.
-- Foreign signal risk scoring across channel indicators with configurable threshold.
 - Signal Intel includes direct acoustic and direct magnetometer diagnostics.
 - NFC alert surfacing for newly observed NFC encounters.
 - Magnetometer disturbance increase alerts.
@@ -80,7 +78,6 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 
 - Remote ID JSONL: ingest/remote_id.jsonl
 - ADS-B JSONL: ingest/adsb.jsonl
-- UWB JSONL: ingest/uwb.jsonl
 - SDR JSONL: ingest/sdr.jsonl
 - No-fly overlay GeoJSON: ingest/no_fly_zones.geojson
 - Public aircraft feed: OpenSky-compatible endpoint (configured in settings)
