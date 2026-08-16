@@ -15,8 +15,7 @@ import kotlinx.coroutines.flow.conflate
 
 data class DetectionLocation(
     val lat: Double,
-    val lon: Double,
-    val accuracyMeters: Float? = null
+    val lon: Double
 )
 
 object LocationSnapshotProvider {
@@ -54,11 +53,7 @@ object LocationSnapshotProvider {
             ?: candidates.maxByOrNull { scored -> scored.score }?.location
             ?: return null
 
-        return DetectionLocation(
-            lat = latest.latitude,
-            lon = latest.longitude,
-            accuracyMeters = if (latest.hasAccuracy()) latest.accuracy else null
-        )
+        return DetectionLocation(lat = latest.latitude, lon = latest.longitude)
     }
 
     fun observe(context: Context, minUpdateIntervalMs: Long = 5_000L): Flow<DetectionLocation?> = callbackFlow {
@@ -115,13 +110,7 @@ object LocationSnapshotProvider {
 
             if (shouldEmit(bestCandidate)) {
                 lastEmittedLocation = bestCandidate
-                trySend(
-                    DetectionLocation(
-                        lat = bestCandidate.latitude,
-                        lon = bestCandidate.longitude,
-                        accuracyMeters = if (bestCandidate.hasAccuracy()) bestCandidate.accuracy else null
-                    )
-                )
+                trySend(DetectionLocation(bestCandidate.latitude, bestCandidate.longitude))
             }
         }
 

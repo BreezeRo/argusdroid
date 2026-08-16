@@ -171,10 +171,6 @@ class MainActivity : ComponentActivity() {
             permissions += Manifest.permission.BLUETOOTH_CONNECT
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            permissions += Manifest.permission.ACTIVITY_RECOGNITION
-        }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions += Manifest.permission.NEARBY_WIFI_DEVICES
             permissions += Manifest.permission.POST_NOTIFICATIONS

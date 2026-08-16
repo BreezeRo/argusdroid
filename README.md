@@ -75,7 +75,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Detection: readiness, devices, flocks, signal diagnostics, maps, and mesh operations.
 - Logs: alerts, operational errors, and encounter timeline.
 - Settings: scheduling, detection gates, alert policies, map behavior, and data reset/backup workflows.
-- Settings Extras: Magnetic Device Radar with Live Radar, Team Mesh fusion, and Guide tabs (including optional GPS heatmap mode).
+- Settings Extras: Magnetic Device Radar with Live Radar, Team Mesh fusion, and Guide tabs.
 
 ## Ingest Interfaces
 
@@ -106,7 +106,6 @@ MAPS_API_KEY is consumed via Gradle manifest placeholders by phone and wear modu
 - BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-level dependent)
 - NEARBY_WIFI_DEVICES (API-level dependent)
 - POST_NOTIFICATIONS (Android 13+)
-- ACTIVITY_RECOGNITION (Android 10+; used for PDR room-mapping compatibility)
 - HIGH_SAMPLING_RATE_SENSORS (required for high-cadence magnetic live radar sampling on supported versions)
 
 Disabled source gates prevent that source from participating in both scheduled and live pipelines.
@@ -132,32 +131,6 @@ Disabled source gates prevent that source from participating in both scheduled a
 	- Added near-source-triggered audible homing behavior with immediate drop when near-source state ends.
 	- Added granular beep-spacing control for field tempo tuning.
 	- Updated confidence spot rendering to use inferred relative-distance depth cues rather than near-constant radius placement.
-	- Added session reference heading anchoring so radar rendering stays relative to a stable start orientation during a run.
-	- Added session GPS-origin anchoring and a toggleable heatmap mode that draws overlapping hotspots brighter to highlight repeatedly stronger areas.
-	- Added rolling heat hotspot retention/decay and live hotspot-count diagnostics in the radar UI.
-	- Added a pre-calibration room-boundary preview with closure-gap feedback.
-	- Added an indoor-focused 4-wall PDR wizard that guides heading per wall and captures corner points using step-based dead reckoning.
-	- Kept the original hold-to-trace boundary capture as a fallback mode when GPS trace quality is acceptable.
-	- Added in-wizard Activity Recognition permission prompt/actions for Android 10+.
-	- Fixed step recording in pre-calibration wizard by enabling heading/step sensor collection before calibration starts while still suppressing pre-start magnetic sampling.
-	- Reworked room boundary and heatmap rendering to an origin-anchored frame with a live operator marker so movement around the room is visually obvious.
-	- Updated radar room view so screen center is always operator position, with filled room footprint and overflow beyond radar edges when room scale exceeds the near-field frame.
-	- Continued PDR tracking from the wizard's last corner into calibration/live search so post-wizard movement remains spatially consistent.
-	- Fixed wizard finish anchoring to always capture the live final corner before calibration, so starting position in-room matches where mapping ended.
-	- Reworked room rendering again for robust visibility: percentile-based zoom, outlier-resistant scaling, minimum on-screen footprint enforcement, and stronger room boundary styling.
-	- Added a wizard anchor-selection step so operators can start radar from last corner, room center, or a specific corner (1-4) before calibration/search.
-	- Added post-wizard in-room movement constraints so PDR position is projected back inside mapped room bounds instead of drifting outside during live search.
-	- Adjusted radar room scaling to be room-size aware so mapped walls occupy most of the radar viewport while staying visible.
-	- Added vertical scrolling for long Live Radar and wizard/calibration content to keep all controls reachable on-device.
-	- Added a Room Plan map mode toggle that replaces radar rendering with a room-geometry-first map based solely on traced room shape plus in-room position/heat overlays.
-	- Simplified post-wizard anchoring so the operator position remains in the wizard room frame (corner-4/final-corner first), avoiding GPS fallback drift that could place the "you" marker far from the room.
-	- Added saved room drawing profiles (local) with load/delete support so operators can reuse room maps instead of repeating the full wizard each time.
-	- Added numbered-corner reference metadata in the saved-room selection list to make corner-based loading and "walk to corner 4" workflows faster.
-	- Aligned room-plan world scale to traced boundary-only geometry and snap-corrected selected anchors into room bounds to reduce outside-room starts and tiny-dot movement artifacts.
-	- Persisted and reused the actual wizard end-corner index per saved room profile so loaded maps anchor to the correct corner even when corner list ordering is rotated.
-	- Removed hard post-wizard in-room clamping of step updates to avoid path skew from boundary projection; movement now follows raw step plus heading integration.
-	- Added a multi-corner room wizard mode (beyond 4 corners) with freeform corner progression and persisted corner indexing for load/restart workflows.
-	- Added live corner controls to tap your current corner and renumber it (for example, "I'm at this point and it should be Corner 4") so room indexing can be corrected anytime during search.
 - Sensor/permission readiness hardening:
 	- Added HIGH_SAMPLING_RATE_SENSORS manifest permission and readiness checks for live radar gating.
 
