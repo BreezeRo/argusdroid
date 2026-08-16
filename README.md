@@ -75,7 +75,6 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Detection: readiness, devices, flocks, signal diagnostics, maps, and mesh operations.
 - Logs: alerts, operational errors, and encounter timeline.
 - Settings: scheduling, detection gates, alert policies, map behavior, and data reset/backup workflows.
-- Settings Extras: Magnetic Device Radar with Live Radar, Team Mesh fusion, and Guide tabs.
 
 ## Ingest Interfaces
 
@@ -106,7 +105,6 @@ MAPS_API_KEY is consumed via Gradle manifest placeholders by phone and wear modu
 - BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-level dependent)
 - NEARBY_WIFI_DEVICES (API-level dependent)
 - POST_NOTIFICATIONS (Android 13+)
-- HIGH_SAMPLING_RATE_SENSORS (required for high-cadence magnetic live radar sampling on supported versions)
 
 Disabled source gates prevent that source from participating in both scheduled and live pipelines.
 
@@ -117,22 +115,6 @@ Disabled source gates prevent that source from participating in both scheduled a
 - Summary metrics include all source types across the 24h reporting window.
 
 ## Today’s Delivered Changes (2026-08-15)
-
-- Magnetic Device Radar (Settings Extras) added:
-	- Added a dedicated Extras page under Settings with a tabbed Magnetic Device Radar surface.
-	- Added Live Radar with heading-relative plotting, confidence spots, and near-source signature messaging.
-	- Added Team Mesh radar tab to fuse local and chain-linked direct magnetic encounters.
-	- Added Guide tab with step-by-step operator workflow.
-- Magnetic radar signal-quality and fusion improvements:
-	- Added rotation-vector quality factoring (jitter/stability/freshness) into confidence scoring.
-	- Added proximity plus motion-noise environmental penalties in confidence modeling.
-	- Removed light-sensor dependence from radar fusion.
-- Magnetic radar audio/visual behavior tuning:
-	- Added near-source-triggered audible homing behavior with immediate drop when near-source state ends.
-	- Added granular beep-spacing control for field tempo tuning.
-	- Updated confidence spot rendering to use inferred relative-distance depth cues rather than near-constant radius placement.
-- Sensor/permission readiness hardening:
-	- Added HIGH_SAMPLING_RATE_SENSORS manifest permission and readiness checks for live radar gating.
 
 - Detection tab topology refactor:
 	- Added a dedicated Flocks tab in Detection and moved flock analytics out of Devices.
