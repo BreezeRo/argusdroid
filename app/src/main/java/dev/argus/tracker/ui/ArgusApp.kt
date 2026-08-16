@@ -552,6 +552,13 @@ private data class MagneticConfidenceSpot(
     val relativeDistanceScore: Double
 )
 
+private data class MagneticHeatSample(
+    val timestampEpochMs: Long,
+    val bearingDeg: Double,
+    val distanceMeters: Double,
+    val intensityScore: Double
+)
+
 private data class MagneticMeshFusionSummary(
     val localSamples: Int,
     val chainSamples: Int,
@@ -568,6 +575,7 @@ private const val RADAR_CONFIDENCE_SPOT_RETENTION_MS = 90_000L
 private const val RADAR_CONFIDENCE_SPOT_MIN_GAP_MS = 1_500L
 private const val RADAR_CONFIDENCE_SPOT_MIN_CONFIDENCE = 0.62
 private const val RADAR_CONFIDENCE_SPOT_MIN_WARMTH = 0.52
+private const val RADAR_HEATMAP_RETENTION_MS = 4L * 60L * 1000L
 
 private object OwnedDeviceRegistry {
     fun keyFor(source: String, primaryId: String): String = OwnedSignalRegistry.keyFor(source, primaryId)
@@ -5152,6 +5160,10 @@ private fun MagneticDeviceRadarLiveTab(
     showUi: Boolean
 ) {
     val context = LocalContext.current
+    val currentLocation by LocationSnapshotProvider.observe(
+        context,
+        minUpdateIntervalMs = 2_500L
+    ).collectAsState(initial = LocationSnapshotProvider.read(context))
     val sensorManager = remember(context) {
         context.getSystemService(android.content.Context.SENSOR_SERVICE) as? SensorManager
     }
@@ -5173,6 +5185,8 @@ private fun MagneticDeviceRadarLiveTab(
     var latestMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var smoothedMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var latestHeadingDeg by remember { mutableStateOf<Double?>(null) }
+    var sessionStartHeadingDeg by remember { mutableStateOf<Double?>(null) }
+    var sessionStartLocation by remember { mutableStateOf<DetectionLocation?>(null) }
     var bestHeadingDeg by remember { mutableStateOf<Double?>(null) }
     var bestMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var trendDeltaMicroTesla by remember { mutableStateOf(0.0) }
@@ -5192,14 +5206,16 @@ private fun MagneticDeviceRadarLiveTab(
     var motionNoiseScore by remember { mutableStateOf(0.0) }
     var fusionPenaltyScore by remember { mutableStateOf(0.0) }
     var nearSourceSignatureActive by remember { mutableStateOf(false) }
-    var nearSourceLastDetectedEpochMs by remember { mutableStateOf<Long?>(null) }
     var audioHomingEnabled by rememberSaveable { mutableStateOf(true) }
+    var heatmapModeEnabled by rememberSaveable { mutableStateOf(false) }
     var beepSpacingScale by rememberSaveable { mutableStateOf(2.0f) }
     var lastBeepIntervalMs by remember { mutableStateOf<Long?>(null) }
     var runtimeErrorMessage by remember { mutableStateOf<String?>(null) }
     val radarPoints: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticRadarPoint> =
         remember { androidx.compose.runtime.mutableStateListOf() }
     val confidenceSpots: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticConfidenceSpot> =
+        remember { androidx.compose.runtime.mutableStateListOf() }
+    val heatmapSamples: androidx.compose.runtime.snapshots.SnapshotStateList<MagneticHeatSample> =
         remember { androidx.compose.runtime.mutableStateListOf() }
 
     val sampleTimestampsMs = remember { ArrayDeque<Long>() }
@@ -5246,6 +5262,9 @@ private fun MagneticDeviceRadarLiveTab(
                                     if (heading < 0) heading += 360.0
                                     val previousHeading = latestHeadingDeg
                                     latestHeadingDeg = heading
+                                    if (sessionStartHeadingDeg == null) {
+                                        sessionStartHeadingDeg = heading
+                                    }
                                     val now = System.currentTimeMillis()
                                     rotationLastUpdateEpochMs = now
                                     if (previousHeading != null) {
@@ -5277,6 +5296,12 @@ private fun MagneticDeviceRadarLiveTab(
                                 var fallbackHeading = Math.toDegrees(atan2(y, x))
                                 fallbackHeading = (90.0 - fallbackHeading + 360.0) % 360.0
                                 latestHeadingDeg = fallbackHeading
+                                if (sessionStartHeadingDeg == null) {
+                                    sessionStartHeadingDeg = fallbackHeading
+                                }
+                            }
+                            if (sessionStartLocation == null && currentLocation != null) {
+                                sessionStartLocation = currentLocation
                             }
 
                             val previousSmoothed = smoothedMagnitudeMicroTesla
@@ -5357,6 +5382,12 @@ private fun MagneticDeviceRadarLiveTab(
                                 ) {
                                     confidenceSpots.removeAt(0)
                                 }
+                                while (
+                                    heatmapSamples.isNotEmpty() &&
+                                        now - heatmapSamples.first().timestampEpochMs > RADAR_HEATMAP_RETENTION_MS
+                                ) {
+                                    heatmapSamples.removeAt(0)
+                                }
 
                                 val canAddConfidenceSpot =
                                     trendDeltaMicroTesla > 0.05 &&
@@ -5365,6 +5396,14 @@ private fun MagneticDeviceRadarLiveTab(
                                 if (canAddConfidenceSpot) {
                                     val lastSpotTs = confidenceSpots.lastOrNull()?.timestampEpochMs ?: 0L
                                     if (now - lastSpotTs >= RADAR_CONFIDENCE_SPOT_MIN_GAP_MS) {
+                                        val distanceScore = estimateRadarRelativeDistanceScore(
+                                            currentMagnitudeMicroTesla = nextSmoothed,
+                                            baselineMagnitudeMicroTesla = baselineMagnitudeMicroTesla,
+                                            rollingMeanMagnitudeMicroTesla = rollingMeanMagnitudeMicroTesla,
+                                            rollingStdMagnitudeMicroTesla = rollingStdMagnitudeMicroTesla,
+                                            confidenceScore = signalConfidenceScore,
+                                            warmthScore = warmthScore
+                                        )
                                         confidenceSpots.add(
                                             MagneticConfidenceSpot(
                                                 timestampEpochMs = now,
@@ -5372,16 +5411,43 @@ private fun MagneticDeviceRadarLiveTab(
                                                 confidenceScore = signalConfidenceScore,
                                                 warmthScore = warmthScore,
                                                 magnitudeMicroTesla = nextSmoothed,
-                                                relativeDistanceScore = estimateRadarRelativeDistanceScore(
-                                                    currentMagnitudeMicroTesla = nextSmoothed,
-                                                    baselineMagnitudeMicroTesla = baselineMagnitudeMicroTesla,
-                                                    rollingMeanMagnitudeMicroTesla = rollingMeanMagnitudeMicroTesla,
-                                                    rollingStdMagnitudeMicroTesla = rollingStdMagnitudeMicroTesla,
-                                                    confidenceScore = signalConfidenceScore,
-                                                    warmthScore = warmthScore
-                                                )
+                                                relativeDistanceScore = distanceScore
                                             )
                                         )
+
+                                        if (heatmapModeEnabled) {
+                                            val origin = sessionStartLocation
+                                            val current = currentLocation
+                                            if (origin != null && current != null) {
+                                                val distanceMeters = distanceFromLocationMeters(
+                                                    fromLat = origin.lat,
+                                                    fromLon = origin.lon,
+                                                    toLat = current.lat,
+                                                    toLon = current.lon
+                                                )
+                                                val bearingDeg = bearingDegrees(
+                                                    fromLat = origin.lat,
+                                                    fromLon = origin.lon,
+                                                    toLat = current.lat,
+                                                    toLon = current.lon
+                                                )
+                                                if (distanceMeters != null) {
+                                                    val intensity = (
+                                                        (0.56 * signalConfidenceScore) +
+                                                            (0.28 * warmthScore) +
+                                                            (0.16 * (1.0 - distanceScore))
+                                                        ).coerceIn(0.15, 1.0)
+                                                    heatmapSamples.add(
+                                                        MagneticHeatSample(
+                                                            timestampEpochMs = now,
+                                                            bearingDeg = bearingDeg,
+                                                            distanceMeters = distanceMeters,
+                                                            intensityScore = intensity
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -5393,9 +5459,6 @@ private fun MagneticDeviceRadarLiveTab(
                                 val recent = radarPoints.filter { point -> now - point.timestampEpochMs <= 6_000L }
                                 val directionalContrast = computeMagneticDirectionalContrast(recent)
                                 nearSourceSignatureActive = directionalContrast < 0.28 && disturbanceRateHz >= 0.35
-                                if (nearSourceSignatureActive) {
-                                    nearSourceLastDetectedEpochMs = now
-                                }
                                 if (recent.isNotEmpty()) {
                                     val byBucket = recent.groupBy { point -> (point.headingDeg / 15.0).toInt() }
                                     val bestBucket = byBucket.maxByOrNull { entry ->
@@ -5470,7 +5533,7 @@ private fun MagneticDeviceRadarLiveTab(
     val latestDisturbanceRateHz by rememberUpdatedState(disturbanceRateHz)
     val latestSmoothedMagnitudeMicroTesla by rememberUpdatedState(smoothedMagnitudeMicroTesla)
     val latestBaselineMagnitudeMicroTesla by rememberUpdatedState(baselineMagnitudeMicroTesla)
-    val latestNearSourceLastDetectedEpochMs by rememberUpdatedState(nearSourceLastDetectedEpochMs)
+    val latestNearSourceSignatureActive by rememberUpdatedState(nearSourceSignatureActive)
 
     LaunchedEffect(radarReady, running, audioHomingEnabled, toneGenerator) {
         if (!radarReady || !running || !audioHomingEnabled || toneGenerator == null) {
@@ -5483,7 +5546,7 @@ private fun MagneticDeviceRadarLiveTab(
         while (true) {
             val now = System.currentTimeMillis()
             val score = (latestWarmthScore * (0.55 + (0.45 * latestSignalConfidenceScore))).coerceIn(0.0, 1.0)
-            val nearSourceAudible = latestNearSourceLastDetectedEpochMs?.let { now - it <= 3_000L } ?: false
+            val nearSourceAudible = latestNearSourceSignatureActive
             val effectiveScore = if (nearSourceAudible) score.coerceAtLeast(0.34) else score
             val isWarming = latestTrendDeltaMicroTesla > 0.03
             val fieldLiftMicroTesla = ((latestSmoothedMagnitudeMicroTesla ?: 0.0) - (latestBaselineMagnitudeMicroTesla ?: 0.0))
@@ -5539,6 +5602,8 @@ private fun MagneticDeviceRadarLiveTab(
         latestMagnitudeMicroTesla = null
         smoothedMagnitudeMicroTesla = null
         latestHeadingDeg = null
+        sessionStartHeadingDeg = null
+        sessionStartLocation = null
         bestHeadingDeg = null
         bestMagnitudeMicroTesla = null
         trendDeltaMicroTesla = 0.0
@@ -5558,11 +5623,11 @@ private fun MagneticDeviceRadarLiveTab(
         motionNoiseScore = 0.0
         fusionPenaltyScore = 0.0
         nearSourceSignatureActive = false
-        nearSourceLastDetectedEpochMs = null
         lastBeepIntervalMs = null
         runtimeErrorMessage = null
         radarPoints.clear()
         confidenceSpots.clear()
+        heatmapSamples.clear()
         sampleTimestampsMs.clear()
         disturbanceTimestampsMs.clear()
         recentMagnitudeWindow.clear()
@@ -5571,6 +5636,10 @@ private fun MagneticDeviceRadarLiveTab(
     }
 
     val headingLabel = latestHeadingDeg?.let { String.format(Locale.US, "%.0f deg", it) } ?: "n/a"
+    val sessionStartHeadingLabel = sessionStartHeadingDeg?.let { String.format(Locale.US, "%.0f deg", it) } ?: "learning"
+    val sessionOriginLabel = sessionStartLocation?.let {
+        String.format(Locale.US, "%.5f, %.5f", it.lat, it.lon)
+    } ?: "waiting for location"
     val currentMagLabel = latestMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"
     val smoothMagLabel = smoothedMagnitudeMicroTesla?.let { String.format(Locale.US, "%.2f uT", it) } ?: "n/a"
     val bestHeadingLabel = bestHeadingDeg?.let { String.format(Locale.US, "%.0f deg", it) } ?: "sweep pending"
@@ -5633,6 +5702,17 @@ private fun MagneticDeviceRadarLiveTab(
                 onCheckedChange = { audioHomingEnabled = it }
             )
         }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("GPS heatmap mode", fontWeight = FontWeight.Medium)
+            Switch(
+                checked = heatmapModeEnabled,
+                onCheckedChange = { heatmapModeEnabled = it }
+            )
+        }
         Text(
             text = "Beep spacing: ${String.format(Locale.US, "%.2fx", beepSpacingScale)}",
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -5666,6 +5746,8 @@ private fun MagneticDeviceRadarLiveTab(
         Text("Sensor fusion: prox=$proximityLabel (${if (proximityIsNear) "near" else "far"})")
         Text("Motion noise: $motionNoisePct% | Environmental penalty: $fusionPenaltyPct%")
         Text("Heading: $headingLabel")
+        Text("Session reference heading: $sessionStartHeadingLabel")
+        Text("Session GPS origin: $sessionOriginLabel")
         Text("Best heading (recent): $bestHeadingLabel")
         Text("Best magnitude (recent): $bestMagLabel")
         Text("Sample rate: ${String.format(Locale.US, "%.0f", sampleRateHz)} Hz")
@@ -5682,6 +5764,12 @@ private fun MagneticDeviceRadarLiveTab(
             text = "Potential confidence spots (last ${RADAR_CONFIDENCE_SPOT_RETENTION_MS / 1000}s): ${recentSpots.size}",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        if (heatmapModeEnabled) {
+            Text(
+                text = "Heatmap hotspots (last ${RADAR_HEATMAP_RETENTION_MS / 1000}s): ${heatmapSamples.size}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         if (dominantSpotHeading != null) {
             Text(
                 text = "Dominant spot direction: ${formatHeadingCardinal(dominantSpotHeading)}",
@@ -5699,9 +5787,12 @@ private fun MagneticDeviceRadarLiveTab(
         MagneticRadarCanvas(
             points = radarPoints,
             confidenceSpots = recentSpots,
+            heatmapSamples = heatmapSamples,
             currentHeadingDeg = latestHeadingDeg,
+            sessionReferenceHeadingDeg = sessionStartHeadingDeg,
             targetHeadingDeg = bestHeadingDeg,
-            showConfidenceSpots = likelyNearSource
+            showConfidenceSpots = likelyNearSource,
+            showHeatmap = heatmapModeEnabled
         )
         Text(
             text = "Tip: walk slowly while keeping the phone orientation steady. Follow stronger field and tempo increases.",
@@ -5995,9 +6086,12 @@ private fun MagneticDeviceRadarGuideTab() {
 private fun MagneticRadarCanvas(
     points: List<MagneticRadarPoint>,
     confidenceSpots: List<MagneticConfidenceSpot>,
+    heatmapSamples: List<MagneticHeatSample>,
     currentHeadingDeg: Double?,
+    sessionReferenceHeadingDeg: Double?,
     targetHeadingDeg: Double?,
-    showConfidenceSpots: Boolean
+    showConfidenceSpots: Boolean,
+    showHeatmap: Boolean
 ) {
     val ringColorStrong = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
     val ringColorMid = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
@@ -6013,7 +6107,7 @@ private fun MagneticRadarCanvas(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val radius = (size.minDimension / 2f) * 0.9f
-                val referenceHeadingDeg = currentHeadingDeg ?: 0.0
+                val referenceHeadingDeg = sessionReferenceHeadingDeg ?: currentHeadingDeg ?: 0.0
 
                 drawCircle(
                     color = ringColorStrong,
@@ -6040,6 +6134,40 @@ private fun MagneticRadarCanvas(
                 val span = (maxMagnitude - minMagnitude).coerceAtLeast(1.0)
                 val directionalContrast = computeMagneticDirectionalContrast(recent)
                 val directionalRadiusScale = (0.32f + 0.68f * directionalContrast.toFloat()).coerceIn(0.32f, 1f)
+
+                if (showHeatmap && heatmapSamples.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    val recentHeat = heatmapSamples.filter { sample -> now - sample.timestampEpochMs <= RADAR_HEATMAP_RETENTION_MS }
+                    val distanceScaleMax = recentHeat
+                        .map { sample -> sample.distanceMeters }
+                        .maxOrNull()
+                        ?.coerceAtLeast(20.0)
+                        ?.coerceAtMost(260.0)
+                        ?: 20.0
+
+                    recentHeat.forEach { sample ->
+                        val ageRatio = 1.0 - ((now - sample.timestampEpochMs).toDouble() / RADAR_HEATMAP_RETENTION_MS.toDouble())
+                        val ageFade = ageRatio.coerceIn(0.08, 1.0).toFloat()
+                        val intensity = sample.intensityScore.coerceIn(0.0, 1.0).toFloat()
+                        val radialNorm = (sample.distanceMeters / distanceScaleMax).coerceIn(0.0, 1.0).toFloat()
+                        val heatRadius = (radius * (0.06f + 0.88f * radialNorm)).coerceAtMost(radius)
+                        val relativeHeading = ((sample.bearingDeg - referenceHeadingDeg) + 360.0) % 360.0
+                        val theta = Math.toRadians(relativeHeading)
+                        val x = center.x + (heatRadius * sin(theta).toFloat())
+                        val y = center.y - (heatRadius * cos(theta).toFloat())
+
+                        drawCircle(
+                            color = Color(0xFFFF3D00).copy(alpha = (0.05f + 0.20f * intensity) * ageFade),
+                            radius = 10.0f + (22.0f * intensity),
+                            center = Offset(x, y)
+                        )
+                        drawCircle(
+                            color = Color(0xFFFF8F00).copy(alpha = (0.06f + 0.22f * intensity) * ageFade),
+                            radius = 5.0f + (12.0f * intensity),
+                            center = Offset(x, y)
+                        )
+                    }
+                }
 
                 recent.forEach { point ->
                     val normalized = ((point.magnitudeMicroTesla - minMagnitude) / span).toFloat().coerceIn(0f, 1f)
@@ -6106,7 +6234,8 @@ private fun MagneticRadarCanvas(
                 }
 
                 currentHeadingDeg?.let {
-                    val theta = 0.0
+                    val relativeHeading = ((it - referenceHeadingDeg) + 360.0) % 360.0
+                    val theta = Math.toRadians(relativeHeading)
                     val current = Offset(
                         x = center.x + (radius * 0.82f * sin(theta).toFloat()),
                         y = center.y - (radius * 0.82f * cos(theta).toFloat())
