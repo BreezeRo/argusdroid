@@ -53,6 +53,10 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Detection map supports device and aircraft-focused sub-maps.
 - Source-colored pins with filtering, live controls, diagnostics, and pin budget controls.
 - Camera detections render as mapped public-camera pins with proximity-aware alerting.
+- Device, Bluetooth, and aircraft maps support `LIVE` views for fresh tracks or `ALL` views across stored encounter history.
+- Foreground live updates can scan while the map is open, with optional moving-only and since-snapshot filters where supported.
+- Pin metadata search, source/type filters, identity labels, precise-dot rendering, and configurable pin limits support dense map review.
+- Optional marker clustering with adjustable range, coverage-radius and sweep overlays, and map diagnostics help keep high-volume views usable.
 - Aircraft map includes heading-aware markers and large-radius filtering.
 - No-fly zone overlays:
 	- Local ingest: ingest/no_fly_zones.geojson.
