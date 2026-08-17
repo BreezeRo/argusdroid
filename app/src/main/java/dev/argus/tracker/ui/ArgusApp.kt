@@ -5,6 +5,12 @@ import android.app.PendingIntent
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
@@ -12,6 +18,9 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -56,6 +65,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -65,6 +75,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -154,6 +165,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.conflate
@@ -162,6 +174,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.cos
@@ -216,6 +229,11 @@ private const val MAGNETIC_INCREASE_ALERT_COOLDOWN_MS = 90 * 1000L
 private const val MAGNETIC_INCREASE_DELTA_THRESHOLD_UT = 12.0
 private const val MAGNETIC_INCREASE_MIN_CURRENT_UT = 55.0
 private const val MAGNETIC_DISTURBANCE_UPPER_BOUND_UT = 65.0
+private const val MAGNETIC_SUSTAINED_HIGH_THRESHOLD_UT = 72.0
+private const val MAGNETIC_RHYTHM_COOLDOWN_MS = 1200L
+private const val MAGNETIC_RHYTHM_MIN_BPM = 72
+private const val MAGNETIC_RHYTHM_MAX_BPM = 220
+private const val MAGNETIC_RHYTHM_PLAY_MS = 2200L
 private const val ALERT_LOG_MAX_ENTRIES = 400
 private const val MAP_AUTO_FOCUS_MAX_DISTANCE_METERS = 160_000.0
 private const val REMOTE_ID_BROADCAST_MAX_OFFSET_METERS = 80_000.0
@@ -228,6 +246,9 @@ private const val MAP_COVERAGE_IMMEDIATE_RESIZE_DELTA_METERS = 300.0
 private const val MAP_COVERAGE_RECENT_WINDOW_MS = 120_000L
 private const val MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS = 600_000L
 private const val MAP_COVERAGE_RADIUS_PERCENTILE = 0.85
+private const val MAP_PIN_LIMIT_MAX = 10_000
+private const val DEVICE_MAP_PIN_CACHE_TTL_MS = 10L * 60L * 1000L
+private const val DEVICE_MAP_PIN_DISK_CACHE_TTL_MS = 20L * 60L * 1000L
 private const val WIFI_RANDOMIZED_MIN_SIGHTINGS = 2
 private const val MAP_CAMERA_BOUNDS_SAMPLE_LIMIT = 220
 private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
@@ -254,6 +275,7 @@ private const val MAGNETIC_ALERT_WINDOW_MS = 30L * 60L * 1000L
 private const val MAGNETIC_ALERT_MAX_ENCOUNTERS = 2000
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val ACTION_OPEN_NO_FLY_INCIDENT_PATH = "dev.argus.tracker.action.OPEN_NO_FLY_INCIDENT_PATH"
+private const val ACTION_OPEN_MAGNETIC_MONITOR = "dev.argus.tracker.action.OPEN_MAGNETIC_MONITOR"
 private const val EXTRA_APPROACH_SOURCE = "extra_approach_source"
 private const val EXTRA_APPROACH_PRIMARY_ID = "extra_approach_primary_id"
 private const val EXTRA_NO_FLY_SOURCE = "extra_no_fly_source"
@@ -263,6 +285,7 @@ private const val EXTRA_NO_FLY_EVENT_EPOCH_MS = "extra_no_fly_event_epoch_ms"
 private const val EXTRA_NO_FLY_LAT = "extra_no_fly_lat"
 private const val EXTRA_NO_FLY_LON = "extra_no_fly_lon"
 private const val EXTRA_NO_FLY_ZONE_IDS = "extra_no_fly_zone_ids"
+private const val EXTRA_MAGNETIC_OPEN_POPUP = "extra_magnetic_open_popup"
 private const val GOOGLE_MAP_DARK_STYLE_JSON = """
 [
     {"elementType":"geometry","stylers":[{"color":"#212121"}]},
@@ -550,7 +573,6 @@ private object AlertLogStore {
             .apply()
     }
 }
-
 private object ApproachTrackStore {
     private const val PREFS_NAME = "argus_settings"
     private const val KEY_APPROACH_TRACK_STARTS = "approach_track_starts"
@@ -684,6 +706,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
     var nfcNotificationsEnabled by remember { mutableStateOf(ScanSettings.isNfcNotificationsEnabled(context)) }
     var magneticIncreaseNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMagneticIncreaseNotificationsEnabled(context)) }
+    var magneticRhythmBeepEnabled by remember { mutableStateOf(ScanSettings.isMagneticRhythmBeepEnabled(context)) }
+    var magneticEventTriggerThresholdMicroTesla by remember {
+        mutableStateOf(ScanSettings.getMagneticEventTriggerThresholdMicroTesla(context))
+    }
     var meshConnectivityNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshConnectivityNotificationsEnabled(context)) }
     var meshWipeNotificationsEnabled by remember { mutableStateOf(ScanSettings.isMeshWipeNotificationsEnabled(context)) }
     var foreignDirectAcousticEnabled by remember { mutableStateOf(ScanSettings.isForeignDirectAcousticEnabled(context)) }
@@ -748,6 +774,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var mapResetGeneration by remember { mutableStateOf(0L) }
     var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
+    var detectionInitialMagneticPopupRequest by rememberSaveable { mutableStateOf<Long?>(null) }
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
     fun navigateTopLevel(route: String) {
@@ -952,6 +979,20 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     launchSingleTop = true
                 }
             }
+
+            ACTION_OPEN_MAGNETIC_MONITOR -> {
+                detectionInitialTabRequest = 0
+                if (intent.getBooleanExtra(EXTRA_MAGNETIC_OPEN_POPUP, false)) {
+                    detectionInitialMagneticPopupRequest = System.currentTimeMillis()
+                }
+                navController.navigate(DETECTION_ROUTE) {
+                    launchSingleTop = true
+                    restoreState = true
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        saveState = true
+                    }
+                }
+            }
         }
     }
     suspend fun applyScanInterval(
@@ -1086,6 +1127,8 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }.getOrNull().orEmpty()
 
         startupPrewarmedDevicePins = prewarmedPins
+        DeviceMapPinRuntimeCache.put(prewarmedPins)
+        DeviceMapPinDiskCache.put(context, prewarmedPins)
 
         val prewarmedNoFlyZones = if (mapNoFlyZonesEnabled) {
             withContext(Dispatchers.IO) {
@@ -1545,41 +1588,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         }
     }
 
-    LaunchedEffect(magneticAlertWindow, foreignDirectMagneticEnabled) {
-        if (!foreignDirectMagneticEnabled) return@LaunchedEffect
-
-        val pair = readLatestTwoMagneticSamples(magneticAlertWindow) ?: return@LaunchedEffect
-        val previous = pair.first
-        val current = pair.second
-        if (current.first <= lastMagneticObservedSampleEpochMs) return@LaunchedEffect
-
-        val deltaMicroTesla = current.second - previous.second
-        val crossedDisturbanceBand =
-            previous.second < MAGNETIC_DISTURBANCE_UPPER_BOUND_UT &&
-                current.second >= MAGNETIC_DISTURBANCE_UPPER_BOUND_UT
-        val sharpIncrease =
-            deltaMicroTesla >= MAGNETIC_INCREASE_DELTA_THRESHOLD_UT &&
-                current.second >= MAGNETIC_INCREASE_MIN_CURRENT_UT
-
-        val now = System.currentTimeMillis()
-        if ((crossedDisturbanceBand || sharpIncrease) &&
-            magneticIncreaseNotificationsEnabled &&
-            hasPostNotificationsPermission(context) &&
-            now - lastMagneticIncreaseAlertEpochMs >= MAGNETIC_INCREASE_ALERT_COOLDOWN_MS
-        ) {
-            ensureMagneticIncreaseNotificationChannel(context)
-            sendMagneticIncreaseNotification(
-                context = context,
-                previousMagnitudeMicroTesla = previous.second,
-                currentMagnitudeMicroTesla = current.second,
-                deltaMicroTesla = deltaMicroTesla
-            )
-            lastMagneticIncreaseAlertEpochMs = now
-        }
-
-        lastMagneticObservedSampleEpochMs = current.first
-    }
-
     LaunchedEffect(operationalAnalysisWindow, nfcNotificationsEnabled) {
         val latestNfc = operationalAnalysisWindow
             .asSequence()
@@ -1815,6 +1823,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     noFlyPassThroughNotificationsEnabled = noFlyPassThroughNotificationsEnabled,
                     nfcNotificationsEnabled = nfcNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
+                    magneticRhythmBeepEnabled = magneticRhythmBeepEnabled,
                     meshConnectivityNotificationsEnabled = meshConnectivityNotificationsEnabled,
                     meshWipeNotificationsEnabled = meshWipeNotificationsEnabled,
                     foreignDirectAcousticEnabled = foreignDirectAcousticEnabled,
@@ -1899,6 +1908,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onMagneticIncreaseNotificationsChanged = { enabled ->
                         magneticIncreaseNotificationsEnabled = enabled
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, enabled)
+                    },
+                    onMagneticRhythmBeepEnabledChanged = { enabled ->
+                        magneticRhythmBeepEnabled = enabled
+                        ScanSettings.setMagneticRhythmBeepEnabled(context, enabled)
+                        if (enabled) {
+                            scope.launch(Dispatchers.Default) {
+                                playMagneticRhythm(severity = 0.35, playMs = 900L)
+                            }
+                        }
                     },
                     onMeshConnectivityNotificationsChanged = { enabled ->
                         meshConnectivityNotificationsEnabled = enabled
@@ -2054,6 +2072,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                        magneticRhythmBeepEnabled = ScanSettings.isMagneticRhythmBeepEnabled(context)
+                        magneticEventTriggerThresholdMicroTesla =
+                            ScanSettings.getMagneticEventTriggerThresholdMicroTesla(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
@@ -2105,6 +2126,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                        magneticRhythmBeepEnabled = ScanSettings.isMagneticRhythmBeepEnabled(context)
+                        magneticEventTriggerThresholdMicroTesla =
+                            ScanSettings.getMagneticEventTriggerThresholdMicroTesla(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
@@ -2154,6 +2178,11 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
+                        ScanSettings.setMagneticRhythmBeepEnabled(context, true)
+                        ScanSettings.setMagneticEventTriggerThresholdMicroTesla(
+                            context,
+                            ScanSettings.DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT
+                        )
                         ScanSettings.setMeshConnectivityNotificationsEnabled(context, false)
                         ScanSettings.setMeshWipeNotificationsEnabled(context, true)
                         ScanSettings.setForeignDirectAcousticEnabled(context, false)
@@ -2164,6 +2193,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             val defaultSeconds = when (sourceType) {
                                 SourceCatalog.KEY_AIRCRAFT -> ScanSettings.DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
                                 SourceCatalog.KEY_CAMERA -> ScanSettings.DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+                                SourceCatalog.KEY_MAGNETIC -> ScanSettings.DEFAULT_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS
                                 else -> ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
                             }
                             ScanSettings.setSourceScanIntervalSeconds(context, sourceType, defaultSeconds)
@@ -2189,6 +2219,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
+                        magneticRhythmBeepEnabled = true
+                        magneticEventTriggerThresholdMicroTesla =
+                            ScanSettings.DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT
                         meshConnectivityNotificationsEnabled = false
                         meshWipeNotificationsEnabled = true
                         foreignDirectAcousticEnabled = false
@@ -2246,6 +2279,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
+                        magneticRhythmBeepEnabled = ScanSettings.isMagneticRhythmBeepEnabled(context)
+                        magneticEventTriggerThresholdMicroTesla =
+                            ScanSettings.getMagneticEventTriggerThresholdMicroTesla(context)
                         meshConnectivityNotificationsEnabled = ScanSettings.isMeshConnectivityNotificationsEnabled(context)
                         meshWipeNotificationsEnabled = ScanSettings.isMeshWipeNotificationsEnabled(context)
                         foreignDirectAcousticEnabled = ScanSettings.isForeignDirectAcousticEnabled(context)
@@ -2271,9 +2307,15 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 DetectionPage(
                     initialTabRequest = detectionInitialTabRequest,
                     onInitialTabRequestHandled = { detectionInitialTabRequest = null },
+                    initialMagneticPopupRequest = detectionInitialMagneticPopupRequest,
+                    onInitialMagneticPopupRequestHandled = { detectionInitialMagneticPopupRequest = null },
                     readinessItems = readinessItems,
                     encounters = recentPipelineEncounters,
                     meshInsightEncounters = allPipelineEncounters,
+                    directMagneticChannelEnabled = foreignDirectMagneticEnabled,
+                    magneticRhythmBeepEnabled = magneticRhythmBeepEnabled,
+                    magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
+                    magneticEventTriggerThresholdMicroTesla = magneticEventTriggerThresholdMicroTesla,
                     approachDetectionEnabled = approachDetectionEnabled,
                     ownedDeviceKeys = ownedDeviceKeys,
                     chainLinkEnabled = chainLinkEnabled,
@@ -2398,6 +2440,26 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                                 android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
                             )
                         }
+                    },
+                    onDirectMagneticChannelEnabledChanged = { enabled ->
+                        foreignDirectMagneticEnabled = enabled
+                        ScanSettings.setForeignDirectMagneticEnabled(context, enabled)
+                        sensorGateSettings = readSensorGateSettings(context)
+                        scope.launch {
+                            alignWorkerCadenceWithSources(reasonCode = "scheduler-align-direct-magnetic")
+                        }
+                    },
+                    onMagneticRhythmBeepEnabledChanged = { enabled ->
+                        magneticRhythmBeepEnabled = enabled
+                        ScanSettings.setMagneticRhythmBeepEnabled(context, enabled)
+                    },
+                    onMagneticIncreaseNotificationsChanged = { enabled ->
+                        magneticIncreaseNotificationsEnabled = enabled
+                        ScanSettings.setMagneticIncreaseNotificationsEnabled(context, enabled)
+                    },
+                    onMagneticEventTriggerThresholdChanged = { thresholdMicroTesla ->
+                        magneticEventTriggerThresholdMicroTesla = thresholdMicroTesla
+                        ScanSettings.setMagneticEventTriggerThresholdMicroTesla(context, thresholdMicroTesla)
                     },
                     onChainLinkChanged = { enabled ->
                         chainLinkEnabled = enabled
@@ -3589,6 +3651,7 @@ private fun AppSettingsPage(
     noFlyPassThroughNotificationsEnabled: Boolean,
     nfcNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
+    magneticRhythmBeepEnabled: Boolean,
     meshConnectivityNotificationsEnabled: Boolean,
     meshWipeNotificationsEnabled: Boolean,
     foreignDirectAcousticEnabled: Boolean,
@@ -3604,6 +3667,7 @@ private fun AppSettingsPage(
     onNoFlyPassThroughNotificationsChanged: (Boolean) -> Unit,
     onNfcNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
+    onMagneticRhythmBeepEnabledChanged: (Boolean) -> Unit,
     onMeshConnectivityNotificationsChanged: (Boolean) -> Unit,
     onMeshWipeNotificationsChanged: (Boolean) -> Unit,
     onForeignDirectAcousticEnabledChanged: (Boolean) -> Unit,
@@ -4307,6 +4371,7 @@ private fun AppSettingsPage(
                             "no_fly",
                             "nfc",
                             "magnetic",
+                            "magnetic_rhythm",
                             "mesh_connectivity",
                             "mesh_wipe"
                         )
@@ -4369,6 +4434,15 @@ private fun AppSettingsPage(
                                         Switch(
                                             checked = magneticIncreaseNotificationsEnabled,
                                             onCheckedChange = onMagneticIncreaseNotificationsChanged
+                                        )
+                                    }
+
+                                    "magnetic_rhythm" -> {
+                                        Text("Magnetic rhythm beeps")
+                                        Switch(
+                                            checked = magneticRhythmBeepEnabled,
+                                            onCheckedChange = onMagneticRhythmBeepEnabledChanged,
+                                            enabled = foreignDirectMagneticEnabled
                                         )
                                     }
 
@@ -4660,9 +4734,15 @@ private fun AppSettingsPage(
 private fun DetectionPage(
     initialTabRequest: Int?,
     onInitialTabRequestHandled: () -> Unit,
+    initialMagneticPopupRequest: Long?,
+    onInitialMagneticPopupRequestHandled: () -> Unit,
     readinessItems: List<DetectionReadinessItem>,
     encounters: List<Encounter>,
     meshInsightEncounters: List<Encounter>,
+    directMagneticChannelEnabled: Boolean,
+    magneticRhythmBeepEnabled: Boolean,
+    magneticIncreaseNotificationsEnabled: Boolean,
+    magneticEventTriggerThresholdMicroTesla: Double,
     approachDetectionEnabled: Boolean,
     ownedDeviceKeys: Set<String>,
     chainLinkEnabled: Boolean,
@@ -4693,6 +4773,10 @@ private fun DetectionPage(
     onRefresh: () -> Unit,
     onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
+    onDirectMagneticChannelEnabledChanged: (Boolean) -> Unit,
+    onMagneticRhythmBeepEnabledChanged: (Boolean) -> Unit,
+    onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
+    onMagneticEventTriggerThresholdChanged: (Double) -> Unit,
     onChainLinkChanged: (Boolean) -> Unit,
     onChainDeviceNameChanged: (String) -> Unit,
     onChainSharedSecretChanged: (String) -> Unit,
@@ -4703,9 +4787,10 @@ private fun DetectionPage(
     onWipeMeshData: suspend () -> String
 ) {
     val context = LocalContext.current
+    val detectionScope = rememberCoroutineScope()
     var selectedTab by rememberSaveable { mutableStateOf(0) }
-    var cellDevicePinLimit by rememberSaveable { mutableStateOf(1000) }
-    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(true) }
+    var cellDevicePinLimit by rememberSaveable { mutableStateOf(10000) }
+    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var identityModeOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
@@ -4717,11 +4802,13 @@ private fun DetectionPage(
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     var bluetoothMapPinLimit by rememberSaveable { mutableStateOf(1000) }
-    var liveOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(true) }
+    var liveOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var identityModeOnBluetoothMap by rememberSaveable { mutableStateOf(true) }
     var movingOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var bluetoothMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    var magneticMapPinLimit by rememberSaveable { mutableStateOf(1500) }
+    var magneticMapFocusRequestNonce by rememberSaveable { mutableStateOf(0) }
     var deviceMapAircraftRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(25, 75))
     }
@@ -4731,10 +4818,8 @@ private fun DetectionPage(
     val tabs = listOf("Status", "Device", "Flock", "Map", "Mesh")
     var mapLiveNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
-    val mapLiveTickerEnabled = selectedTab == 3 && (
-        (selectedMapSubTab == 0 && liveOnlyOnDeviceMap) ||
-            (selectedMapSubTab == 1 && liveOnlyOnBluetoothMap)
-        )
+    val mapLiveTickerEnabled = selectedTab == 3 &&
+        (selectedMapSubTab == 0 || selectedMapSubTab == 1)
 
     LaunchedEffect(mapLiveTickerEnabled, liveMapUpdateIntervalSeconds) {
         if (!mapLiveTickerEnabled) return@LaunchedEffect
@@ -4768,6 +4853,37 @@ private fun DetectionPage(
     val signalIntel = remember(selectedTab, meshInsightEncounters) {
         if (selectedTab == 0) buildSignalIntelSnapshot(meshInsightEncounters) else null
     }
+    val latestMagneticMagnitudeMicroTesla = remember(meshInsightEncounters) {
+        meshInsightEncounters
+            .asSequence()
+            .filter { encounter -> isDirectSignalChannel(encounter, "magnetic") }
+            .maxByOrNull { encounter -> encounter.timestampEpochMs }
+            ?.let { encounter ->
+                runCatching {
+                    JSONObject(encounter.rawPayloadJson).optDoubleOrNull("magnitudeMicroTesla")
+                }.getOrNull()
+            }
+    }
+    var magneticDialogVisible by rememberSaveable { mutableStateOf(false) }
+    val liveMagneticMagnitudeMicroTesla by rememberRealtimeMagneticMagnitudeMicroTesla(
+        enabled = directMagneticChannelEnabled && (magneticDialogVisible || magneticRhythmBeepEnabled)
+    )
+    var previousLiveMagneticMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
+    var lastRealtimeMagneticNotificationEpochMs by remember { mutableStateOf(0L) }
+    var lastRealtimeMagneticRhythmEpochMs by remember { mutableStateOf(0L) }
+    var realtimeMagneticRhythmJob by remember { mutableStateOf<Job?>(null) }
+    var magneticThresholdSliderValue by rememberSaveable {
+        mutableStateOf(magneticEventTriggerThresholdMicroTesla.toFloat())
+    }
+    var magneticChartSamples by remember { mutableStateOf<List<Double>>(emptyList()) }
+    val headerMagneticMagnitudeMicroTesla = liveMagneticMagnitudeMicroTesla ?: latestMagneticMagnitudeMicroTesla
+    val highAlertThresholdMicroTesla = magneticEventTriggerThresholdMicroTesla + 8.0
+    val magneticReadoutColor = when {
+        headerMagneticMagnitudeMicroTesla == null -> MaterialTheme.colorScheme.onSurfaceVariant
+        headerMagneticMagnitudeMicroTesla >= highAlertThresholdMicroTesla -> Color(0xFFB3261E)
+        headerMagneticMagnitudeMicroTesla >= magneticEventTriggerThresholdMicroTesla -> Color(0xFFE65100)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     val missingReadinessItems = remember(readinessItems) {
         readinessItems.filter { it.isMissing }
     }
@@ -4783,9 +4899,94 @@ private fun DetectionPage(
         }
     }
 
-    val maxDeviceCandidatesToResolve = remember(cellDevicePinLimit) {
-        (cellDevicePinLimit * 2).coerceIn(200, 2000)
+    LaunchedEffect(magneticEventTriggerThresholdMicroTesla, magneticDialogVisible) {
+        if (!magneticDialogVisible) {
+            magneticThresholdSliderValue = magneticEventTriggerThresholdMicroTesla.toFloat()
+        }
     }
+
+    LaunchedEffect(initialMagneticPopupRequest) {
+        val requestToken = initialMagneticPopupRequest ?: return@LaunchedEffect
+        if (requestToken <= 0L) {
+            onInitialMagneticPopupRequestHandled()
+            return@LaunchedEffect
+        }
+        selectedTab = 0
+        magneticDialogVisible = true
+        onInitialMagneticPopupRequestHandled()
+    }
+
+    LaunchedEffect(liveMagneticMagnitudeMicroTesla) {
+        val sample = liveMagneticMagnitudeMicroTesla ?: return@LaunchedEffect
+        magneticChartSamples = (magneticChartSamples + sample).takeLast(64)
+    }
+
+    LaunchedEffect(
+        directMagneticChannelEnabled,
+        magneticRhythmBeepEnabled,
+        magneticIncreaseNotificationsEnabled,
+        liveMagneticMagnitudeMicroTesla,
+        magneticEventTriggerThresholdMicroTesla
+    ) {
+        if (!directMagneticChannelEnabled) {
+            previousLiveMagneticMagnitudeMicroTesla = null
+            realtimeMagneticRhythmJob?.cancel()
+            realtimeMagneticRhythmJob = null
+            return@LaunchedEffect
+        }
+
+        val currentMagnitude = liveMagneticMagnitudeMicroTesla ?: return@LaunchedEffect
+        val previousMagnitude = previousLiveMagneticMagnitudeMicroTesla
+        previousLiveMagneticMagnitudeMicroTesla = currentMagnitude
+        if (previousMagnitude == null) return@LaunchedEffect
+
+        val deltaMicroTesla = currentMagnitude - previousMagnitude
+        val triggerThresholdMicroTesla = magneticEventTriggerThresholdMicroTesla
+        val crossedDisturbanceBand =
+            previousMagnitude < triggerThresholdMicroTesla &&
+                currentMagnitude >= triggerThresholdMicroTesla
+        val sharpIncrease =
+            deltaMicroTesla >= MAGNETIC_INCREASE_DELTA_THRESHOLD_UT &&
+                currentMagnitude >= minOf(MAGNETIC_INCREASE_MIN_CURRENT_UT, triggerThresholdMicroTesla)
+        val sustainedHigh = currentMagnitude >= (triggerThresholdMicroTesla + 8.0)
+        val magneticEventDetected = crossedDisturbanceBand || sharpIncrease || sustainedHigh
+        if (!magneticEventDetected) return@LaunchedEffect
+
+        val now = System.currentTimeMillis()
+
+        if (
+            magneticIncreaseNotificationsEnabled &&
+            hasPostNotificationsPermission(context) &&
+            now - lastRealtimeMagneticNotificationEpochMs >= MAGNETIC_INCREASE_ALERT_COOLDOWN_MS
+        ) {
+            ensureMagneticIncreaseNotificationChannel(context)
+            sendMagneticIncreaseNotification(
+                context = context,
+                previousMagnitudeMicroTesla = previousMagnitude,
+                currentMagnitudeMicroTesla = currentMagnitude,
+                deltaMicroTesla = deltaMicroTesla
+            )
+            lastRealtimeMagneticNotificationEpochMs = now
+        }
+
+        if (!magneticRhythmBeepEnabled) return@LaunchedEffect
+        if (now - lastRealtimeMagneticRhythmEpochMs < MAGNETIC_RHYTHM_COOLDOWN_MS) return@LaunchedEffect
+
+        val severity = magneticAlertSeverity(
+            currentMagnitudeMicroTesla = currentMagnitude,
+            deltaMicroTesla = deltaMicroTesla
+        )
+        realtimeMagneticRhythmJob?.cancel()
+        realtimeMagneticRhythmJob = detectionScope.launch(Dispatchers.Default) {
+            playMagneticRhythm(
+                severity = severity,
+                playMs = MAGNETIC_RHYTHM_PLAY_MS
+            )
+        }
+        lastRealtimeMagneticRhythmEpochMs = now
+    }
+
+    val maxDeviceCandidatesToResolve = MAP_PIN_LIMIT_MAX
     var allDeviceCandidates by remember { mutableStateOf<List<DeviceLocationCandidate>>(emptyList()) }
     var deviceCandidatesPrepared by remember { mutableStateOf(false) }
     val resolvedLocationCache = remember { mutableMapOf<String, Pair<Long, ResolvedDeviceLocation?>>() }
@@ -4804,9 +5005,7 @@ private fun DetectionPage(
         maxDeviceCandidatesToResolve
     ) {
         if (!isDeviceLocationTabActive) {
-            allDeviceCandidates = emptyList()
             deviceCandidatesPrepared = false
-            resolvedLocationCache.clear()
             return@LaunchedEffect
         }
 
@@ -4841,7 +5040,7 @@ private fun DetectionPage(
                 .groupBy { "${it.source.name}|${it.primaryId}" }
 
             val candidateTakeLimit = if (useFullHistoryForActiveDeviceLocationMap) {
-                maxDeviceCandidatesToResolve.coerceAtLeast(2_000).coerceAtMost(10_000)
+                maxDeviceCandidatesToResolve.coerceAtLeast(2_000).coerceAtMost(MAP_PIN_LIMIT_MAX)
             } else {
                 maxDeviceCandidatesToResolve
             }
@@ -4919,8 +5118,18 @@ private fun DetectionPage(
         resolvedLocationCache.keys.removeAll { it !in activeCandidateKeys }
     }
 
-    var estimatedDeviceLocationPins by remember(startupPrewarmedDevicePins) {
-        mutableStateOf(startupPrewarmedDevicePins)
+    val runtimeCachedDevicePins = remember { DeviceMapPinRuntimeCache.getFresh() }
+    val diskCachedDevicePins = remember(context) { DeviceMapPinDiskCache.getFresh(context) }
+    var estimatedDeviceLocationPins by remember(startupPrewarmedDevicePins, runtimeCachedDevicePins, diskCachedDevicePins) {
+        mutableStateOf(
+            if (runtimeCachedDevicePins.isNotEmpty()) {
+                runtimeCachedDevicePins
+            } else if (diskCachedDevicePins.isNotEmpty()) {
+                diskCachedDevicePins
+            } else {
+                startupPrewarmedDevicePins
+            }
+        )
     }
 
     val flightMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 2) {
@@ -4947,11 +5156,20 @@ private fun DetectionPage(
     } else {
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
+    val magneticMapCurrentLocation by if (selectedTab == 3 && selectedMapSubTab == 3) {
+        LocationSnapshotProvider.observe(
+            context,
+            minUpdateIntervalMs = (liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).coerceAtMost(5_000L)
+        ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    } else {
+        remember { mutableStateOf<DetectionLocation?>(null) }
+    }
 
     val isFlightMapActive = selectedTab == 3 && selectedMapSubTab == 2
     val activeMapLocation = when (selectedMapSubTab) {
         1 -> bluetoothMapCurrentLocation
         2 -> flightMapCurrentLocation
+        3 -> magneticMapCurrentLocation
         else -> deviceMapCurrentLocation
     }
     val noFlyOverlayLocationKey = remember(activeMapLocation) {
@@ -4979,6 +5197,8 @@ private fun DetectionPage(
         allDeviceCandidates = emptyList()
         deviceCandidatesPrepared = false
         resolvedLocationCache.clear()
+        DeviceMapPinRuntimeCache.clear()
+        DeviceMapPinDiskCache.clear(context)
         estimatedDeviceLocationPins = emptyList()
         noFlyZoneOverlayCache.clear()
         noFlyZoneOverlays = emptyList()
@@ -5131,7 +5351,6 @@ private fun DetectionPage(
 
     LaunchedEffect(allDeviceCandidates, isDeviceLocationTabActive) {
         if (!isDeviceLocationTabActive) {
-            estimatedDeviceLocationPins = emptyList()
             return@LaunchedEffect
         }
 
@@ -5320,6 +5539,8 @@ private fun DetectionPage(
         }
 
         estimatedDeviceLocationPins = resolvedPins
+        DeviceMapPinRuntimeCache.put(resolvedPins)
+        DeviceMapPinDiskCache.put(context, resolvedPins)
     }
 
     Column(
@@ -5332,13 +5553,124 @@ private fun DetectionPage(
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
         ) {
             Text("Detection", style = MaterialTheme.typography.headlineMedium)
-            if (selectedTab == 3) {
-                Text(
-                    text = "● LIVE",
-                    color = Color(0xFF2E7D32),
-                    fontWeight = FontWeight.Bold
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                AssistChip(
+                    onClick = { magneticDialogVisible = true },
+                    label = {
+                        Text(
+                            text = if (headerMagneticMagnitudeMicroTesla == null) {
+                                "🧲 MAG n/a"
+                            } else {
+                                "🧲 MAG ${String.format(Locale.US, "%.1f", headerMagneticMagnitudeMicroTesla)} uT"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = magneticReadoutColor,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 )
             }
+        }
+
+        if (magneticDialogVisible) {
+            AlertDialog(
+                onDismissRequest = { magneticDialogVisible = false },
+                title = { Text("Magnetic Monitor") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = if (headerMagneticMagnitudeMicroTesla == null) {
+                                "Current: n/a"
+                            } else {
+                                "Current: ${String.format(Locale.US, "%.1f", headerMagneticMagnitudeMicroTesla)} uT"
+                            },
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        MagneticSignalVisualizer(
+                            samples = magneticChartSamples,
+                            thresholdMicroTesla = magneticThresholdSliderValue.toDouble(),
+                            currentMagnitudeMicroTesla = headerMagneticMagnitudeMicroTesla
+                        )
+                        Text(
+                            text = "Trigger threshold: ${String.format(Locale.US, "%.1f", magneticThresholdSliderValue)} uT"
+                        )
+                        Slider(
+                            value = magneticThresholdSliderValue,
+                            onValueChange = { value -> magneticThresholdSliderValue = value },
+                            valueRange = ScanSettings.MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT.toFloat()..
+                                ScanSettings.MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT.toFloat(),
+                            onValueChangeFinished = {
+                                onMagneticEventTriggerThresholdChanged(magneticThresholdSliderValue.toDouble())
+                            }
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Direct magnetic channel")
+                            Switch(
+                                checked = directMagneticChannelEnabled,
+                                onCheckedChange = onDirectMagneticChannelEnabledChanged
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Rhythm beep")
+                            Switch(
+                                checked = magneticRhythmBeepEnabled,
+                                onCheckedChange = onMagneticRhythmBeepEnabledChanged,
+                                enabled = directMagneticChannelEnabled
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Mag disturbance alerts")
+                            Text(
+                                text = if (magneticIncreaseNotificationsEnabled) "Enabled" else "Disabled",
+                                color = if (magneticIncreaseNotificationsEnabled) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Text(
+                            text = "Use Settings > Alerts > Magnetic disturbance alerts to change this.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "High-accuracy GPS capture is required for magnetic heatmap recording.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            selectedTab = 3
+                            selectedMapSubTab = 3
+                            magneticMapFocusRequestNonce += 1
+                            magneticDialogVisible = false
+                        }
+                    ) {
+                        Text("Open Magnetic Map")
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { magneticDialogVisible = false }) {
+                        Text("Done")
+                    }
+                }
+            )
         }
         TabRow(selectedTabIndex = selectedTab) {
             tabs.forEachIndexed { index, title ->
@@ -5460,6 +5792,11 @@ private fun DetectionPage(
                         selected = selectedMapSubTab == 2,
                         onClick = { selectedMapSubTab = 2 },
                         text = { Text("Aircraft Map") }
+                    )
+                    Tab(
+                        selected = selectedMapSubTab == 3,
+                        onClick = { selectedMapSubTab = 3 },
+                        text = { Text("Magnetic Map") }
                     )
                 }
 
@@ -5701,7 +6038,7 @@ private fun DetectionPage(
                         onLiveCollect = onLiveCollect,
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
-                } else {
+                } else if (selectedMapSubTab == 2) {
                     val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
                         ScanSettings.isAviationPublicSensorEnabled(context)
                     if (!flightSensorsEnabled) {
@@ -5821,6 +6158,23 @@ private fun DetectionPage(
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
                     }
+                } else {
+                    val magneticMapSamples = remember(meshInsightEncounters, magneticMapPinLimit) {
+                        extractMagneticHeatmapSamples(
+                            encounters = meshInsightEncounters,
+                            maxSamples = magneticMapPinLimit
+                        )
+                    }
+
+                    MagneticMonitorMapPage(
+                        samples = magneticMapSamples,
+                        currentLocation = magneticMapCurrentLocation,
+                        focusRequestNonce = magneticMapFocusRequestNonce,
+                        onOpenStatusTab = { selectedTab = 0 },
+                        pinLimit = magneticMapPinLimit,
+                        onPinLimitChange = { magneticMapPinLimit = it },
+                        showTrafficLayer = mapTrafficEnabled
+                    )
                 }
             }
         } else {
@@ -5841,6 +6195,94 @@ private fun DetectionPage(
                 onSyncNow = onSyncNow,
                 onWipeMeshData = onWipeMeshData
             )
+        }
+    }
+}
+
+@Composable
+private fun MagneticSignalVisualizer(
+    samples: List<Double>,
+    thresholdMicroTesla: Double,
+    currentMagnitudeMicroTesla: Double?
+) {
+    val panelColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+    val waveColor = Color(0xFF2E7D32)
+    val waveFillColor = Color(0xFF2E7D32).copy(alpha = 0.18f)
+    val thresholdColor = Color(0xFFE65100)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(170.dp)
+                .background(panelColor)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            if (size.width <= 0f || size.height <= 0f) return@Canvas
+
+            drawLine(
+                color = trackColor,
+                start = Offset(0f, size.height * 0.25f),
+                end = Offset(size.width, size.height * 0.25f),
+                strokeWidth = 1f
+            )
+            drawLine(
+                color = trackColor,
+                start = Offset(0f, size.height * 0.5f),
+                end = Offset(size.width, size.height * 0.5f),
+                strokeWidth = 1f
+            )
+            drawLine(
+                color = trackColor,
+                start = Offset(0f, size.height * 0.75f),
+                end = Offset(size.width, size.height * 0.75f),
+                strokeWidth = 1f
+            )
+
+            val mergedSamples = if (currentMagnitudeMicroTesla == null) {
+                samples
+            } else {
+                (samples + currentMagnitudeMicroTesla).takeLast(64)
+            }
+            if (mergedSamples.size < 2) return@Canvas
+
+            val lowBound = (thresholdMicroTesla - 28.0).coerceAtLeast(10.0)
+            val highBound = (thresholdMicroTesla + 36.0).coerceAtMost(180.0)
+            val valueRange = (highBound - lowBound).coerceAtLeast(1.0)
+
+            val thresholdY = size.height -
+                (((thresholdMicroTesla - lowBound) / valueRange).toFloat().coerceIn(0f, 1f) * size.height)
+            drawLine(
+                color = thresholdColor,
+                start = Offset(0f, thresholdY),
+                end = Offset(size.width, thresholdY),
+                strokeWidth = 2f
+            )
+
+            val points = mergedSamples.mapIndexed { index, value ->
+                val x = (index.toFloat() / (mergedSamples.lastIndex).toFloat()) * size.width
+                val normalized = ((value - lowBound) / valueRange).toFloat().coerceIn(0f, 1f)
+                val y = size.height - (normalized * size.height)
+                Offset(x, y)
+            }
+
+            for (i in 1 until points.size) {
+                val previous = points[i - 1]
+                val current = points[i]
+                drawLine(
+                    color = waveFillColor,
+                    start = Offset(previous.x, previous.y),
+                    end = Offset(previous.x, size.height),
+                    strokeWidth = 3.5f
+                )
+                drawLine(
+                    color = waveColor,
+                    start = previous,
+                    end = current,
+                    strokeWidth = 3f
+                )
+            }
         }
     }
 }
@@ -6636,6 +7078,337 @@ private fun DetectionMeshNetworkPage(
     }
 }
 
+private data class MagneticHeatSample(
+    val lat: Double,
+    val lon: Double,
+    val magnitudeMicroTesla: Double,
+    val timestampEpochMs: Long,
+    val locationAccuracyMeters: Double?
+)
+
+private data class MagneticHotspotCell(
+    val lat: Double,
+    val lon: Double,
+    val averageMagnitudeMicroTesla: Double,
+    val sampleCount: Int,
+    val latestTimestampEpochMs: Long
+)
+
+private fun extractMagneticHeatmapSamples(
+    encounters: List<Encounter>,
+    maxSamples: Int = 1500
+): List<MagneticHeatSample> {
+    return encounters
+        .asSequence()
+        .filter { encounter ->
+            encounter.provenance == EncounterProvenance.LOCAL &&
+                isDirectSignalChannel(encounter, "magnetic") &&
+                isValidLatLon(encounter.lat, encounter.lon)
+        }
+        .mapNotNull { encounter ->
+            val payload = parseEncounterPayload(encounter) ?: return@mapNotNull null
+            val magnitude = payload.optDoubleOrNull("magnitudeMicroTesla") ?: return@mapNotNull null
+            MagneticHeatSample(
+                lat = encounter.lat!!,
+                lon = encounter.lon!!,
+                magnitudeMicroTesla = magnitude,
+                timestampEpochMs = encounter.timestampEpochMs,
+                locationAccuracyMeters = payload.optDoubleOrNull("locationAccuracyMeters")
+            )
+        }
+        .sortedByDescending { it.timestampEpochMs }
+        .take(maxSamples.coerceIn(250, MAP_PIN_LIMIT_MAX))
+        .toList()
+}
+
+private fun aggregateMagneticHotspots(
+    samples: List<MagneticHeatSample>,
+    maxCells: Int = 700,
+    cellDegrees: Double = 0.00012
+): List<MagneticHotspotCell> {
+    if (samples.isEmpty()) return emptyList()
+
+    data class Acc(
+        var latSum: Double = 0.0,
+        var lonSum: Double = 0.0,
+        var magSum: Double = 0.0,
+        var count: Int = 0,
+        var latestTs: Long = 0L
+    )
+
+    val cells = linkedMapOf<String, Acc>()
+    samples.forEach { sample ->
+        val latCell = kotlin.math.floor(sample.lat / cellDegrees).toInt()
+        val lonCell = kotlin.math.floor(sample.lon / cellDegrees).toInt()
+        val key = "$latCell:$lonCell"
+        val acc = cells.getOrPut(key) { Acc() }
+        acc.latSum += sample.lat
+        acc.lonSum += sample.lon
+        acc.magSum += sample.magnitudeMicroTesla
+        acc.count += 1
+        if (sample.timestampEpochMs > acc.latestTs) {
+            acc.latestTs = sample.timestampEpochMs
+        }
+    }
+
+    return cells.values
+        .map { acc ->
+            MagneticHotspotCell(
+                lat = acc.latSum / acc.count,
+                lon = acc.lonSum / acc.count,
+                averageMagnitudeMicroTesla = acc.magSum / acc.count,
+                sampleCount = acc.count,
+                latestTimestampEpochMs = acc.latestTs
+            )
+        }
+        .sortedWith(
+            compareByDescending<MagneticHotspotCell> { it.sampleCount }
+                .thenByDescending { it.latestTimestampEpochMs }
+        )
+        .take(maxCells.coerceIn(100, 1200))
+}
+
+@Composable
+private fun MagneticMonitorMapPage(
+    samples: List<MagneticHeatSample>,
+    currentLocation: DetectionLocation?,
+    focusRequestNonce: Int,
+    onOpenStatusTab: () -> Unit,
+    pinLimit: Int,
+    onPinLimitChange: (Int) -> Unit,
+    showTrafficLayer: Boolean
+) {
+    val context = LocalContext.current
+    val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
+    val mapStyleOptions = rememberMapStyleOptionsForTheme()
+    val hasLocationPermission = remember(context) {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+    val mapProperties = remember(hasLocationPermission, mapStyleOptions, showTrafficLayer) {
+        MapProperties(
+            isMyLocationEnabled = hasLocationPermission,
+            isTrafficEnabled = showTrafficLayer,
+            mapStyleOptions = mapStyleOptions
+        )
+    }
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 12f)
+    }
+
+    val pinLimitOptions = listOf(250, 500, 1000, 1500, 2500, 5000, 7500, 10000)
+    val gpsRequirementOptions = ScanSettings.ALLOWED_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
+    var pinLimitExpanded by remember { mutableStateOf(false) }
+    var gpsRequirementExpanded by remember { mutableStateOf(false) }
+    var magneticGpsAccuracyRequirementMeters by rememberSaveable {
+        mutableStateOf(ScanSettings.getMagneticGpsAccuracyRequirementMeters(context))
+    }
+    val hasHighAccuracyFix = LocationSnapshotProvider.isHighAccuracyFix(
+        context = context,
+        location = currentLocation,
+        thresholdMeters = magneticGpsAccuracyRequirementMeters
+    )
+    val lowestSeenAccuracyMeters = remember(samples) {
+        samples
+            .asSequence()
+            .mapNotNull { sample -> sample.locationAccuracyMeters }
+            .filter { value -> value.isFinite() && value > 0.0 }
+            .minOrNull()
+    }
+    val visibleSamples = remember(samples, pinLimit) { samples.take(pinLimit.coerceAtLeast(1)) }
+    val hotspotCells = remember(visibleSamples) {
+        aggregateMagneticHotspots(
+            samples = visibleSamples,
+            maxCells = 700
+        )
+    }
+    val recentLiveSamples = remember(visibleSamples) {
+        val latestTs = visibleSamples.maxOfOrNull { it.timestampEpochMs } ?: 0L
+        val recentCutoff = latestTs - (90_000L)
+        visibleSamples.filter { it.timestampEpochMs >= recentCutoff }.take(120)
+    }
+
+    LaunchedEffect(samples, currentLocation, focusRequestNonce) {
+        val target = currentLocation?.let { LatLng(it.lat, it.lon) }
+            ?: samples.firstOrNull()?.let { LatLng(it.lat, it.lon) }
+            ?: return@LaunchedEffect
+        cameraPositionState.animate(
+            update = CameraUpdateFactory.newLatLngZoom(target, 16f),
+            durationMs = 700
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Magnetic Heatmap", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Records high-accuracy GPS magnetic samples and builds hotspot intensity over time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "High-accuracy GPS gate: ${if (hasHighAccuracyFix) "OPEN" else "WAITING"} (required <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m${lowestSeenAccuracyMeters?.let { " • lowest seen ${String.format(Locale.US, "%.1f", it)} m" } ?: " • lowest seen n/a"})",
+                    color = if (hasHighAccuracyFix) Color(0xFF2E7D32) else Color(0xFFE65100),
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "GPS accuracy now: ${currentLocation?.accuracyMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"} • Requirement: <= ${String.format(Locale.US, "%.1f m", magneticGpsAccuracyRequirementMeters)} • Hotspot cells: ${hotspotCells.size} • Samples: ${samples.size}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!hasHighAccuracyFix) {
+                    Text(
+                        "Live overlay paused while GPS gate is WAITING; historical hotspots remain visible.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFE65100),
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.widthIn(min = 190.dp)) {
+                        OutlinedButton(onClick = { pinLimitExpanded = true }) {
+                            Text("Samples shown: $pinLimit")
+                        }
+                        DropdownMenu(
+                            expanded = pinLimitExpanded,
+                            onDismissRequest = { pinLimitExpanded = false }
+                        ) {
+                            pinLimitOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.toString()) },
+                                    onClick = {
+                                        onPinLimitChange(option)
+                                        pinLimitExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = onOpenStatusTab,
+                        modifier = Modifier.height(40.dp)
+                    ) {
+                        Text("Open Status")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.widthIn(min = 240.dp)) {
+                        OutlinedButton(onClick = { gpsRequirementExpanded = true }) {
+                            Text("GPS gate <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m")
+                        }
+                        DropdownMenu(
+                            expanded = gpsRequirementExpanded,
+                            onDismissRequest = { gpsRequirementExpanded = false }
+                        ) {
+                            gpsRequirementOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(String.format(Locale.US, "<= %.1f m", option)) },
+                                    onClick = {
+                                        magneticGpsAccuracyRequirementMeters = option
+                                        ScanSettings.setMagneticGpsAccuracyRequirementMeters(context, option)
+                                        gpsRequirementExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!hasMapsApiKey) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("Google Maps key missing", fontWeight = FontWeight.Bold)
+                    Text("Set MAPS_API_KEY in local.properties or environment to render Magnetic Map.")
+                }
+            }
+            return@Column
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            GoogleMap(
+                modifier = Modifier.fillMaxSize(),
+                cameraPositionState = cameraPositionState,
+                properties = mapProperties,
+                uiSettings = MapUiSettings(
+                    zoomControlsEnabled = true,
+                    myLocationButtonEnabled = true,
+                    compassEnabled = true
+                )
+            ) {
+                currentLocation?.let { loc ->
+                    val currentLatLng = LatLng(loc.lat, loc.lon)
+                    Circle(
+                        center = currentLatLng,
+                        radius = (loc.accuracyMeters ?: 8f).toDouble().coerceIn(3.0, 60.0),
+                        strokeWidth = 2f,
+                        strokeColor = Color(0xFF1565C0),
+                        fillColor = Color(0x331565C0)
+                    )
+                }
+
+                hotspotCells.forEach { cell ->
+                    val magnitudeSeverity = ((cell.averageMagnitudeMicroTesla - 45.0) / 45.0).coerceIn(0.0, 1.0)
+                    val densitySeverity = ((cell.sampleCount - 1).toDouble() / 10.0).coerceIn(0.0, 1.0)
+                    val severity = (0.6 * magnitudeSeverity + 0.4 * densitySeverity).coerceIn(0.0, 1.0)
+                    val hotspotColor = Color(
+                        red = (0x2E + (0xB3 - 0x2E) * severity).toInt(),
+                        green = (0x7D + (0x26 - 0x7D) * severity).toInt(),
+                        blue = (0x32 + (0x1E - 0x32) * severity).toInt(),
+                        alpha = (85 + (140 * severity)).toInt()
+                    )
+                    // Keep each hotspot anchored to recorded coordinates with minimal spatial spread.
+                    Circle(
+                        center = LatLng(cell.lat, cell.lon),
+                        radius = 1.0,
+                        strokeWidth = 0f,
+                        strokeColor = Color.Transparent,
+                        fillColor = hotspotColor
+                    )
+                }
+
+                if (hasHighAccuracyFix) {
+                    recentLiveSamples.forEach { sample ->
+                        Circle(
+                            center = LatLng(sample.lat, sample.lon),
+                            radius = 0.8,
+                            strokeWidth = 0f,
+                            strokeColor = Color.Transparent,
+                            fillColor = Color(0x994FC3F7)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 private fun DetectionMapPage(
@@ -7299,20 +8072,39 @@ private fun DetectionMapPage(
         renderedPins.size
     ) {
         mapScannerSweepAnimationEnabled &&
-            !mapTouchInProgress &&
-            renderedPins.size <= MAP_SWEEP_DISABLE_PIN_THRESHOLD
+            !mapTouchInProgress
+    }
+    val sweepAnimationFrameMs = remember(renderedPins.size) {
+        when {
+            renderedPins.size > 2_000 -> 320L
+            renderedPins.size > 1_200 -> 260L
+            renderedPins.size > 700 -> 210L
+            renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 170L
+            else -> MAP_SWEEP_ANIMATION_FRAME_MS
+        }
+    }
+    val sweepAnimationStepDegrees = remember(renderedPins.size) {
+        when {
+            renderedPins.size > 2_000 -> 16f
+            renderedPins.size > 1_200 -> 14f
+            renderedPins.size > 700 -> 12f
+            renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 10f
+            else -> MAP_SWEEP_ANIMATION_STEP_DEGREES
+        }
     }
     val radarSweepHeadingDeg by produceState(
         initialValue = 0f,
-        key1 = sweepAnimationActive
+        key1 = sweepAnimationActive,
+        key2 = sweepAnimationFrameMs,
+        key3 = sweepAnimationStepDegrees
     ) {
         if (!sweepAnimationActive) {
             value = 0f
             return@produceState
         }
         while (true) {
-            delay(MAP_SWEEP_ANIMATION_FRAME_MS)
-            val next = value + MAP_SWEEP_ANIMATION_STEP_DEGREES
+            delay(sweepAnimationFrameMs)
+            val next = value + sweepAnimationStepDegrees
             value = if (next >= 360f) next - 360f else next
         }
     }
@@ -7603,8 +8395,21 @@ private fun DetectionMapPage(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(onClick = { deviceTypeFiltersCollapsed = !deviceTypeFiltersCollapsed }) {
-                            Text(if (deviceTypeFiltersCollapsed) "[+]" else "[-]")
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            if (showLiveOnlyControl) {
+                                Text(
+                                    text = if (liveOnlyEnabled) "● LIVE" else "● ALL",
+                                    color = if (liveOnlyEnabled) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            TextButton(onClick = { deviceTypeFiltersCollapsed = !deviceTypeFiltersCollapsed }) {
+                                Text(if (deviceTypeFiltersCollapsed) "[+]" else "[-]")
+                            }
                         }
                     }
                     if (!deviceTypeFiltersCollapsed) {
@@ -9102,6 +9907,167 @@ private data class MapPin(
     val motionSpeedMps: Double? = null,
     val isLive: Boolean = true
 )
+
+private object DeviceMapPinRuntimeCache {
+    private val lock = Any()
+    private var cachedAtEpochMs: Long = 0L
+    private var cachedPins: List<MapPin> = emptyList()
+
+    fun getFresh(nowEpochMs: Long = System.currentTimeMillis()): List<MapPin> {
+        synchronized(lock) {
+            if (cachedPins.isEmpty()) return emptyList()
+            if (nowEpochMs - cachedAtEpochMs > DEVICE_MAP_PIN_CACHE_TTL_MS) {
+                cachedPins = emptyList()
+                cachedAtEpochMs = 0L
+                return emptyList()
+            }
+            return cachedPins
+        }
+    }
+
+    fun put(pins: List<MapPin>, nowEpochMs: Long = System.currentTimeMillis()) {
+        synchronized(lock) {
+            if (pins.isEmpty()) return
+            cachedPins = pins
+            cachedAtEpochMs = nowEpochMs
+        }
+    }
+
+    fun clear() {
+        synchronized(lock) {
+            cachedPins = emptyList()
+            cachedAtEpochMs = 0L
+        }
+    }
+}
+
+private object DeviceMapPinDiskCache {
+    private const val PREFS = "argus_ui_cache"
+    private const val KEY_EPOCH_MS = "device_map_pin_cache_epoch_ms"
+    private const val KEY_JSON = "device_map_pin_cache_json"
+    private const val MAX_PINS = 2500
+    private const val MAX_SEARCHABLE_METADATA_CHARS = 1400
+    private const val MAX_SNIPPET_CHARS = 700
+
+    fun getFresh(
+        context: android.content.Context,
+        nowEpochMs: Long = System.currentTimeMillis()
+    ): List<MapPin> {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val cachedAtEpochMs = prefs.getLong(KEY_EPOCH_MS, 0L)
+        if (cachedAtEpochMs <= 0L || nowEpochMs - cachedAtEpochMs > DEVICE_MAP_PIN_DISK_CACHE_TTL_MS) {
+            clear(context)
+            return emptyList()
+        }
+
+        val raw = prefs.getString(KEY_JSON, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (index in 0 until arr.length()) {
+                    val item = arr.optJSONObject(index) ?: continue
+                    val lat = item.optDouble("lat", Double.NaN)
+                    val lon = item.optDouble("lon", Double.NaN)
+                    if (!lat.isFinite() || !lon.isFinite()) continue
+
+                    val savedSnippet = item.optString("snippet", "")
+                    val snippetBuilder = if (savedSnippet.isBlank()) {
+                        null
+                    } else {
+                        { savedSnippet }
+                    }
+
+                    add(
+                        MapPin(
+                            position = LatLng(lat, lon),
+                            title = item.optString("title", ""),
+                            snippetBuilder = snippetBuilder,
+                            searchableMetadata = item.optString("searchableMetadata", ""),
+                            timestampEpochMs = item.optLong("timestampEpochMs", 0L),
+                            source = item.optString("source", ""),
+                            primaryId = item.optString("primaryId", ""),
+                            secondaryId = item.optString("secondaryId", null),
+                            markerGlyphOverride = item.optString("markerGlyphOverride", null),
+                            trackerFamilyBadge = item.optString("trackerFamilyBadge", null),
+                            encounterTimestampEpochMs = if (item.has("encounterTimestampEpochMs")) {
+                                item.optLong("encounterTimestampEpochMs")
+                            } else {
+                                null
+                            },
+                            aircraftIconType = item.optString("aircraftIconType", null),
+                            headingDegrees = if (item.has("headingDegrees")) {
+                                item.optDouble("headingDegrees")
+                            } else {
+                                null
+                            },
+                            motionBadge = item.optString("motionBadge", null),
+                            motionSpeedMps = if (item.has("motionSpeedMps")) {
+                                item.optDouble("motionSpeedMps")
+                            } else {
+                                null
+                            },
+                            isLive = item.optBoolean("isLive", true)
+                        )
+                    )
+                }
+            }
+        }.getOrElse {
+            clear(context)
+            emptyList()
+        }
+    }
+
+    fun put(context: android.content.Context, pins: List<MapPin>, nowEpochMs: Long = System.currentTimeMillis()) {
+        if (pins.isEmpty()) return
+        val payload = JSONArray().apply {
+            pins
+                .asSequence()
+                .take(MAX_PINS)
+                .forEach { pin ->
+                    put(
+                        JSONObject().apply {
+                            put("lat", pin.position.latitude)
+                            put("lon", pin.position.longitude)
+                            put("title", pin.title)
+                            put("snippet", pin.snippetBuilder?.invoke()?.take(MAX_SNIPPET_CHARS).orEmpty())
+                            put(
+                                "searchableMetadata",
+                                pin.searchableMetadata.take(MAX_SEARCHABLE_METADATA_CHARS)
+                            )
+                            put("timestampEpochMs", pin.timestampEpochMs)
+                            put("source", pin.source)
+                            put("primaryId", pin.primaryId)
+                            pin.secondaryId?.let { put("secondaryId", it) }
+                            pin.markerGlyphOverride?.let { put("markerGlyphOverride", it) }
+                            pin.trackerFamilyBadge?.let { put("trackerFamilyBadge", it) }
+                            pin.encounterTimestampEpochMs?.let { put("encounterTimestampEpochMs", it) }
+                            pin.aircraftIconType?.let { put("aircraftIconType", it) }
+                            pin.headingDegrees?.let { put("headingDegrees", it) }
+                            pin.motionBadge?.let { put("motionBadge", it) }
+                            pin.motionSpeedMps?.let { put("motionSpeedMps", it) }
+                            put("isLive", pin.isLive)
+                        }
+                    )
+                }
+        }
+
+        context
+            .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_EPOCH_MS, nowEpochMs)
+            .putString(KEY_JSON, payload.toString())
+            .apply()
+    }
+
+    fun clear(context: android.content.Context) {
+        context
+            .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_EPOCH_MS)
+            .remove(KEY_JSON)
+            .apply()
+    }
+}
 
 private fun encounterFreshnessEpochMs(encounter: Encounter): Long {
     val observedEpochMs = encounter.timestampEpochMs
@@ -11806,14 +12772,18 @@ private fun analyzeApproachSignal(encounters: List<Encounter>): ApproachSignal? 
 
 private fun isApproachEligibleSource(source: EncounterSource): Boolean {
     return source != EncounterSource.CAMERA &&
+        source != EncounterSource.WIFI &&
+        source != EncounterSource.WIFI_DIRECT &&
         source != EncounterSource.WIFI_SWEEP &&
-    source != EncounterSource.BLUETOOTH_LE_SWEEP
+        source != EncounterSource.BLUETOOTH_LE_SWEEP
 }
 
 private fun isApproachEligibleSource(source: String): Boolean {
     return source != EncounterSource.CAMERA.name &&
+        source != EncounterSource.WIFI.name &&
+        source != EncounterSource.WIFI_DIRECT.name &&
         source != EncounterSource.WIFI_SWEEP.name &&
-    source != EncounterSource.BLUETOOTH_LE_SWEEP.name
+        source != EncounterSource.BLUETOOTH_LE_SWEEP.name
 }
 
 private fun analyzeMotionSignal(encounters: List<Encounter>): MotionSignal? {
@@ -12796,6 +13766,18 @@ private fun sendMagneticIncreaseNotification(
         append(" uT)")
     }
 
+    val tapIntent = Intent(context, MainActivity::class.java).apply {
+        action = ACTION_OPEN_MAGNETIC_MONITOR
+        putExtra(EXTRA_MAGNETIC_OPEN_POPUP, true)
+        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    }
+    val tapPendingIntent = PendingIntent.getActivity(
+        context,
+        0x4D47, // 'MG'
+        tapIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
     val notification = NotificationCompat.Builder(context, MAGNETIC_INCREASE_ALERT_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_more)
         .setContentTitle(title)
@@ -12803,10 +13785,116 @@ private fun sendMagneticIncreaseNotification(
         .setStyle(NotificationCompat.BigTextStyle().bigText(content))
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setAutoCancel(true)
+        .setContentIntent(tapPendingIntent)
         .build()
 
     val notificationId = ("magnetic-increase:${System.currentTimeMillis() / 60_000L}").hashCode()
     NotificationManagerCompat.from(context).notify(notificationId, notification)
+}
+
+private fun magneticAlertSeverity(
+    currentMagnitudeMicroTesla: Double,
+    deltaMicroTesla: Double
+): Double {
+    val magnitudeComponent = ((currentMagnitudeMicroTesla - MAGNETIC_DISTURBANCE_UPPER_BOUND_UT) / 35.0)
+        .coerceIn(0.0, 1.0)
+    val deltaComponent = (deltaMicroTesla / 28.0).coerceIn(0.0, 1.0)
+    return maxOf(magnitudeComponent, deltaComponent)
+}
+
+private suspend fun playMagneticRhythm(
+    severity: Double,
+    playMs: Long
+) {
+    val clampedSeverity = severity.coerceIn(0.0, 1.0)
+    val bpmRange = (MAGNETIC_RHYTHM_MAX_BPM - MAGNETIC_RHYTHM_MIN_BPM).toDouble()
+    val bpm = (MAGNETIC_RHYTHM_MIN_BPM + bpmRange * clampedSeverity).toInt()
+        .coerceIn(MAGNETIC_RHYTHM_MIN_BPM, MAGNETIC_RHYTHM_MAX_BPM)
+    val intervalMs = (60_000.0 / bpm.toDouble()).toLong().coerceIn(120L, 900L)
+    val toneMs = (intervalMs * 0.38).toInt().coerceIn(70, 220)
+    val deadline = System.currentTimeMillis() + playMs.coerceAtLeast(400L)
+
+    val tone = createMagneticToneGenerator() ?: return
+    try {
+        while (System.currentTimeMillis() < deadline) {
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP2, toneMs)
+            delay(intervalMs)
+        }
+    } finally {
+        tone.release()
+    }
+}
+
+private fun createMagneticToneGenerator(): ToneGenerator? {
+    val candidates = listOf(
+        AudioManager.STREAM_MUSIC,
+        AudioManager.STREAM_NOTIFICATION,
+        AudioManager.STREAM_ALARM
+    )
+    for (stream in candidates) {
+        val tone = runCatching { ToneGenerator(stream, 90) }.getOrNull()
+        if (tone != null) return tone
+    }
+    return null
+}
+
+@Composable
+private fun rememberRealtimeMagneticMagnitudeMicroTesla(
+    enabled: Boolean
+): androidx.compose.runtime.State<Double?> {
+    val context = LocalContext.current
+    val magnitudeState = remember(context, enabled) { mutableStateOf<Double?>(null) }
+
+    DisposableEffect(context, enabled) {
+        if (!enabled) {
+            magnitudeState.value = null
+            return@DisposableEffect onDispose { }
+        }
+
+        val sensorManager = context.getSystemService(android.content.Context.SENSOR_SERVICE) as? SensorManager
+        val sensor = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        if (sensorManager == null || sensor == null) {
+            magnitudeState.value = null
+            return@DisposableEffect onDispose { }
+        }
+
+        val sensorDelay = SensorManager.SENSOR_DELAY_NORMAL
+
+        var lastEmitElapsedMs = 0L
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val values = event.values
+                if (values.size < 3) return
+
+                val x = values[0].toDouble()
+                val y = values[1].toDouble()
+                val z = values[2].toDouble()
+                val magnitude = sqrt(x * x + y * y + z * z)
+                if (!magnitude.isFinite()) return
+
+                // Sample UI updates at a low cadence to reduce battery and recomposition churn.
+                val nowElapsedMs = SystemClock.elapsedRealtime()
+                if (nowElapsedMs - lastEmitElapsedMs < 500L) return
+                lastEmitElapsedMs = nowElapsedMs
+                magnitudeState.value = magnitude
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+
+        val handler = Handler(Looper.getMainLooper())
+        val registered = sensorManager.registerListener(listener, sensor, sensorDelay, handler)
+        if (!registered) {
+            magnitudeState.value = null
+            return@DisposableEffect onDispose { }
+        }
+
+        onDispose {
+            sensorManager.unregisterListener(listener)
+        }
+    }
+
+    return magnitudeState
 }
 
 @Composable
@@ -13003,7 +14091,12 @@ private fun DevicesPage(
         displayedDevices.take(visibleDeviceCount.coerceAtMost(displayedDevices.size))
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         Text("Detected Devices", style = MaterialTheme.typography.headlineMedium)
         Text("Tap any device for detailed history.")
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -13103,12 +14196,8 @@ private fun DevicesPage(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        LazyColumn {
-            items(
-                items = pagedDevices,
-                key = { device -> "${device.source}|${device.primaryId}" },
-                contentType = { "device" }
-            ) { device ->
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            pagedDevices.forEach { device ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -13213,30 +14302,28 @@ private fun DevicesPage(
                 }
             }
             if (pagedDevices.size < displayedDevices.size) {
-                item {
-                    val remaining = (displayedDevices.size - pagedDevices.size).coerceAtLeast(0)
-                    val nextBatch = remaining.coerceAtMost(DETECTION_LIST_PAGE_SIZE)
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                val remaining = (displayedDevices.size - pagedDevices.size).coerceAtLeast(0)
+                val nextBatch = remaining.coerceAtMost(DETECTION_LIST_PAGE_SIZE)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            visibleDeviceCount = (visibleDeviceCount + DETECTION_LIST_PAGE_SIZE)
+                                .coerceAtMost(displayedDevices.size)
+                        },
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        OutlinedButton(
-                            onClick = {
-                                visibleDeviceCount = (visibleDeviceCount + DETECTION_LIST_PAGE_SIZE)
-                                    .coerceAtMost(displayedDevices.size)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Load $nextBatch More")
-                        }
-                        Text(
-                            "Loaded ${pagedDevices.size} of ${displayedDevices.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text("Load $nextBatch More")
                     }
+                    Text(
+                        "Loaded ${pagedDevices.size} of ${displayedDevices.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -13398,6 +14485,7 @@ private fun EncountersPage(
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
+    var collapseSweepEvents by rememberSaveable { mutableStateOf(true) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
@@ -13413,10 +14501,25 @@ private fun EncountersPage(
     var filteredEncounterCount by remember { mutableStateOf(0) }
     var displayedEncounters by remember { mutableStateOf<List<Encounter>>(emptyList()) }
     var encounterDisplayComputing by remember { mutableStateOf(false) }
-    LaunchedEffect(encounters, sourceFilter, queryFilter, showOwnedOnly, ownedDeviceKeys, showDistance, sortByDistance, currentLocation) {
+    LaunchedEffect(
+        encounters,
+        sourceFilter,
+        queryFilter,
+        showOwnedOnly,
+        collapseSweepEvents,
+        ownedDeviceKeys,
+        showDistance,
+        sortByDistance,
+        currentLocation
+    ) {
         encounterDisplayComputing = true
         val (filtered, displayed) = withContext(Dispatchers.Default) {
-            val filteredEncounters = encounters.filter { encounter ->
+            val sourceEncounters = if (collapseSweepEvents) {
+                collapseSweepEncounters(encounters)
+            } else {
+                encounters
+            }
+            val filteredEncounters = sourceEncounters.filter { encounter ->
                 val sourceMatches = sourceFilter == null || encounter.source.name == sourceFilter
                 val queryMatches = queryFilter.isBlank() ||
                     encounter.primaryId.contains(queryFilter, ignoreCase = true) ||
@@ -13516,6 +14619,11 @@ private fun EncountersPage(
                             label = "Show Owned Only",
                             checked = showOwnedOnly,
                             onCheckedChange = { showOwnedOnly = it }
+                        )
+                        CompactSwitchControl(
+                            label = "Collapse Wi-Fi/BLE Sweep Events",
+                            checked = collapseSweepEvents,
+                            onCheckedChange = { collapseSweepEvents = it }
                         )
                     }
                 }
@@ -13649,6 +14757,36 @@ private fun buildDeviceItems(
                 )
             }
         }
+
+private fun collapseSweepEncounters(encounters: List<Encounter>): List<Encounter> {
+    if (encounters.isEmpty()) return emptyList()
+
+    val collapsed = ArrayList<Encounter>(encounters.size)
+    val sweepBestByKey = linkedMapOf<String, Encounter>()
+
+    encounters.forEach { encounter ->
+        val isSweepSource = encounter.source == EncounterSource.WIFI_SWEEP ||
+            encounter.source == EncounterSource.BLUETOOTH_LE_SWEEP
+        if (!isSweepSource) {
+            collapsed += encounter
+            return@forEach
+        }
+
+        // Collapse sweep bursts into one representative event per source/time bucket.
+        val bucket = encounter.timestampEpochMs / 30_000L
+        val key = "${encounter.source.name}|$bucket"
+        val current = sweepBestByKey[key]
+        if (current == null || encounter.timestampEpochMs > current.timestampEpochMs) {
+            sweepBestByKey[key] = encounter
+        }
+    }
+
+    if (sweepBestByKey.isNotEmpty()) {
+        collapsed += sweepBestByKey.values
+    }
+
+    return collapsed
+}
 
 private fun buildSingleDeviceItem(
     source: String,
