@@ -12,7 +12,6 @@ import android.hardware.SensorManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Uri
-import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -38,7 +37,6 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -94,7 +92,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -103,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.edit
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.model.CameraPosition
@@ -168,6 +166,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flow
@@ -177,12 +176,15 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 private enum class DeviceSortMode {
     LAST_SEEN,
@@ -220,6 +222,9 @@ private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val FLOCK_ALERT_CHANNEL_ID = "argus_flock_alerts"
 private const val FLOCK_ALERT_COOLDOWN_MS = 10 * 60 * 1000L
+private const val CAMERA_IN_VIEW_ALERT_CHANNEL_ID = "argus_camera_in_view_alerts"
+private const val CAMERA_IN_VIEW_ALERT_COOLDOWN_MS = 3 * 60 * 1000L
+private const val CAMERA_IN_VIEW_DISTANCE_THRESHOLD_METERS = 120.0
 private const val NO_FLY_PASS_THROUGH_ALERT_CHANNEL_ID = "argus_no_fly_pass_through_alerts"
 private const val NO_FLY_PASS_THROUGH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val NFC_ALERT_CHANNEL_ID = "argus_nfc_alerts"
@@ -271,8 +276,6 @@ private const val SIGNAL_INTEL_WINDOW_MINUTES = SIGNAL_INTEL_WINDOW_MS / 60_000L
 private const val FIXED_LIVE_MAP_UPDATE_INTERVAL_SECONDS = 5L
 private const val OPERATIONAL_ANALYSIS_WINDOW_MS = 60L * 60L * 1000L
 private const val OPERATIONAL_ANALYSIS_MAX_ENCOUNTERS = 6000
-private const val MAGNETIC_ALERT_WINDOW_MS = 30L * 60L * 1000L
-private const val MAGNETIC_ALERT_MAX_ENCOUNTERS = 2000
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val ACTION_OPEN_NO_FLY_INCIDENT_PATH = "dev.argus.tracker.action.OPEN_NO_FLY_INCIDENT_PATH"
 private const val ACTION_OPEN_MAGNETIC_MONITOR = "dev.argus.tracker.action.OPEN_MAGNETIC_MONITOR"
@@ -342,6 +345,7 @@ private fun rememberMapStyleOptionsForTheme(): MapStyleOptions? {
 private enum class AlertLogType {
     APPROACH,
     TRACKER,
+    CAMERA_IN_VIEW,
     NO_FLY_PASS_THROUGH,
     NFC
 }
@@ -515,7 +519,7 @@ private object AlertLogStore {
     fun read(context: android.content.Context): List<AlertLogEntry> {
         val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_ALERT_LOG_ENTRIES, "[]") ?: "[]"
-        val array = runCatching { org.json.JSONArray(raw) }.getOrElse { org.json.JSONArray() }
+        val array = runCatching { JSONArray(raw) }.getOrElse { JSONArray() }
         return buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
@@ -555,9 +559,9 @@ private object AlertLogStore {
     }
 
     private fun write(context: android.content.Context, entries: List<AlertLogEntry>) {
-        val array = org.json.JSONArray()
+        val array = JSONArray()
         entries.forEach { entry ->
-            val obj = org.json.JSONObject().apply {
+            val obj = JSONObject().apply {
                 put("timestampEpochMs", entry.timestampEpochMs)
                 put("type", entry.type.name)
                 put("source", entry.source)
@@ -567,10 +571,9 @@ private object AlertLogStore {
             }
             array.put(obj)
         }
-        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_ALERT_LOG_ENTRIES, array.toString())
-            .apply()
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).edit {
+            putString(KEY_ALERT_LOG_ENTRIES, array.toString())
+        }
     }
 }
 private object ApproachTrackStore {
@@ -592,7 +595,9 @@ private object ApproachTrackStore {
         val raw = prefs.getString(KEY_APPROACH_TRACK_STARTS, "{}").orEmpty()
         val obj = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
         obj.put(key, epochMs.coerceAtLeast(0L))
-        prefs.edit().putString(KEY_APPROACH_TRACK_STARTS, obj.toString()).apply()
+        prefs.edit {
+            putString(KEY_APPROACH_TRACK_STARTS, obj.toString())
+        }
     }
 }
 
@@ -637,7 +642,9 @@ private object DeviceSpeedRecordStore {
         val existing = obj.optDouble(key, Double.NaN)
         if (existing.isFinite() && existing >= currentSpeedMps) return false
         obj.put(key, currentSpeedMps)
-        prefs.edit().putString(KEY_DEVICE_TOP_SPEEDS, obj.toString()).apply()
+        prefs.edit {
+            putString(KEY_DEVICE_TOP_SPEEDS, obj.toString())
+        }
         return true
     }
 }
@@ -656,6 +663,7 @@ private fun readSensorGateSettings(context: android.content.Context): SensorGate
     )
 
 @Composable
+@OptIn(FlowPreview::class)
 fun ArgusApp(notificationIntent: Intent? = null) {
     val context = LocalContext.current
     val app = context.applicationContext as ArgusApplication
@@ -701,6 +709,9 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     var approachNotificationsEnabled by remember { mutableStateOf(ScanSettings.isApproachNotificationsEnabled(context)) }
     var trackerNotificationsEnabled by remember { mutableStateOf(ScanSettings.isTrackerNotificationsEnabled(context)) }
     var flockNotificationsEnabled by remember { mutableStateOf(ScanSettings.isFlockNotificationsEnabled(context)) }
+    var cameraInViewNotificationsEnabled by remember {
+        mutableStateOf(ScanSettings.isCameraInViewNotificationsEnabled(context))
+    }
     var noFlyPassThroughNotificationsEnabled by remember {
         mutableStateOf(ScanSettings.isNoFlyPassThroughNotificationsEnabled(context))
     }
@@ -744,13 +755,13 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val trackerStateByDevice = remember { mutableMapOf<String, TrackerRiskLevel>() }
     val lastTrackerNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val lastFlockNotificationEpochBySignature = remember { mutableMapOf<String, Long>() }
+    val cameraInViewStateByDevice = remember { mutableMapOf<String, Boolean>() }
+    val lastCameraInViewNotificationEpochByDevice = remember { mutableMapOf<String, Long>() }
     val noFlyZoneStateByTrack = remember { mutableMapOf<String, Set<String>>() }
     val lastNoFlyZoneNotificationEpochByTrackZone = remember { mutableMapOf<String, Long>() }
     val noFlyZoneDetectionCache = remember { mutableMapOf<String, List<NoFlyZoneOverlayProvider.NoFlyZonePolygon>>() }
-    var lastMagneticIncreaseAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcAlertEpochMs by remember { mutableStateOf(0L) }
     var lastNfcObservedEncounterEpochMs by remember { mutableStateOf(0L) }
-    var lastMagneticObservedSampleEpochMs by remember { mutableStateOf(0L) }
     var lastWearStatusSignature by remember { mutableStateOf<String?>(null) }
     var lastWearStatusPublishEpochMs by remember { mutableStateOf(0L) }
     var lastOperationalStateSignature by remember { mutableStateOf("") }
@@ -806,9 +817,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     val meshPeerEncounters = remember(chainMesh) {
         buildMeshPeerEncounters(chainMesh)
     }
-    val recentPipelineEncounters = remember(recent, meshPeerEncounters) {
-        mergePipelineEncounters(recent, meshPeerEncounters)
-    }
     val recent100PipelineEncounters = remember(recent100, meshPeerEncounters) {
         mergePipelineEncounters(recent100, meshPeerEncounters)
     }
@@ -826,13 +834,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
             encounters = recent,
             windowMs = OPERATIONAL_ANALYSIS_WINDOW_MS,
             maxEncounters = OPERATIONAL_ANALYSIS_MAX_ENCOUNTERS
-        )
-    }
-    val magneticAlertWindow = remember(recent) {
-        selectRecentEncounterWindow(
-            encounters = recent,
-            windowMs = MAGNETIC_ALERT_WINDOW_MS,
-            maxEncounters = MAGNETIC_ALERT_MAX_ENCOUNTERS
         )
     }
     val suppressedWifiRandomizedOneOffCount = remember(
@@ -856,7 +857,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(lastScanEpochMs) {
         if (lastScanEpochMs == null) return@LaunchedEffect
-        delay(200L)
+        delay(200.milliseconds)
         viewModel.refreshSummary()
     }
 
@@ -869,7 +870,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
     }
 
     LaunchedEffect(chainMesh, alertLogs, recent100PipelineEncounters) {
-        delay(750)
+        delay(750.milliseconds)
         val peersTotal = chainMesh.peers.size
         val peersConnected = chainMesh.peers.count { it.state == ChainPeerState.CONNECTED }
         val recentDevicePoints = withContext(Dispatchers.Default) {
@@ -971,7 +972,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     incidentLon?.let { add("lon=${Uri.encode(it.toString())}") }
                     enteredZoneIds?.let { add("zoneIds=${Uri.encode(it)}") }
                 }
-                val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}" 
+                val query = if (queryParts.isEmpty()) "" else "?${queryParts.joinToString("&")}"
 
                 navController.navigate(
                     "noFlyIncidentPath/${Uri.encode(source)}/${Uri.encode(primaryId)}/${Uri.encode(zoneSummary)}/$eventEpochMs$query"
@@ -1107,7 +1108,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(Unit) {
         val prewarmedPins = runCatching {
-            withTimeoutOrNull(3500L) {
+            withTimeoutOrNull(3500.milliseconds) {
                 val startupEncounters = withContext(Dispatchers.IO) {
                     app.container.repository.observeRecent(limit = 5000).first()
                 }
@@ -1159,7 +1160,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
         while (true) {
             runCatching { app.container.chainLinkCoordinator.syncNow() }
-            delay(chainAutoSyncIntervalSeconds * 1000L)
+            delay(chainAutoSyncIntervalSeconds.seconds)
         }
     }
 
@@ -1193,7 +1194,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
 
     LaunchedEffect(context) {
         ScanSettings.observeOperationalState(context)
-            .debounce(250L)
+            .debounce(250.milliseconds)
             .collect { state ->
             operationalObserverInitialized = true
             val signature = buildString {
@@ -1612,6 +1613,79 @@ fun ArgusApp(notificationIntent: Intent? = null) {
         lastNfcObservedEncounterEpochMs = latestNfc.timestampEpochMs
     }
 
+    LaunchedEffect(analyzedDevices, cameraInViewNotificationsEnabled) {
+        if (!cameraInViewNotificationsEnabled) {
+            cameraInViewStateByDevice.clear()
+            lastCameraInViewNotificationEpochByDevice.clear()
+            return@LaunchedEffect
+        }
+
+        val observerLocation = LocationSnapshotProvider.read(context)
+        if (observerLocation == null) {
+            cameraInViewStateByDevice.clear()
+            return@LaunchedEffect
+        }
+
+        val now = System.currentTimeMillis()
+        val seenKeys = mutableSetOf<String>()
+        val cameraLogsToAppend = mutableListOf<AlertLogEntry>()
+
+        analyzedDevices
+            .asSequence()
+            .filter { device -> device.source == EncounterSource.CAMERA.name }
+            .forEach { device ->
+                val key = "${device.source}|${device.primaryId}"
+                seenKeys += key
+                val distanceMeters = distanceFromLocationMeters(
+                    fromLat = observerLocation.lat,
+                    fromLon = observerLocation.lon,
+                    toLat = device.lastLat,
+                    toLon = device.lastLon
+                )
+                val isInView = distanceMeters != null && distanceMeters <= CAMERA_IN_VIEW_DISTANCE_THRESHOLD_METERS
+                val wasInView = cameraInViewStateByDevice[key] ?: false
+
+                if (isInView && !wasInView) {
+                    val sourceLabel = listSourceLabel(device.source, device.secondaryId)
+                    val rangeLabel = formatDistanceFeetMiles(distanceMeters!!)
+                    cameraLogsToAppend += AlertLogEntry(
+                        timestampEpochMs = now,
+                        type = AlertLogType.CAMERA_IN_VIEW,
+                        source = device.source,
+                        primaryId = device.primaryId,
+                        message = "In view of camera $sourceLabel ${device.primaryId} ($rangeLabel)",
+                        confidence = null
+                    )
+
+                    val lastNotified = lastCameraInViewNotificationEpochByDevice[key] ?: 0L
+                    if (hasPostNotificationsPermission(context) && now - lastNotified >= CAMERA_IN_VIEW_ALERT_COOLDOWN_MS) {
+                        ensureCameraInViewNotificationChannel(context)
+                        sendCameraInViewNotification(
+                            context = context,
+                            device = device,
+                            distanceMeters = distanceMeters
+                        )
+                        lastCameraInViewNotificationEpochByDevice[key] = now
+                    }
+                }
+
+                cameraInViewStateByDevice[key] = isInView
+            }
+
+        if (cameraLogsToAppend.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                AlertLogStore.appendAll(context, cameraLogsToAppend)
+            }
+            alertLogs = AlertLogStore.read(context)
+        }
+
+        val staleKeys = cameraInViewStateByDevice.keys.filter { staleKey -> staleKey !in seenKeys }
+        staleKeys.forEach { staleKey ->
+            cameraInViewStateByDevice.remove(staleKey)
+            lastCameraInViewNotificationEpochByDevice.remove(staleKey)
+        }
+    }
+
     LaunchedEffect(
         operationalAnalysisWindow,
         ownedDeviceKeys,
@@ -1707,7 +1781,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     trackingActive = trackingActive,
                     nowEpochMs = appNowEpochMs,
                     lastScanEpochMs = lastScanEpochMs,
-                    lastScanDurationMs = lastScanDurationMs,
                     scanIntervalSeconds = scanIntervalSeconds,
                     sourceScanTimings = sourceScanTimings,
                     sourceScanIntervals = sourceScanIntervals,
@@ -1772,18 +1845,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             trackingStartMessageIsError = false
                         }
                     },
-                    onClearEncounters = {
-                        scope.launch {
-                            app.container.repository.clearEncounters()
-                            viewModel.refreshSummary()
-                        }
-                    },
-                    onClearDevices = {
-                        scope.launch {
-                            app.container.repository.clearDevices()
-                            viewModel.refreshSummary()
-                        }
-                    },
                     onOpenDevicesEncounters = {
                         navController.navigate(LOGS_ENCOUNTERS_ROUTE) {
                             launchSingleTop = true
@@ -1820,6 +1881,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     approachNotificationsEnabled = approachNotificationsEnabled,
                     trackerNotificationsEnabled = trackerNotificationsEnabled,
                     flockNotificationsEnabled = flockNotificationsEnabled,
+                    cameraInViewNotificationsEnabled = cameraInViewNotificationsEnabled,
                     noFlyPassThroughNotificationsEnabled = noFlyPassThroughNotificationsEnabled,
                     nfcNotificationsEnabled = nfcNotificationsEnabled,
                     magneticIncreaseNotificationsEnabled = magneticIncreaseNotificationsEnabled,
@@ -1896,6 +1958,10 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onFlockNotificationsChanged = { enabled ->
                         flockNotificationsEnabled = enabled
                         ScanSettings.setFlockNotificationsEnabled(context, enabled)
+                    },
+                    onCameraInViewNotificationsChanged = { enabled ->
+                        cameraInViewNotificationsEnabled = enabled
+                        ScanSettings.setCameraInViewNotificationsEnabled(context, enabled)
                     },
                     onNoFlyPassThroughNotificationsChanged = { enabled ->
                         noFlyPassThroughNotificationsEnabled = enabled
@@ -2069,6 +2135,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
+                        cameraInViewNotificationsEnabled = ScanSettings.isCameraInViewNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2123,6 +2190,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
+                        cameraInViewNotificationsEnabled = ScanSettings.isCameraInViewNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2175,6 +2243,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         ScanSettings.setApproachNotificationsEnabled(context, false)
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
                         ScanSettings.setFlockNotificationsEnabled(context, true)
+                        ScanSettings.setCameraInViewNotificationsEnabled(context, true)
                         ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
@@ -2216,6 +2285,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachNotificationsEnabled = false
                         trackerNotificationsEnabled = true
                         flockNotificationsEnabled = true
+                        cameraInViewNotificationsEnabled = true
                         noFlyPassThroughNotificationsEnabled = true
                         nfcNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
@@ -2276,6 +2346,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                         approachNotificationsEnabled = ScanSettings.isApproachNotificationsEnabled(context)
                         trackerNotificationsEnabled = ScanSettings.isTrackerNotificationsEnabled(context)
                         flockNotificationsEnabled = ScanSettings.isFlockNotificationsEnabled(context)
+                        cameraInViewNotificationsEnabled = ScanSettings.isCameraInViewNotificationsEnabled(context)
                         noFlyPassThroughNotificationsEnabled = ScanSettings.isNoFlyPassThroughNotificationsEnabled(context)
                         nfcNotificationsEnabled = ScanSettings.isNfcNotificationsEnabled(context)
                         magneticIncreaseNotificationsEnabled = ScanSettings.isMagneticIncreaseNotificationsEnabled(context)
@@ -2310,7 +2381,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     initialMagneticPopupRequest = detectionInitialMagneticPopupRequest,
                     onInitialMagneticPopupRequestHandled = { detectionInitialMagneticPopupRequest = null },
                     readinessItems = readinessItems,
-                    encounters = recentPipelineEncounters,
                     meshInsightEncounters = allPipelineEncounters,
                     directMagneticChannelEnabled = foreignDirectMagneticEnabled,
                     magneticRhythmBeepEnabled = magneticRhythmBeepEnabled,
@@ -2437,7 +2507,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             context.startActivity(item.settingsIntent)
                         }.recoverCatching {
                             context.startActivity(
-                                android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                                Intent(android.provider.Settings.ACTION_SETTINGS)
                             )
                         }
                     },
@@ -2452,10 +2522,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     onMagneticRhythmBeepEnabledChanged = { enabled ->
                         magneticRhythmBeepEnabled = enabled
                         ScanSettings.setMagneticRhythmBeepEnabled(context, enabled)
-                    },
-                    onMagneticIncreaseNotificationsChanged = { enabled ->
-                        magneticIncreaseNotificationsEnabled = enabled
-                        ScanSettings.setMagneticIncreaseNotificationsEnabled(context, enabled)
                     },
                     onMagneticEventTriggerThresholdChanged = { thresholdMicroTesla ->
                         magneticEventTriggerThresholdMicroTesla = thresholdMicroTesla
@@ -2517,7 +2583,7 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                             }
 
                             repeat(4) {
-                                delay(250L)
+                                delay(250.milliseconds)
                                 viewModel.refreshSummary()
                                 if (wipeDeferred.isCompleted) return@repeat
                             }
@@ -2539,7 +2605,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100PipelineEncounters,
                     allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 0,
@@ -2582,7 +2647,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100PipelineEncounters,
                     allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 2,
@@ -2625,7 +2689,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                 LogsHubPage(
                     logs = alertLogs,
                     errorLogs = errorLogs,
-                    recentEncounters = recent100PipelineEncounters,
                     allEncounters = allPipelineEncounters,
                     ownedDeviceKeys = ownedDeviceKeys,
                     initialTab = 2,
@@ -2728,7 +2791,6 @@ fun ArgusApp(notificationIntent: Intent? = null) {
                     isOwnedTarget = isOwnedTarget,
                     encounters = allPipelineEncounters,
                     nowEpochMs = appNowEpochMs,
-                    liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds,
                     onOpenDeviceDetails = { detailSource, detailPrimaryId ->
                         navController.navigate(
                             "deviceDetail/${Uri.encode(detailSource)}/${Uri.encode(detailPrimaryId)}"
@@ -2960,12 +3022,12 @@ private fun ApproachAlertMapPage(
     isOwnedTarget: Boolean,
     encounters: List<Encounter>,
     nowEpochMs: Long,
-    liveMapUpdateIntervalSeconds: Long,
     onOpenDeviceDetails: (String, String) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
+    val liveMapUpdateIntervalSeconds = FIXED_LIVE_MAP_UPDATE_INTERVAL_SECONDS
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 15f)
     }
@@ -3209,7 +3271,6 @@ private fun HomePage(
     trackingActive: Boolean,
     nowEpochMs: Long,
     lastScanEpochMs: Long?,
-    lastScanDurationMs: Long?,
     scanIntervalSeconds: Long,
     sourceScanTimings: List<ScanSettings.SourceScanTiming>,
     sourceScanIntervals: Map<String, Long>,
@@ -3221,8 +3282,6 @@ private fun HomePage(
     onStop: () -> Unit,
     onRefresh: () -> Unit,
     onSensorGateChanged: (String, Boolean) -> Unit,
-    onClearEncounters: () -> Unit,
-    onClearDevices: () -> Unit,
     onOpenDevicesEncounters: () -> Unit,
     startMessage: String?,
     startMessageIsError: Boolean
@@ -3315,8 +3374,9 @@ private fun HomePage(
             }
         }
         item {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                if (maxWidth >= HOME_TWO_COLUMN_MIN_WIDTH) {
+            val wideActionLayout = LocalConfiguration.current.screenWidthDp.dp >= HOME_TWO_COLUMN_MIN_WIDTH
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (wideActionLayout) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -3414,50 +3474,49 @@ private fun HomePage(
                     )
                 }
             } else {
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                    val columnSpacing = 8.dp
-                    val targetCardMinWidth = 170.dp
-                    val computedColumns = ((maxWidth + columnSpacing) / (targetCardMinWidth + columnSpacing))
-                        .toInt()
-                        .coerceIn(1, 3)
+                val columnSpacing = 8.dp
+                val targetCardMinWidth = 170.dp
+                val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+                val computedColumns = ((screenWidth + columnSpacing) / (targetCardMinWidth + columnSpacing))
+                    .toInt()
+                    .coerceIn(1, 3)
 
-                    Column(verticalArrangement = Arrangement.spacedBy(columnSpacing)) {
-                        summary.chunked(computedColumns).forEach { rowItems ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(columnSpacing)
-                            ) {
-                                rowItems.forEach { sourceSummary ->
-                                    Box(modifier = Modifier.weight(1f)) {
-                                        Card(modifier = Modifier.fillMaxWidth()) {
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Text(
-                                                    text = listSourceLabel(sourceSummary.source, null),
-                                                    style = MaterialTheme.typography.labelLarge,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                                Text(
-                                                    text = sourceSummary.count.toString(),
-                                                    style = MaterialTheme.typography.headlineSmall,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                                Text(
-                                                    text = if (sourceSummary.count == 1) "event" else "events",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
+                Column(verticalArrangement = Arrangement.spacedBy(columnSpacing)) {
+                    summary.chunked(computedColumns).forEach { rowItems ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(columnSpacing)
+                        ) {
+                            rowItems.forEach { sourceSummary ->
+                                Box(modifier = Modifier.weight(1f)) {
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = listSourceLabel(sourceSummary.source, null),
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = sourceSummary.count.toString(),
+                                                style = MaterialTheme.typography.headlineSmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = if (sourceSummary.count == 1) "event" else "events",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
                                         }
                                     }
                                 }
-                                repeat(computedColumns - rowItems.size) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
+                            }
+                            repeat(computedColumns - rowItems.size) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -3596,26 +3655,25 @@ private fun <T> HomeResponsiveGrid(
     threeColumnMinWidth: Dp,
     itemContent: @Composable (T) -> Unit
 ) {
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val columns = when {
-            maxWidth >= threeColumnMinWidth -> 3
-            maxWidth >= twoColumnMinWidth -> 2
-            else -> 1
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items.chunked(columns).forEach { rowItems ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    rowItems.forEach { gridItem ->
-                        Box(modifier = Modifier.weight(1f)) {
-                            itemContent(gridItem)
-                        }
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    val columns = when {
+        screenWidth >= threeColumnMinWidth -> 3
+        screenWidth >= twoColumnMinWidth -> 2
+        else -> 1
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items.chunked(columns).forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { gridItem ->
+                    Box(modifier = Modifier.weight(1f)) {
+                        itemContent(gridItem)
                     }
-                    repeat(columns - rowItems.size) {
-                        Spacer(modifier = Modifier.weight(1f))
-                    }
+                }
+                repeat(columns - rowItems.size) {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -3648,6 +3706,7 @@ private fun AppSettingsPage(
     approachNotificationsEnabled: Boolean,
     trackerNotificationsEnabled: Boolean,
     flockNotificationsEnabled: Boolean,
+    cameraInViewNotificationsEnabled: Boolean,
     noFlyPassThroughNotificationsEnabled: Boolean,
     nfcNotificationsEnabled: Boolean,
     magneticIncreaseNotificationsEnabled: Boolean,
@@ -3664,6 +3723,7 @@ private fun AppSettingsPage(
     onApproachNotificationsChanged: (Boolean) -> Unit,
     onTrackerNotificationsChanged: (Boolean) -> Unit,
     onFlockNotificationsChanged: (Boolean) -> Unit,
+    onCameraInViewNotificationsChanged: (Boolean) -> Unit,
     onNoFlyPassThroughNotificationsChanged: (Boolean) -> Unit,
     onNfcNotificationsChanged: (Boolean) -> Unit,
     onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
@@ -4368,6 +4428,7 @@ private fun AppSettingsPage(
                             "approach",
                             "tracker",
                             "flock",
+                            "camera_in_view",
                             "no_fly",
                             "nfc",
                             "magnetic",
@@ -4410,6 +4471,14 @@ private fun AppSettingsPage(
                                         Switch(
                                             checked = flockNotificationsEnabled,
                                             onCheckedChange = onFlockNotificationsChanged
+                                        )
+                                    }
+
+                                    "camera_in_view" -> {
+                                        Text("Camera in-view alerts")
+                                        Switch(
+                                            checked = cameraInViewNotificationsEnabled,
+                                            onCheckedChange = onCameraInViewNotificationsChanged
                                         )
                                     }
 
@@ -4737,7 +4806,6 @@ private fun DetectionPage(
     initialMagneticPopupRequest: Long?,
     onInitialMagneticPopupRequestHandled: () -> Unit,
     readinessItems: List<DetectionReadinessItem>,
-    encounters: List<Encounter>,
     meshInsightEncounters: List<Encounter>,
     directMagneticChannelEnabled: Boolean,
     magneticRhythmBeepEnabled: Boolean,
@@ -4775,7 +4843,6 @@ private fun DetectionPage(
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
     onDirectMagneticChannelEnabledChanged: (Boolean) -> Unit,
     onMagneticRhythmBeepEnabledChanged: (Boolean) -> Unit,
-    onMagneticIncreaseNotificationsChanged: (Boolean) -> Unit,
     onMagneticEventTriggerThresholdChanged: (Double) -> Unit,
     onChainLinkChanged: (Boolean) -> Unit,
     onChainDeviceNameChanged: (String) -> Unit,
@@ -4877,7 +4944,10 @@ private fun DetectionPage(
     }
     var magneticChartSamples by remember { mutableStateOf<List<Double>>(emptyList()) }
     val headerMagneticMagnitudeMicroTesla = liveMagneticMagnitudeMicroTesla ?: latestMagneticMagnitudeMicroTesla
-    val highAlertThresholdMicroTesla = magneticEventTriggerThresholdMicroTesla + 8.0
+    val highAlertThresholdMicroTesla = maxOf(
+        magneticEventTriggerThresholdMicroTesla + 8.0,
+        MAGNETIC_SUSTAINED_HIGH_THRESHOLD_UT
+    )
     val magneticReadoutColor = when {
         headerMagneticMagnitudeMicroTesla == null -> MaterialTheme.colorScheme.onSurfaceVariant
         headerMagneticMagnitudeMicroTesla >= highAlertThresholdMicroTesla -> Color(0xFFB3261E)
@@ -4948,7 +5018,11 @@ private fun DetectionPage(
         val sharpIncrease =
             deltaMicroTesla >= MAGNETIC_INCREASE_DELTA_THRESHOLD_UT &&
                 currentMagnitude >= minOf(MAGNETIC_INCREASE_MIN_CURRENT_UT, triggerThresholdMicroTesla)
-        val sustainedHigh = currentMagnitude >= (triggerThresholdMicroTesla + 8.0)
+        val sustainedHighThresholdMicroTesla = maxOf(
+            triggerThresholdMicroTesla + 8.0,
+            MAGNETIC_SUSTAINED_HIGH_THRESHOLD_UT
+        )
+        val sustainedHigh = currentMagnitude >= sustainedHighThresholdMicroTesla
         val magneticEventDetected = crossedDisturbanceBand || sharpIncrease || sustainedHigh
         if (!magneticEventDetected) return@LaunchedEffect
 
@@ -5270,7 +5344,8 @@ private fun DetectionPage(
                 }
 
                 val freshnessEpochMs = encounterFreshnessEpochMs(encounter)
-                if (latestAircraftEpochMs == null || freshnessEpochMs > latestAircraftEpochMs!!) {
+                val latestAircraftEpoch = latestAircraftEpochMs
+                if (latestAircraftEpoch == null || freshnessEpochMs > latestAircraftEpoch) {
                     latestAircraftEpochMs = freshnessEpochMs
                 }
             }
@@ -5431,13 +5506,6 @@ private fun DetectionPage(
                     " • Approaching (${(signal.confidence * 100.0).toInt()}%)"
                 }
                 .orEmpty()
-            val motionSnippet = candidate.motionSignal?.let { signal ->
-                if (signal.isInMotion) {
-                    " • Moving ${formatSpeedLabel(signal.speedMps)} ${formatHeadingCardinal(signal.headingDeg)}"
-                } else {
-                    " • Not moving"
-                }
-            }.orEmpty()
             val ownershipSnippet = if (candidate.isOwned) {
                 " • Marked as Mine"
             } else {
@@ -5975,8 +6043,7 @@ private fun DetectionPage(
                                     )
                                     runCatching {
                                         spreadOverlappingMapPinsMinimal(
-                                            pins = bounded,
-                                            minSeparationMeters = 1.2
+                                            pins = bounded
                                         )
                                     }.getOrElse { bounded }
                                 }
@@ -6477,7 +6544,6 @@ private fun DetectionSignalIntelSection(
 private fun LogsHubPage(
     logs: List<AlertLogEntry>,
     errorLogs: List<OperationalErrorLogEntry>,
-    recentEncounters: List<Encounter>,
     allEncounters: List<Encounter>,
     ownedDeviceKeys: Set<String>,
     initialTab: Int,
@@ -6543,11 +6609,13 @@ private fun DetectionLogsPage(
 
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
+    val cameraInViewCount = remember(logs) { logs.count { it.type == AlertLogType.CAMERA_IN_VIEW } }
     val noFlyCount = remember(logs) { logs.count { it.type == AlertLogType.NO_FLY_PASS_THROUGH } }
     val tabLabels = listOf(
         "All (${logs.size})",
         "Approach ($approachCount)",
         "Tracker ($trackerCount)",
+        "Camera ($cameraInViewCount)",
         "No-Fly ($noFlyCount)"
     )
     val safeSelectedLogTab = selectedLogTab.coerceIn(0, tabLabels.lastIndex)
@@ -6558,7 +6626,8 @@ private fun DetectionLogsPage(
                 when (safeSelectedLogTab) {
                     1 -> entry.type == AlertLogType.APPROACH
                     2 -> entry.type == AlertLogType.TRACKER
-                    3 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
+                    3 -> entry.type == AlertLogType.CAMERA_IN_VIEW
+                    4 -> entry.type == AlertLogType.NO_FLY_PASS_THROUGH
                     else -> true
                 }
             }
@@ -6605,6 +6674,7 @@ private fun DetectionLogsPage(
                 AssistChip(onClick = { }, label = { Text("Total ${logs.size}") })
                 AssistChip(onClick = { }, label = { Text("Approach $approachCount") })
                 AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
+                AssistChip(onClick = { }, label = { Text("Camera $cameraInViewCount") })
                 AssistChip(onClick = { }, label = { Text("No-Fly $noFlyCount") })
             }
         }
@@ -6637,19 +6707,19 @@ private fun DetectionLogsPage(
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
+                AlertLogType.CAMERA_IN_VIEW -> Color(0xFF455A64)
                 AlertLogType.NO_FLY_PASS_THROUGH -> Color(0xFFEF6C00)
                 AlertLogType.NFC -> Color(0xFF2E7D32)
             }
             val typeLabel = when (entry.type) {
                 AlertLogType.APPROACH -> "Approach"
                 AlertLogType.TRACKER -> "Tracker"
+                AlertLogType.CAMERA_IN_VIEW -> "Camera"
                 AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
                 AlertLogType.NFC -> "NFC"
             }
             val isApproachEntry = entry.type == AlertLogType.APPROACH
             val isNoFlyEntry = entry.type == AlertLogType.NO_FLY_PASS_THROUGH
-            val opensDeviceDetails = entry.type == AlertLogType.TRACKER ||
-                entry.type == AlertLogType.NFC
             val noFlyZoneSummary = if (isNoFlyEntry) {
                 parseNoFlyZoneSummaryFromLogMessage(entry.message) ?: "No-fly zone"
             } else {
@@ -6658,12 +6728,11 @@ private fun DetectionLogsPage(
             val confidenceLabel = entry.confidence
                 ?.let { " • ${String.format(Locale.US, "%.0f%%", it * 100.0)} confidence" }
                 .orEmpty()
-            val isClickable = isApproachEntry || isNoFlyEntry || opensDeviceDetails
+            val isClickable = true
             val tapHint = when {
                 isApproachEntry -> "Tap to open approach map"
                 isNoFlyEntry -> "Tap to open no-fly incident path"
-                opensDeviceDetails -> "Tap to open device details"
-                else -> null
+                else -> "Tap to open device details"
             }
 
             Card(
@@ -6680,7 +6749,7 @@ private fun DetectionLogsPage(
                                         noFlyZoneSummary ?: "No-fly zone",
                                         entry.timestampEpochMs
                                     )
-                                    opensDeviceDetails -> onOpenDeviceDetails(entry.source, entry.primaryId)
+                                    else -> onOpenDeviceDetails(entry.source, entry.primaryId)
                                 }
                             }
                         } else {
@@ -6703,13 +6772,11 @@ private fun DetectionLogsPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(entry.message + confidenceLabel)
-                    if (tapHint != null) {
-                        Text(
-                            text = tapHint,
-                            color = Color(0xFF1565C0),
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
+                    Text(
+                        text = tapHint,
+                        color = Color(0xFF1565C0),
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
@@ -7511,193 +7578,6 @@ private fun DetectionMapPage(
                 sourceVisible && pinMatchesMetadataQuery(pin, query)
             }
         }
-
-        @Composable
-        fun NoFlyZoneLayer(
-            renderedNoFlyZones: List<NoFlyZoneRenderShape>,
-            renderedNoFlyZoneMarkers: List<NoFlyZoneRenderShape>,
-            selectedNoFlyZoneId: String?,
-            onSelectZone: (String) -> Unit
-        ) {
-            if (renderedNoFlyZones.isEmpty()) return
-
-            renderedNoFlyZones.forEach { zoneRender ->
-                val zone = zoneRender.zone
-                Polygon(
-                    points = zoneRender.polygonPoints,
-                    fillColor = Color(0x30E53935),
-                    strokeColor = Color(0xFFE53935),
-                    strokeWidth = 2f,
-                    clickable = true,
-                    onClick = { onSelectZone(zone.id) }
-                )
-            }
-
-            renderedNoFlyZoneMarkers.forEach { zoneRender ->
-                val zone = zoneRender.zone
-                val point = zoneRender.centroid ?: return@forEach
-                val markerState = remember(point) { MarkerState(position = point) }
-                Marker(
-                    state = markerState,
-                    title = zone.label,
-                    snippet = noFlyZoneSnippet(zone),
-                    icon = noFlyZoneMarkerIcon(
-                        selected = selectedNoFlyZoneId == zone.id,
-                        compact = true
-                    ),
-                    anchor = Offset(0.5f, 0.5f),
-                    onClick = {
-                        onSelectZone(zone.id)
-                        false
-                    }
-                )
-            }
-        }
-
-        @Composable
-        fun CoverageSweepLayer(
-            showCoverageRadiusCircle: Boolean,
-            proximityRenderCenter: DetectionLocation?,
-            stableCoverageRadiusMeters: Double,
-            aircraftRenderCenter: DetectionLocation?,
-            stableAircraftCoverageRadiusMeters: Double,
-            mapScannerSweepAnimationEnabled: Boolean,
-            radarSweepHeadingDeg: Float
-        ) {
-            if (!showCoverageRadiusCircle) return
-
-            val proximityCenter = proximityRenderCenter
-            if (proximityCenter != null && stableCoverageRadiusMeters > 10.0) {
-                val coverageCenter = LatLng(proximityCenter.lat, proximityCenter.lon)
-                Circle(
-                    center = coverageCenter,
-                    radius = stableCoverageRadiusMeters,
-                    strokeWidth = 2f,
-                    strokeColor = Color(0xFFE65100),
-                    fillColor = Color(0x1AE65100)
-                )
-                if (mapScannerSweepAnimationEnabled) {
-                    val sweepRadiusMeters = containedSweepRadiusMeters(stableCoverageRadiusMeters)
-                    Polygon(
-                        points = buildRadarSweepSectorPoints(
-                            center = coverageCenter,
-                            radiusMeters = sweepRadiusMeters,
-                            headingDegrees = radarSweepHeadingDeg,
-                            halfWidthDegrees = 22f,
-                            arcStepDegrees = 6f
-                        ),
-                        fillColor = Color(0x33FFB74D),
-                        strokeColor = Color.Transparent,
-                        strokeWidth = 0f
-                    )
-                }
-            }
-
-            val aircraftCenter = aircraftRenderCenter
-            if (aircraftCenter != null && stableAircraftCoverageRadiusMeters > 10.0) {
-                val coverageCenter = LatLng(aircraftCenter.lat, aircraftCenter.lon)
-                Circle(
-                    center = coverageCenter,
-                    radius = stableAircraftCoverageRadiusMeters,
-                    strokeWidth = 2f,
-                    strokeColor = Color(0xFF1565C0),
-                    fillColor = Color(0x1A1565C0)
-                )
-                if (mapScannerSweepAnimationEnabled) {
-                    val sweepRadiusMeters = containedSweepRadiusMeters(stableAircraftCoverageRadiusMeters)
-                    Polygon(
-                        points = buildRadarSweepSectorPoints(
-                            center = coverageCenter,
-                            radiusMeters = sweepRadiusMeters,
-                            headingDegrees = (radarSweepHeadingDeg + 120f) % 360f,
-                            halfWidthDegrees = 18f,
-                            arcStepDegrees = 6f
-                        ),
-                        fillColor = Color(0x3D4FC3F7),
-                        strokeColor = Color.Transparent,
-                        strokeWidth = 0f
-                    )
-                }
-            }
-        }
-
-        @Composable
-        fun MapRenderLayer(
-            mapRenderItems: List<MapRenderItem>,
-            preciseDotsEnabled: Boolean,
-            useDenseDotMarkers: Boolean,
-            useSourceOnlyPinColors: Boolean,
-            showTrackerFamilyBadge: Boolean,
-            renderedPinSnippetCache: Map<String, String?>,
-            selectedMapPin: MapPin?,
-            onSelectMapPin: (MapPin) -> Unit,
-            onPinDetailsClick: (MapPin) -> Unit
-        ) {
-            mapRenderItems.forEach { item ->
-                when (item) {
-                    is MapRenderItem.SinglePin -> {
-                        val pin = item.pin
-                        val markerState = remember(pin.position) { MarkerState(position = pin.position) }
-                        val aircraftHeading = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) {
-                            pin.headingDegrees?.toFloat()?.let { value ->
-                                ((value % 360f) + 360f) % 360f
-                            } ?: 0f
-                        } else {
-                            0f
-                        }
-                        val showMarkerDetails = !preciseDotsEnabled
-                        val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
-                        Marker(
-                            state = markerState,
-                            title = if (showMarkerDetails) pin.title else null,
-                            snippet = if (showMarkerDetails) renderedPinSnippetCache[markerKey] else null,
-                            icon = if (preciseDotsEnabled) {
-                                markerDotIconForPin(pin, useSourceOnlyPinColors)
-                            } else {
-                                markerIconForPin(pin, useSourceOnlyPinColors, showTrackerFamilyBadge)
-                            },
-                            anchor = if (pin.source == SourceCatalog.SOURCE_AIRCRAFT) Offset(0.5f, 0.5f) else Offset(0.5f, 1f),
-                            rotation = aircraftHeading,
-                            flat = pin.source == SourceCatalog.SOURCE_AIRCRAFT,
-                            onClick = {
-                                if (!showMarkerDetails) {
-                                    val selected = selectedMapPin
-                                    val isSameSelection =
-                                        selected != null &&
-                                            selected.source == pin.source &&
-                                            selected.primaryId == pin.primaryId &&
-                                            selected.timestampEpochMs == pin.timestampEpochMs
-
-                                    if (isSameSelection) {
-                                        onPinDetailsClick(pin)
-                                    } else {
-                                        onSelectMapPin(pin)
-                                    }
-                                    true
-                                } else {
-                                    false
-                                }
-                            },
-                            onInfoWindowClick = {
-                                onPinDetailsClick(pin)
-                            }
-                        )
-                    }
-
-                    is MapRenderItem.Cluster -> {
-                        val markerState = remember(item.position) { MarkerState(position = item.position) }
-                        Marker(
-                            state = markerState,
-                            title = "Cluster (${item.count})",
-                            snippet = item.summary,
-                            icon = clusterMarkerIcon(item),
-                            anchor = Offset(0.5f, 0.5f),
-                            flat = false
-                        )
-                    }
-                }
-            }
-        }
     }
     val showAllHistoryVisualMode =
         showLiveOnlyControl &&
@@ -7725,7 +7605,7 @@ private fun DetectionMapPage(
                         pin
                     } else {
                         pin.copy(
-                            markerGlyphOverride = identityName,
+                            markerGlyphOverride = identityGlyph(identityName),
                             title = buildPinTitle(
                                 sourceLabel = identityName,
                                 primaryId = pin.primaryId,
@@ -7828,8 +7708,7 @@ private fun DetectionMapPage(
                     center = center,
                     pins = nonAircraftCoveragePins,
                     nowEpochMs = System.currentTimeMillis(),
-                    recentWindowMs = MAP_COVERAGE_RECENT_WINDOW_MS,
-                    percentile = MAP_COVERAGE_RADIUS_PERCENTILE
+                    recentWindowMs = MAP_COVERAGE_RECENT_WINDOW_MS
                 )
                 radiusMeters?.let { center to it }
             }
@@ -7850,8 +7729,7 @@ private fun DetectionMapPage(
                     center = center,
                     pins = aircraftCoveragePins,
                     nowEpochMs = System.currentTimeMillis(),
-                    recentWindowMs = MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS,
-                    percentile = MAP_COVERAGE_RADIUS_PERCENTILE
+                    recentWindowMs = MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS
                 )
                 radiusMeters?.let { center to it }
             }
@@ -8103,7 +7981,7 @@ private fun DetectionMapPage(
             return@produceState
         }
         while (true) {
-            delay(sweepAnimationFrameMs)
+            delay(sweepAnimationFrameMs.milliseconds)
             val next = value + sweepAnimationStepDegrees
             value = if (next >= 360f) next - 360f else next
         }
@@ -8229,7 +8107,7 @@ private fun DetectionMapPage(
 
     LaunchedEffect(hasMapsApiKey, mapLoaded, hasNetwork, playServicesDiagnostic) {
         if (!hasMapsApiKey || mapLoaded) return@LaunchedEffect
-        delay(7000)
+        delay(7000.milliseconds)
         if (mapLoaded) return@LaunchedEffect
         if (mapError == null) {
             mapError = buildString {
@@ -8295,7 +8173,7 @@ private fun DetectionMapPage(
     LaunchedEffect(mapTouchInProgress, useScrollableLayout) {
         if (!useScrollableLayout || !mapTouchInProgress) return@LaunchedEffect
         // Failsafe: occasionally ACTION_UP/CANCEL is missed when touch ends off-map.
-        delay(1200)
+        delay(1200.milliseconds)
         mapTouchInProgress = false
     }
 
@@ -8535,8 +8413,8 @@ private fun DetectionMapPage(
             }
         } else {
             if (controlsVisible && !compactMapLayout) {
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                    val splitControlPanels = maxWidth >= 700.dp
+                val splitControlPanels = LocalConfiguration.current.screenWidthDp.dp >= 700.dp
+                Box(modifier = Modifier.fillMaxWidth()) {
                     if (splitControlPanels) {
                         Row(
                             modifier = Modifier
@@ -9054,7 +8932,6 @@ private fun DetectionMapPage(
                     MapRenderLayer(
                         mapRenderItems = mapRenderItems,
                         preciseDotsEnabled = preciseDotsEnabled,
-                        useDenseDotMarkers = useDenseDotMarkers,
                         useSourceOnlyPinColors = useSourceOnlyPinColors,
                         showTrackerFamilyBadge = showTrackerFamilyBadge,
                         renderedPinSnippetCache = renderedPinSnippetCache,
@@ -9482,8 +9359,7 @@ private fun CoverageSweepLayer(
                     center = coverageCenter,
                     radiusMeters = sweepRadiusMeters,
                     headingDegrees = radarSweepHeadingDeg,
-                    halfWidthDegrees = 22f,
-                    arcStepDegrees = 6f
+                    halfWidthDegrees = 22f
                 ),
                 fillColor = Color(0x33FFB74D),
                 strokeColor = Color.Transparent,
@@ -9509,8 +9385,7 @@ private fun CoverageSweepLayer(
                     center = coverageCenter,
                     radiusMeters = sweepRadiusMeters,
                     headingDegrees = (radarSweepHeadingDeg + 120f) % 360f,
-                    halfWidthDegrees = 18f,
-                    arcStepDegrees = 6f
+                    halfWidthDegrees = 18f
                 ),
                 fillColor = Color(0x3D4FC3F7),
                 strokeColor = Color.Transparent,
@@ -9524,7 +9399,6 @@ private fun CoverageSweepLayer(
 private fun MapRenderLayer(
     mapRenderItems: List<MapRenderItem>,
     preciseDotsEnabled: Boolean,
-    useDenseDotMarkers: Boolean,
     useSourceOnlyPinColors: Boolean,
     showTrackerFamilyBadge: Boolean,
     renderedPinSnippetCache: Map<String, String?>,
@@ -9831,7 +9705,7 @@ private fun MovingDevicePathMapPage(
                     Marker(
                         state = MarkerState(position = start),
                         title = "Path start",
-                        snippet = "${formatEpoch(deviceEncounters.firstOrNull()?.timestampEpochMs ?: 0L)}",
+                        snippet = formatEpoch(deviceEncounters.firstOrNull()?.timestampEpochMs ?: 0L),
                         icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
                     )
                 }
@@ -9986,21 +9860,21 @@ private object DeviceMapPinDiskCache {
                             timestampEpochMs = item.optLong("timestampEpochMs", 0L),
                             source = item.optString("source", ""),
                             primaryId = item.optString("primaryId", ""),
-                            secondaryId = item.optString("secondaryId", null),
-                            markerGlyphOverride = item.optString("markerGlyphOverride", null),
-                            trackerFamilyBadge = item.optString("trackerFamilyBadge", null),
+                            secondaryId = item.optStringOrNull("secondaryId"),
+                            markerGlyphOverride = item.optStringOrNull("markerGlyphOverride"),
+                            trackerFamilyBadge = item.optStringOrNull("trackerFamilyBadge"),
                             encounterTimestampEpochMs = if (item.has("encounterTimestampEpochMs")) {
                                 item.optLong("encounterTimestampEpochMs")
                             } else {
                                 null
                             },
-                            aircraftIconType = item.optString("aircraftIconType", null),
+                            aircraftIconType = item.optStringOrNull("aircraftIconType"),
                             headingDegrees = if (item.has("headingDegrees")) {
                                 item.optDouble("headingDegrees")
                             } else {
                                 null
                             },
-                            motionBadge = item.optString("motionBadge", null),
+                            motionBadge = item.optStringOrNull("motionBadge"),
                             motionSpeedMps = if (item.has("motionSpeedMps")) {
                                 item.optDouble("motionSpeedMps")
                             } else {
@@ -10053,19 +9927,19 @@ private object DeviceMapPinDiskCache {
 
         context
             .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putLong(KEY_EPOCH_MS, nowEpochMs)
-            .putString(KEY_JSON, payload.toString())
-            .apply()
+            .edit {
+                putLong(KEY_EPOCH_MS, nowEpochMs)
+                putString(KEY_JSON, payload.toString())
+            }
     }
 
     fun clear(context: android.content.Context) {
         context
             .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            .edit()
-            .remove(KEY_EPOCH_MS)
-            .remove(KEY_JSON)
-            .apply()
+            .edit {
+                remove(KEY_EPOCH_MS)
+                remove(KEY_JSON)
+            }
     }
 }
 
@@ -10214,14 +10088,13 @@ private fun buildRadarSweepSectorPoints(
     center: LatLng,
     radiusMeters: Double,
     headingDegrees: Float,
-    halfWidthDegrees: Float = 20f,
-    arcStepDegrees: Float = 5f
+    halfWidthDegrees: Float = 20f
 ): List<LatLng> {
     if (radiusMeters <= 0.0) return listOf(center)
 
     val start = headingDegrees - halfWidthDegrees
     val end = headingDegrees + halfWidthDegrees
-    val step = arcStepDegrees.coerceAtLeast(1f)
+    val step = 6f
 
     val points = ArrayList<LatLng>(32)
     points.add(center)
@@ -10246,12 +10119,11 @@ private fun calculateRealtimeCoverageRadiusMeters(
     center: DetectionLocation,
     pins: List<MapPin>,
     nowEpochMs: Long,
-    recentWindowMs: Long,
-    percentile: Double
+    recentWindowMs: Long
 ): Double? {
     if (pins.isEmpty()) return null
 
-    val clampedPercentile = percentile.coerceIn(0.50, 1.0)
+    val clampedPercentile = MAP_COVERAGE_RADIUS_PERCENTILE.coerceIn(0.50, 1.0)
     fun distancesFrom(candidatePins: List<MapPin>): List<Double> = candidatePins
         .mapNotNull { pin ->
             distanceFromLocationMeters(
@@ -10520,12 +10392,11 @@ private fun spreadOverlappingMapPins(pins: List<MapPin>): List<MapPin> {
 }
 
 private fun spreadOverlappingMapPinsMinimal(
-    pins: List<MapPin>,
-    minSeparationMeters: Double
+    pins: List<MapPin>
 ): List<MapPin> {
     if (pins.size < 2) return pins
 
-    val safeMinSeparationMeters = minSeparationMeters.coerceIn(0.5, 3.0)
+    val safeMinSeparationMeters = 1.2
     val maxIterations = if (pins.size > 180) 4 else 8
     val placed = mutableListOf<MapPin>()
 
@@ -10577,10 +10448,10 @@ private fun bearingDegrees(from: LatLng, to: LatLng): Double? {
     val lat1 = Math.toRadians(from.latitude)
     val lat2 = Math.toRadians(to.latitude)
     val dLon = Math.toRadians(to.longitude - from.longitude)
-    val y = kotlin.math.sin(dLon) * kotlin.math.cos(lat2)
-    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
-        kotlin.math.sin(lat1) * kotlin.math.cos(lat2) * kotlin.math.cos(dLon)
-    val raw = Math.toDegrees(kotlin.math.atan2(y, x))
+    val y = sin(dLon) * cos(lat2)
+    val x = cos(lat1) * sin(lat2) -
+        sin(lat1) * cos(lat2) * cos(dLon)
+    val raw = Math.toDegrees(atan2(y, x))
     return ((raw % 360.0) + 360.0) % 360.0
 }
 
@@ -11059,11 +10930,29 @@ private fun markerHueForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = false
     }
 }
 
+private const val DEVICE_MARKER_ICON_CACHE_MAX = 320
+private const val DEVICE_DOT_MARKER_ICON_CACHE_MAX = 96
+private const val AIRCRAFT_MARKER_ICON_CACHE_MAX = 96
+private const val CLUSTER_MARKER_ICON_CACHE_MAX = 80
+private const val NO_FLY_MARKER_ICON_CACHE_MAX = 24
+
 private val deviceMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val deviceDotMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val aircraftMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val clusterMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
 private val noFlyZoneMarkerIconCache = mutableMapOf<String, BitmapDescriptor>()
+
+private fun <K, V> MutableMap<K, V>.putWithLimit(key: K, value: V, maxSize: Int) {
+    this[key] = value
+    val overflow = size - maxSize
+    if (overflow <= 0) return
+    val iterator = entries.iterator()
+    repeat(overflow) {
+        if (!iterator.hasNext()) return
+        iterator.next()
+        iterator.remove()
+    }
+}
 
 private fun noFlyZoneMarkerIcon(selected: Boolean, compact: Boolean): BitmapDescriptor {
     val key = "warn|$selected|$compact"
@@ -11109,7 +10998,7 @@ private fun noFlyZoneMarkerIcon(selected: Boolean, compact: Boolean): BitmapDesc
     canvas.drawText("!", size / 2f, textY, textPaint)
 
     return BitmapDescriptorFactory.fromBitmap(bitmap).also {
-        noFlyZoneMarkerIconCache[key] = it
+        noFlyZoneMarkerIconCache.putWithLimit(key, it, NO_FLY_MARKER_ICON_CACHE_MAX)
     }
 }
 
@@ -11257,7 +11146,7 @@ private fun clusterMarkerIcon(cluster: MapRenderItem.Cluster): BitmapDescriptor 
     canvas.drawText(text, center, textY, textPaint)
 
     return BitmapDescriptorFactory.fromBitmap(bitmap).also {
-        clusterMarkerIconCache[key] = it
+        clusterMarkerIconCache.putWithLimit(key, it, CLUSTER_MARKER_ICON_CACHE_MAX)
     }
 }
 
@@ -11353,7 +11242,7 @@ private fun markerIconForPin(
     canvas.drawText(glyph, rect.centerX(), textY, textPaint)
 
     val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
-    deviceMarkerIconCache[key] = descriptor
+    deviceMarkerIconCache.putWithLimit(key, descriptor, DEVICE_MARKER_ICON_CACHE_MAX)
     return descriptor
 }
 
@@ -11457,7 +11346,7 @@ private fun markerAircraftIconForPin(
     }
 
     val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
-    aircraftMarkerIconCache[key] = descriptor
+    aircraftMarkerIconCache.putWithLimit(key, descriptor, AIRCRAFT_MARKER_ICON_CACHE_MAX)
     return descriptor
 }
 
@@ -11490,8 +11379,34 @@ private fun markerDotIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolean = f
     canvas.drawCircle(center, center, radius, strokePaint)
 
     val descriptor = BitmapDescriptorFactory.fromBitmap(bitmap)
-    deviceDotMarkerIconCache[key] = descriptor
+    deviceDotMarkerIconCache.putWithLimit(key, descriptor, DEVICE_DOT_MARKER_ICON_CACHE_MAX)
     return descriptor
+}
+
+private fun identityGlyph(identityName: String): String {
+    val normalized = identityName.trim()
+    if (normalized.isEmpty()) return "ID"
+
+    val tokens = normalized
+        .split(Regex("[^A-Za-z0-9]+"))
+        .filter { it.isNotBlank() }
+
+    val compact = when {
+        tokens.size >= 2 -> {
+            val first = tokens.first().firstOrNull()
+            val last = tokens.last().firstOrNull()
+            buildString {
+                if (first != null) append(first)
+                if (last != null) append(last)
+            }
+        }
+
+        else -> normalized.filter { it.isLetterOrDigit() }.take(4)
+    }
+
+    return compact
+        .ifBlank { "ID" }
+        .uppercase(Locale.US)
 }
 
 private fun markerGlyphForPin(pin: MapPin): String {
@@ -13530,6 +13445,22 @@ private fun ensureFlockNotificationChannel(context: android.content.Context) {
     manager.createNotificationChannel(channel)
 }
 
+private fun ensureCameraInViewNotificationChannel(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    val existing = manager.getNotificationChannel(CAMERA_IN_VIEW_ALERT_CHANNEL_ID)
+    if (existing != null) return
+
+    val channel = NotificationChannel(
+        CAMERA_IN_VIEW_ALERT_CHANNEL_ID,
+        "Camera In-View Alerts",
+        NotificationManager.IMPORTANCE_HIGH
+    ).apply {
+        description = "Alerts when your location is near a mapped public camera"
+    }
+    manager.createNotificationChannel(channel)
+}
+
 private fun ensureNoFlyPassThroughNotificationChannel(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -13612,7 +13543,7 @@ private fun sendApproachNotification(context: android.content.Context, device: D
         .setContentIntent(tapPendingIntent)
         .build()
 
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
 }
 
 private fun sendTrackerRiskNotification(context: android.content.Context, device: DeviceItem) {
@@ -13638,7 +13569,7 @@ private fun sendTrackerRiskNotification(context: android.content.Context, device
         .build()
 
     val notificationId = ("tracker:${device.source}|${device.primaryId}").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
 }
 
 private fun sendFlockNotification(context: android.content.Context, flock: DeviceFlock) {
@@ -13664,7 +13595,28 @@ private fun sendFlockNotification(context: android.content.Context, flock: Devic
         .sorted()
         .joinToString(separator = ",")
     val notificationId = ("flock:$signature").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
+}
+
+private fun sendCameraInViewNotification(
+    context: android.content.Context,
+    device: DeviceItem,
+    distanceMeters: Double
+) {
+    val title = "Camera nearby"
+    val sourceLabel = listSourceLabel(device.source, device.secondaryId)
+    val content = "$sourceLabel ${device.primaryId} • ${formatDistanceFeetMiles(distanceMeters)}"
+    val notification = NotificationCompat.Builder(context, CAMERA_IN_VIEW_ALERT_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_more)
+        .setContentTitle(title)
+        .setContentText(content)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setAutoCancel(true)
+        .build()
+
+    val notificationId = ("camera-in-view:${device.source}|${device.primaryId}").hashCode()
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
 }
 
 private fun sendNoFlyPassThroughNotification(
@@ -13727,7 +13679,7 @@ private fun sendNoFlyPassThroughNotification(
         .setContentIntent(tapPendingIntent)
         .build()
 
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
 }
 
 private fun sendNfcNotification(context: android.content.Context, encounter: Encounter) {
@@ -13745,7 +13697,7 @@ private fun sendNfcNotification(context: android.content.Context, encounter: Enc
         .build()
 
     val notificationId = ("nfc:${encounter.primaryId}:${encounter.timestampEpochMs}").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
 }
 
 private fun sendMagneticIncreaseNotification(
@@ -13789,7 +13741,19 @@ private fun sendMagneticIncreaseNotification(
         .build()
 
     val notificationId = ("magnetic-increase:${System.currentTimeMillis() / 60_000L}").hashCode()
-    NotificationManagerCompat.from(context).notify(notificationId, notification)
+    notifyIfPostNotificationsPermitted(context, notificationId, notification)
+}
+
+private fun notifyIfPostNotificationsPermitted(
+    context: android.content.Context,
+    notificationId: Int,
+    notification: android.app.Notification
+) {
+    if (!hasPostNotificationsPermission(context)) return
+    try {
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
+    } catch (_: SecurityException) {
+    }
 }
 
 private fun magneticAlertSeverity(
@@ -15153,6 +15117,11 @@ private fun JSONObject?.optDoubleOrNull(key: String): Double? {
     return value
 }
 
+private fun JSONObject.optStringOrNull(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key).takeIf { it.isNotBlank() }
+}
+
 @Composable
 private fun DeviceSortDropdown(
     selectedSort: DeviceSortMode,
@@ -15662,32 +15631,30 @@ private fun ResponsiveDetailColumns(
     left: @Composable ColumnScope.() -> Unit,
     right: @Composable ColumnScope.() -> Unit
 ) {
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val twoColumn = maxWidth >= DETAIL_TWO_COLUMN_MIN_WIDTH
-        if (twoColumn) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    content = left
-                )
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    content = right
-                )
-            }
-        } else {
+    val twoColumn = LocalConfiguration.current.screenWidthDp.dp >= DETAIL_TWO_COLUMN_MIN_WIDTH
+    if (twoColumn) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                left()
-                right()
-            }
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                content = left
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                content = right
+            )
+        }
+    } else {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            left()
+            right()
         }
     }
 }

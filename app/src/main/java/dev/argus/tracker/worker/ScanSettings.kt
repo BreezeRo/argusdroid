@@ -31,6 +31,7 @@ object ScanSettings {
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
     private const val KEY_FLOCK_NOTIFICATIONS_ENABLED = "flock_notifications_enabled"
+    private const val KEY_CAMERA_IN_VIEW_NOTIFICATIONS_ENABLED = "camera_in_view_notifications_enabled"
     private const val KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS = "flock_monitor_last_run_epoch_ms"
     private const val KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS = "flock_alert_last_notification_epoch_ms"
     private const val KEY_FLOCK_ALERT_LAST_SIGNATURE = "flock_alert_last_signature"
@@ -396,6 +397,17 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_FLOCK_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isCameraInViewNotificationsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CAMERA_IN_VIEW_NOTIFICATIONS_ENABLED, true)
+
+    fun setCameraInViewNotificationsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CAMERA_IN_VIEW_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
