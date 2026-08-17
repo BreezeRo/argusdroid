@@ -14,12 +14,16 @@ import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import kotlin.coroutines.resume
-import kotlin.math.abs
 import kotlin.math.sqrt
 
 class MagnetometerDisturbanceScanner(
     private val context: Context
 ) : SignalScanner {
+
+    private companion object {
+        private const val BURST_WINDOW_MS = 320L
+        private const val REGISTRATION_TIMEOUT_MS = 1200L
+    }
 
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isForeignDirectMagneticEnabled(context)) return emptyList()
@@ -29,8 +33,9 @@ class MagnetometerDisturbanceScanner(
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
             ?: return emptyList()
 
-        val sample = readSingleSample(sensorManager, sensor) ?: return emptyList()
+        val sample = readBurstPeakSample(sensorManager, sensor) ?: return emptyList()
         val location = LocationSnapshotProvider.read(context)
+        if (!LocationSnapshotProvider.isHighAccuracyFix(context, location)) return emptyList()
 
         val earthBaselineMicroTesla = 50.0
         val deltaMicroTesla = sample.magnitudeMicroTesla - earthBaselineMicroTesla
@@ -43,7 +48,11 @@ class MagnetometerDisturbanceScanner(
             .put("zMicroTesla", sample.z)
             .put("magnitudeMicroTesla", sample.magnitudeMicroTesla)
             .put("deltaFromEarthBaselineMicroTesla", deltaMicroTesla)
+            .put("sampleCount", sample.sampleCount)
             .put("accuracy", sample.accuracy)
+            .put("locationAccuracyMeters", location?.accuracyMeters)
+            .put("locationProvider", location?.provider)
+            .put("locationFixEpochMs", location?.fixEpochMs)
 
         return listOf(
             Encounter(
@@ -60,39 +69,51 @@ class MagnetometerDisturbanceScanner(
         )
     }
 
-    private suspend fun readSingleSample(
+    private suspend fun readBurstPeakSample(
         sensorManager: SensorManager,
         sensor: Sensor
     ): MagneticSample? = suspendCancellableCoroutine { continuation ->
         val handler = Handler(Looper.getMainLooper())
         var completed = false
+        var sampleCount = 0
+        var latestSample: MagneticSample? = null
+        var peakSample: MagneticSample? = null
+        lateinit var listener: SensorEventListener
 
-        val listener = object : SensorEventListener {
+        fun finishWith(sample: MagneticSample?) {
+            if (completed) return
+            completed = true
+            sensorManager.unregisterListener(listener)
+            continuation.resume(sample)
+        }
+
+        listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 if (completed) return
                 if (event.values.size < 3) return
-
-                completed = true
-                sensorManager.unregisterListener(this)
 
                 val x = event.values[0].toDouble()
                 val y = event.values[1].toDouble()
                 val z = event.values[2].toDouble()
                 val magnitude = sqrt(x * x + y * y + z * z)
                 if (!magnitude.isFinite()) {
-                    continuation.resume(null)
                     return
                 }
 
-                continuation.resume(
-                    MagneticSample(
-                        x = x,
-                        y = y,
-                        z = z,
-                        magnitudeMicroTesla = magnitude,
-                        accuracy = event.accuracy
-                    )
+                sampleCount += 1
+                val sample = MagneticSample(
+                    x = x,
+                    y = y,
+                    z = z,
+                    magnitudeMicroTesla = magnitude,
+                    accuracy = event.accuracy,
+                    sampleCount = sampleCount
                 )
+                latestSample = sample
+                val currentPeak = peakSample
+                if (currentPeak == null || sample.magnitudeMicroTesla > currentPeak.magnitudeMicroTesla) {
+                    peakSample = sample
+                }
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -101,7 +122,7 @@ class MagnetometerDisturbanceScanner(
         val registered = sensorManager.registerListener(
             listener,
             sensor,
-            SensorManager.SENSOR_DELAY_NORMAL,
+            SensorManager.SENSOR_DELAY_FASTEST,
             handler
         )
 
@@ -110,17 +131,20 @@ class MagnetometerDisturbanceScanner(
             return@suspendCancellableCoroutine
         }
 
-        val timeoutRunnable = Runnable {
-            if (completed) return@Runnable
-            completed = true
-            sensorManager.unregisterListener(listener)
-            continuation.resume(null)
+        val finishRunnable = Runnable {
+            finishWith(peakSample ?: latestSample)
         }
 
-        handler.postDelayed(timeoutRunnable, 1200L)
+        val timeoutRunnable = Runnable {
+            finishWith(null)
+        }
+
+        handler.postDelayed(finishRunnable, BURST_WINDOW_MS)
+        handler.postDelayed(timeoutRunnable, REGISTRATION_TIMEOUT_MS)
 
         continuation.invokeOnCancellation {
             sensorManager.unregisterListener(listener)
+            handler.removeCallbacks(finishRunnable)
             handler.removeCallbacks(timeoutRunnable)
         }
     }
@@ -130,6 +154,7 @@ class MagnetometerDisturbanceScanner(
         val y: Double,
         val z: Double,
         val magnitudeMicroTesla: Double,
-        val accuracy: Int
+        val accuracy: Int,
+        val sampleCount: Int
     )
 }

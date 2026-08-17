@@ -8,6 +8,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -15,7 +16,10 @@ import kotlinx.coroutines.flow.conflate
 
 data class DetectionLocation(
     val lat: Double,
-    val lon: Double
+    val lon: Double,
+    val accuracyMeters: Float? = null,
+    val provider: String? = null,
+    val fixEpochMs: Long? = null
 )
 
 object LocationSnapshotProvider {
@@ -24,6 +28,20 @@ object LocationSnapshotProvider {
     private const val REQUEST_MIN_DISTANCE_METERS = 4f
     private const val MIN_EMIT_MOVEMENT_METERS = 6f
     private const val SIGNIFICANT_ACCURACY_GAIN_METERS = 8f
+    fun isHighAccuracyFix(
+        context: Context,
+        location: DetectionLocation?,
+        thresholdMeters: Double = ScanSettings.getMagneticGpsAccuracyRequirementMeters(context)
+    ): Boolean {
+        val accuracyMeters = location?.accuracyMeters ?: return false
+        val threshold = thresholdMeters
+            .coerceIn(
+                ScanSettings.MIN_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
+                ScanSettings.MAX_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
+            )
+            .toFloat()
+        return accuracyMeters in 0f..threshold
+    }
 
     fun read(context: Context): DetectionLocation? {
         val hasFine = hasFineLocationPermission(context)
@@ -53,7 +71,13 @@ object LocationSnapshotProvider {
             ?: candidates.maxByOrNull { scored -> scored.score }?.location
             ?: return null
 
-        return DetectionLocation(lat = latest.latitude, lon = latest.longitude)
+        return DetectionLocation(
+            lat = latest.latitude,
+            lon = latest.longitude,
+            accuracyMeters = latest.accuracy.takeIf { latest.hasAccuracy() },
+            provider = latest.provider,
+            fixEpochMs = latest.time.takeIf { it > 0L }
+        )
     }
 
     fun observe(context: Context, minUpdateIntervalMs: Long = 5_000L): Flow<DetectionLocation?> = callbackFlow {
@@ -110,7 +134,15 @@ object LocationSnapshotProvider {
 
             if (shouldEmit(bestCandidate)) {
                 lastEmittedLocation = bestCandidate
-                trySend(DetectionLocation(bestCandidate.latitude, bestCandidate.longitude))
+                trySend(
+                    DetectionLocation(
+                        lat = bestCandidate.latitude,
+                        lon = bestCandidate.longitude,
+                        accuracyMeters = bestCandidate.accuracy.takeIf { bestCandidate.hasAccuracy() },
+                        provider = bestCandidate.provider,
+                        fixEpochMs = bestCandidate.time.takeIf { it > 0L }
+                    )
+                )
             }
         }
 

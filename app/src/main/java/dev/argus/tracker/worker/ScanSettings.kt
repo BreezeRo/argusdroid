@@ -37,6 +37,9 @@ object ScanSettings {
     private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
     private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
+    private const val KEY_MAGNETIC_RHYTHM_BEEP_ENABLED = "magnetic_rhythm_beep_enabled"
+    private const val KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = "magnetic_event_trigger_threshold_ut"
+    private const val KEY_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS = "magnetic_gps_accuracy_requirement_meters"
     private const val KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED = "mesh_connectivity_notifications_enabled"
     private const val KEY_MESH_WIPE_NOTIFICATIONS_ENABLED = "mesh_wipe_notifications_enabled"
     private const val KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED = "foreign_direct_acoustic_enabled"
@@ -105,6 +108,15 @@ object ScanSettings {
     const val DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS = 60L
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 900L
+    const val DEFAULT_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS = 5L
+    const val DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 120.0
+    const val MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 40.0
+    const val MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 120.0
+    const val DEFAULT_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS = 1.0
+    const val MIN_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS = 0.5
+    const val MAX_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS = 25.0
+    val ALLOWED_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS =
+        listOf(0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 12.0, 15.0, 20.0, 25.0)
     const val DEFAULT_AVIATION_PUBLIC_RADIUS_MILES = 25
     const val DEFAULT_AVIATION_PUBLIC_FEED_URL = "https://opensky-network.org/api/states/all"
     const val DEFAULT_APP_THEME_MODE = "DARK"
@@ -451,6 +463,63 @@ object ScanSettings {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMagneticRhythmBeepEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAGNETIC_RHYTHM_BEEP_ENABLED, true)
+
+    fun setMagneticRhythmBeepEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_MAGNETIC_RHYTHM_BEEP_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getMagneticEventTriggerThresholdMicroTesla(context: Context): Double =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getFloat(
+                KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT,
+                DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT.toFloat()
+            )
+            .toDouble()
+            .coerceIn(
+                MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT,
+                MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT
+            )
+
+    fun setMagneticEventTriggerThresholdMicroTesla(context: Context, thresholdMicroTesla: Double) {
+        val safeThreshold = thresholdMicroTesla.coerceIn(
+            MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT,
+            MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT
+        )
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT, safeThreshold.toFloat())
+            .apply()
+    }
+
+    fun getMagneticGpsAccuracyRequirementMeters(context: Context): Double =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getFloat(
+                KEY_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
+                DEFAULT_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS.toFloat()
+            )
+            .toDouble()
+            .coerceIn(
+                MIN_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
+                MAX_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
+            )
+
+    fun setMagneticGpsAccuracyRequirementMeters(context: Context, meters: Double) {
+        val safeMeters = meters.coerceIn(
+            MIN_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
+            MAX_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
+        )
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(KEY_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS, safeMeters.toFloat())
             .apply()
     }
 
@@ -1051,8 +1120,9 @@ object ScanSettings {
         SOURCE_TYPES.associateWith { type -> getSourceScanIntervalSeconds(context, type) }
 
     private fun defaultSourceScanIntervalSeconds(sourceType: String): Long = when (sourceType) {
-        "aircraft" -> DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
-        "camera" -> DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+        SourceCatalog.KEY_AIRCRAFT -> DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS
+        SourceCatalog.KEY_CAMERA -> DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+        SourceCatalog.KEY_MAGNETIC -> DEFAULT_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS
         else -> DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
     }
 
