@@ -40,6 +40,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Background flock alert monitor with persisted signature/cooldown state to avoid alert storms.
 - Signal Intel includes direct acoustic and direct magnetometer diagnostics.
 - NFC alert surfacing for newly observed NFC encounters.
+- Camera-in-view alerts for mapped public cameras near the device.
 - Magnetometer disturbance increase alerts.
 - Application-level uncaught-exception capture into operational error logs.
 - Aircraft no-fly zone pass-through detection:
@@ -110,37 +111,6 @@ Disabled source gates prevent that source from participating in both scheduled a
 - Scanner noise controls support aggregate-only sweeps and one-off randomized ID suppression.
 - Operational logs and source timing diagnostics are first-class in settings and logs surfaces.
 - Summary metrics include all source types across the 24h reporting window.
-
-## Today’s Delivered Changes (2026-08-15)
-
-- Detection tab topology refactor:
-	- Added a dedicated Flocks tab in Detection and moved flock analytics out of Devices.
-	- Reindexed Detection tab routing (Mesh index shift) to preserve deep-link behavior.
-- Flock intelligence pipeline:
-	- Added a standalone flock analyzer module with connected-component grouping over co-travel links.
-	- Hardened false-positive controls by restricting flock location evidence to trusted moving-source coordinates.
-	- Added per-member movement proof gates before pair linkage and span qualification.
-- Flock alerting and runtime integration:
-	- Added Settings-gated flock notification policy and dedicated notification channel.
-	- Added foreground flock alert emission with signature/cooldown dedup.
-	- Added worker-driven background flock monitoring with throttled analysis cadence and persisted dedup state.
-	- Added worker-side operational error logging for flock monitor failures.
-- Operational fault instrumentation:
-	- Added application-level default uncaught-exception handler to persist crash context in operational error logs.
-- Cellular and BLE telemetry enrichment:
-	- Upgraded cellular secondary labels to operator-aware "<Operator> Cell (<Radio> tower)" identities.
-	- Expanded BLE payload classification with tracker-family heuristics and manufacturer/service UUID evidence.
-	- Hardened BLE scan callback handling for resilient result aggregation.
-- Detection-map runtime performance hardening:
-	- Moved heavy list/map analysis workloads off the main thread.
-	- Isolated radial sweep rendering from heavyweight recomposition paths.
-	- Added additional null-safety and map rendering guardrails in compose pipelines.
-- Startup/interval heuristics:
-	- Added home-point-aware heuristics and conditional startup bootstrap controls.
-	- Maintained source-cadence alignment behavior across worker and UI-scheduler control paths.
-- Repository/platform scope simplification:
-	- Removed dashboard static UI, Node bridge, and dashboard scripts from the repo.
-	- Updated docs and wear bridge payload behavior to remove dashboard URL dependencies.
 
 ## Repository Layout
 
