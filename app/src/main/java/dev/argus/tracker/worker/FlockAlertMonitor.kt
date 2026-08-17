@@ -1,11 +1,15 @@
 package dev.argus.tracker.worker
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.ui.DeviceFlock
 import dev.argus.tracker.ui.detectDeviceFlocks
@@ -52,6 +56,7 @@ object FlockAlertMonitor {
         if (signature == lastSignature || inCooldown) {
             return
         }
+        if (!hasPostNotificationsPermission(context)) return
 
         ensureChannel(context)
         sendNotification(context, topFlock)
@@ -83,6 +88,7 @@ object FlockAlertMonitor {
         manager.createNotificationChannel(channel)
     }
 
+    @SuppressLint("MissingPermission")
     private fun sendNotification(context: Context, flock: DeviceFlock) {
         val preview = flock.members
             .take(4)
@@ -110,5 +116,13 @@ object FlockAlertMonitor {
 
         val notificationId = ("flock:${buildFlockSignature(flock)}").hashCode()
         NotificationManagerCompat.from(context).notify(notificationId, notification)
+    }
+
+    private fun hasPostNotificationsPermission(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
     }
 }

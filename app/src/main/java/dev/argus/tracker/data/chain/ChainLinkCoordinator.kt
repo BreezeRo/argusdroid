@@ -1,5 +1,6 @@
 package dev.argus.tracker.data.chain
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -657,6 +658,7 @@ class LocalMeshChainLinkCoordinator(
         maybeNotifyPeerConnectivityTransition(previousState, updatedStatus)
     }
 
+    @SuppressLint("MissingPermission")
     private fun maybeNotifyPeerConnectivityTransition(
         previous: ChainPeerState?,
         updated: ChainPeerStatus?
@@ -721,6 +723,7 @@ class LocalMeshChainLinkCoordinator(
         maybeNotifyMeshWipeNotice(notice)
     }
 
+    @SuppressLint("MissingPermission")
     private fun maybeNotifyMeshWipeNotice(notice: MeshWipeNotice) {
         if (!ScanSettings.isMeshWipeNotificationsEnabled(context)) return
         if (!hasPostNotificationsPermission(context)) return

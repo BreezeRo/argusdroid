@@ -44,7 +44,14 @@ class BluetoothClassicScanner(
             logSkipped("Bluetooth sensor disabled in settings")
             return emptyList()
         }
-        if (!hasScanPermission()) {
+        val hasBluetoothScanPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else {
+            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val bt = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+            fine && bt
+        }
+        if (!hasBluetoothScanPermission) {
             logSkipped("Missing Bluetooth scan permission")
             return emptyList()
         }
@@ -58,15 +65,18 @@ class BluetoothClassicScanner(
         }
 
         val location = LocationSnapshotProvider.read(context)
-        val bonded = if (hasConnectPermission()) {
+        val canReadConnectData = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        val bonded = if (canReadConnectData) {
             runCatching {
                 adapter.bondedDevices.orEmpty().map {
-                    val key = resolveDeviceKey(it)
+                    val key = resolveDeviceKey(it, canReadConnectData)
                     deviceToEncounter(
                         device = it,
                         primaryId = key,
                         location = location,
-                        discovered = false
+                        discovered = false,
+                        canReadConnectData = canReadConnectData
                     )
                 }
             }.onFailure { error ->
@@ -104,13 +114,14 @@ class BluetoothClassicScanner(
                                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                                 } ?: return@runCatching
                                 val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
-                                val key = resolveDeviceKey(device)
+                                val key = resolveDeviceKey(device, canReadConnectData)
                                 val encounter = deviceToEncounter(
                                     device = device,
                                     primaryId = key,
                                     location = location,
                                     discovered = true,
-                                    discoveredRssi = rssi
+                                    discoveredRssi = rssi,
+                                    canReadConnectData = canReadConnectData
                                 )
                                 discoveredCount += 1
                                 ScanSettings.setSourceLastRawObservationEpochMs(
@@ -145,7 +156,7 @@ class BluetoothClassicScanner(
                             discoveryStarted = discoveryStarted,
                             bondedCount = bonded.size,
                             discoveredCount = discoveredCount,
-                            hasConnectPermission = hasConnectPermission()
+                            hasConnectPermission = canReadConnectData
                         )
                     } else {
                         consecutiveEmptyScans = 0
@@ -203,14 +214,37 @@ class BluetoothClassicScanner(
         primaryId: String,
         location: DetectionLocation?,
         discovered: Boolean,
-        discoveredRssi: Int? = null
+        discoveredRssi: Int? = null,
+        canReadConnectData: Boolean
     ): Encounter {
-        val majorClass = runCatching { device.bluetoothClass?.majorDeviceClass }.getOrNull()
-        val deviceClass = runCatching { device.bluetoothClass?.deviceClass }.getOrNull()
+        val majorClass = if (canReadConnectData) {
+            try {
+                device.bluetoothClass?.majorDeviceClass
+            } catch (_: SecurityException) {
+                null
+            }
+        } else {
+            null
+        }
+        val deviceClass = if (canReadConnectData) {
+            try {
+                device.bluetoothClass?.deviceClass
+            } catch (_: SecurityException) {
+                null
+            }
+        } else {
+            null
+        }
         val codLabel = classifyClassicDevice(majorClass, deviceClass)
-        val name = runCatching {
-            if (hasConnectPermission()) device.name else null
-        }.getOrNull()
+        val name = if (canReadConnectData) {
+            try {
+                device.name
+            } catch (_: SecurityException) {
+                null
+            }
+        } else {
+            null
+        }
 
         return Encounter(
             timestampEpochMs = System.currentTimeMillis(),
@@ -222,10 +256,22 @@ class BluetoothClassicScanner(
             lat = location?.lat,
             lon = location?.lon,
             rawPayloadJson = JSONObject()
-                .put("address", safeDeviceAddress(device))
+                .put("address", safeDeviceAddress(device, canReadConnectData))
                 .put("name", name)
-                .put("bondState", runCatching { device.bondState }.getOrNull())
-                .put("type", runCatching { device.type }.getOrNull())
+                .put("bondState", if (canReadConnectData) {
+                    try {
+                        device.bondState
+                    } catch (_: SecurityException) {
+                        null
+                    }
+                } else null)
+                .put("type", if (canReadConnectData) {
+                    try {
+                        device.type
+                    } catch (_: SecurityException) {
+                        null
+                    }
+                } else null)
                 .put("majorClass", majorClass)
                 .put("deviceClass", deviceClass)
                 .put("classLabel", codLabel)
@@ -234,23 +280,42 @@ class BluetoothClassicScanner(
         )
     }
 
-    private fun safeDeviceAddress(device: BluetoothDevice): String? =
-        runCatching { device.address?.trim() }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
+    private fun safeDeviceAddress(device: BluetoothDevice, canReadConnectData: Boolean): String? {
+        if (!canReadConnectData) return null
+        val address = try {
+            device.address?.trim()
+        } catch (_: SecurityException) {
+            null
+        }
+        return address?.takeIf { it.isNotBlank() }
+    }
 
-    private fun resolveDeviceKey(device: BluetoothDevice): String {
-        val address = safeDeviceAddress(device)
+    private fun resolveDeviceKey(device: BluetoothDevice, canReadConnectData: Boolean): String {
+        val address = safeDeviceAddress(device, canReadConnectData)
         if (address != null) return address
 
-        val nameFallback = runCatching {
-            if (hasConnectPermission()) device.name?.trim() else null
-        }.getOrNull().orEmpty()
+        val nameFallback = if (canReadConnectData) {
+            try {
+                device.name?.trim()
+            } catch (_: SecurityException) {
+                null
+            }
+        } else {
+            null
+        }.orEmpty()
         if (nameFallback.isNotBlank()) {
             return "name:${nameFallback.lowercase()}"
         }
 
-        val classFallback = runCatching { device.bluetoothClass?.deviceClass }.getOrNull()?.toString().orEmpty()
+        val classFallback = if (canReadConnectData) {
+            try {
+                device.bluetoothClass?.deviceClass
+            } catch (_: SecurityException) {
+                null
+            }
+        } else {
+            null
+        }?.toString().orEmpty()
         val identityFallback = runCatching { device.toString() }.getOrDefault("bt-classic")
         return "anon:${classFallback}:${identityFallback}"
     }
@@ -271,16 +336,6 @@ class BluetoothClassicScanner(
         }
     }
 
-    private fun hasScanPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-        } else {
-            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-            val bt = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
-            fine && bt
-        }
-    }
-
     private fun logSkipped(reason: String) {
         val now = System.currentTimeMillis()
         if (now - lastSkipLogEpochMs < 60_000L) return
@@ -291,14 +346,6 @@ class BluetoothClassicScanner(
             source = "bt_classic",
             message = "Bluetooth Classic scanner skipped: $reason"
         )
-    }
-
-    private fun hasConnectPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
     }
 
     private fun maybeLogEmptyScanDiagnostics(

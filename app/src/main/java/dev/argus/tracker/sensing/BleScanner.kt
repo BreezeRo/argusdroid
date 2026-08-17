@@ -54,7 +54,23 @@ class BleScanner(
             logSkipped("Bluetooth LE sensor disabled in settings")
             return emptyList()
         }
-        if (!hasBlePermissions()) {
+        val hasBleScanPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            val fine = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+            val btAdmin = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_ADMIN
+            ) == PackageManager.PERMISSION_GRANTED
+            fine && btAdmin
+        }
+        if (!hasBleScanPermission) {
             logSkipped("Missing Bluetooth LE scan permissions")
             return emptyList()
         }
@@ -140,29 +156,19 @@ class BleScanner(
         }
     }
 
-    private fun hasBlePermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    private fun ScanResult.toEncounter(location: DetectionLocation?): Encounter {
+        val canReadConnectData = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             ContextCompat.checkSelfPermission(
                 context,
-                Manifest.permission.BLUETOOTH_SCAN
+                Manifest.permission.BLUETOOTH_CONNECT
             ) == PackageManager.PERMISSION_GRANTED
+        val mac = if (canReadConnectData) {
+            runCatching { device?.address }.getOrNull() ?: "unknown-ble"
         } else {
-            val fine = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-            val btAdmin = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.BLUETOOTH_ADMIN
-            ) == PackageManager.PERMISSION_GRANTED
-            fine && btAdmin
+            "unknown-ble"
         }
-    }
-
-    private fun ScanResult.toEncounter(location: DetectionLocation?): Encounter {
-        val mac = runCatching { device?.address }.getOrNull() ?: "unknown-ble"
         val name = runCatching {
-            if (hasBluetoothConnectPermission()) device?.name else null
+            if (canReadConnectData) device?.name else null
         }.getOrNull()
         val record = scanRecord
         val decodedRemoteId = RemoteIdBleDecoder.decodeFromScanRecord(record)
@@ -186,9 +192,14 @@ class BleScanner(
         result: ScanResult,
         decodedRemoteId: dev.argus.tracker.sensing.remoteid.RemoteIdDecoded?
     ): String {
-        val address = runCatching { result.device?.address }.getOrNull()
+        val canReadConnectData = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+        val address = if (canReadConnectData) runCatching { result.device?.address }.getOrNull() else null
         val name = runCatching {
-            if (hasBluetoothConnectPermission()) result.device?.name else null
+            if (canReadConnectData) result.device?.name else null
         }.getOrNull()
         val record = result.scanRecord
         val classification = classifyBleDevice(name, record)

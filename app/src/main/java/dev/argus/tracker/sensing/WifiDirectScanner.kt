@@ -1,5 +1,6 @@
 package dev.argus.tracker.sensing
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -26,6 +27,7 @@ class WifiDirectScanner(
 
     private var lastSkipLogEpochMs: Long = 0L
 
+    @SuppressLint("MissingPermission")
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isWifiSensorEnabled(context)) return emptyList()
         if (!hasPermissions()) {

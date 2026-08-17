@@ -1,5 +1,6 @@
 package dev.argus.tracker.sensing
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -23,6 +24,7 @@ import org.json.JSONObject
 class CellularScanner(
     private val context: Context
 ) : SignalScanner {
+    @SuppressLint("MissingPermission")
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isCellularSensorEnabled(context)) return emptyList()
         if (!hasCellPermissions()) {
@@ -60,6 +62,7 @@ class CellularScanner(
         return hasFineLocation && hasReadPhoneState
     }
 
+    @SuppressLint("MissingPermission")
     private fun CellInfo.toEncounter(
         now: Long,
         telephonyManager: TelephonyManager,

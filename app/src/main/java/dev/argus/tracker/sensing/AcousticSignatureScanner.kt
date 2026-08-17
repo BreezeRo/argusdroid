@@ -25,7 +25,11 @@ class AcousticSignatureScanner(
 
     override suspend fun scanOnce(): List<Encounter> {
         if (!ScanSettings.isForeignDirectAcousticEnabled(context)) return emptyList()
-        if (!hasRecordAudioPermission()) return emptyList()
+        val canRecordAudio = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!canRecordAudio) return emptyList()
 
         val sampleRateHz = 8_000
         val channelConfig = AudioFormat.CHANNEL_IN_MONO
@@ -104,10 +108,4 @@ class AcousticSignatureScanner(
         )
     }
 
-    private fun hasRecordAudioPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-    }
 }

@@ -1,5 +1,6 @@
 package dev.argus.tracker.sensing
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -43,6 +44,7 @@ object LocationSnapshotProvider {
         return accuracyMeters in 0f..threshold
     }
 
+    @SuppressLint("MissingPermission")
     fun read(context: Context): DetectionLocation? {
         val hasFine = hasFineLocationPermission(context)
         val hasCoarse = hasCoarseLocationPermission(context)
@@ -80,6 +82,7 @@ object LocationSnapshotProvider {
         )
     }
 
+    @SuppressLint("MissingPermission")
     fun observe(context: Context, minUpdateIntervalMs: Long = 5_000L): Flow<DetectionLocation?> = callbackFlow {
         val hasFine = hasFineLocationPermission(context)
         val hasCoarse = hasCoarseLocationPermission(context)
