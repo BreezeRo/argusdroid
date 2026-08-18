@@ -5,9 +5,35 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 ## System Scope
 
 - Platform: Android app module plus Wear companion.
-- Storage model: Room-backed encounter timeline with shared schema across sources.
+- Storage model: SQLCipher-backed Room encounter timeline with shared schema across sources.
 - Processing model: source scanners plus ingest readers feed a unified encounter pipeline.
 - Sync model: authenticated peer-to-peer Chain Link mesh over LAN with provenance tagging.
+
+## Security Architecture
+
+- Database encryption:
+	- Room runs with SQLCipher (`net.zetetic:sqlcipher-android`) and an app-managed DEK.
+	- DEK wrapping schemes: keystore plain (`keystore_plain_v1`), keystore auth-gated (`keystore_auth_v1`), and passcode-derived (`pin_v1`).
+	- DEK persistence stores only wrapped ciphertext + IV + PBKDF2 metadata (`PBKDF2WithHmacSHA256`, 210k iterations default).
+- Launch lock policy:
+	- Optional startup gate can require biometric/device credential, PIN, or password before secure startup tasks run.
+	- Auto-lock timeout invalidates in-memory session key after app background dwell exceeds policy.
+	- Manual session lock clears active in-memory key without changing persisted policy.
+- Protective wipe policy:
+	- Optional wipe-on-failed-credential mode clears local encrypted data after 5 failed passcode attempts.
+	- Lockout escalation is enforced before threshold (`15s`, `60s`, `300s`, `900s`).
+	- Wipe path force-closes active Room handle before DB deletion to avoid open-file delete failures.
+- Secure preferences:
+	- Settings/logs state moved behind `SecureSettingsStore` using EncryptedSharedPreferences when available.
+	- Legacy plaintext namespaces are one-time migrated and tracked via migration telemetry.
+	- Fallback to regular SharedPreferences is retained for devices that fail encrypted prefs initialization.
+
+Tracked secure namespaces include:
+
+- `argus_settings`
+- `argus_encryption`
+- `argus_mesh_state`
+- `nfc_ingest`
 
 ## Core Detection Sources
 
@@ -36,17 +62,28 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 
 - Approach detection with confidence and trend outputs.
 - Tracker suspicion scoring for repeated co-movement behavior.
+- Cellular threat scoring (IMSI-catcher/stingray indicators) with confidence/score/sample-count outputs.
 - Flock graph analysis for repeated co-travel correlation across trusted moving sources.
 - Background flock alert monitor with persisted signature/cooldown state to avoid alert storms.
 - Signal Intel includes direct acoustic and direct magnetometer diagnostics.
 - NFC alert surfacing for newly observed NFC encounters.
 - Camera-in-view alerts for mapped public cameras near the device.
 - Magnetometer disturbance increase alerts.
+- Dedicated stingray detection alert channel with cooldown, device-level transition gating, and in-app alert-log integration.
 - Application-level uncaught-exception capture into operational error logs.
 - Aircraft no-fly zone pass-through detection:
 	- Detects aircraft transitions from outside to inside no-fly polygons.
 	- Emits dedicated notification channel alerts with cooldown guards.
 	- Writes structured alert log entries for event auditability.
+
+Cellular encounter payloads now include expanded modem/service telemetry when available:
+
+- Operator/profile context: operator/country/sim fields, phone type, data state, roaming markers.
+- Service state markers: registration state, emergency-only, roaming, NR state.
+- Cell radio metrics by RAT:
+  - LTE: `rsrp`, `rsrq`, `rssnr`, `cqi`.
+  - NR: `ssRsrp`, `ssRsrq`, `ssSinr`, `csiRsrp`.
+  - WCDMA/CDMA/GSM extras where exposed by framework (`ecNo`, `bitErrorRate`, `evdoSnr`, etc.).
 
 ## Map Engine
 
@@ -58,6 +95,7 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 - Pin metadata search, source/type filters, identity labels, precise-dot rendering, and configurable pin limits support dense map review.
 - Optional marker clustering with adjustable range, coverage-radius and sweep overlays, and map diagnostics help keep high-volume views usable.
 - Aircraft map includes heading-aware markers and large-radius filtering.
+- Sticky compass mini-map supports Picture-in-Picture handoff from map contexts, including PiP zoom and return actions.
 - No-fly zone overlays:
 	- Local ingest: ingest/no_fly_zones.geojson.
 	- Public fallback: FAA ArcGIS UAS Facility Map and National Security UAS restrictions.
@@ -105,6 +143,7 @@ MAPS_API_KEY is consumed via Gradle manifest placeholders by phone and wear modu
 - ACCESS_FINE_LOCATION
 - READ_PHONE_STATE
 - RECORD_AUDIO
+- USE_BIOMETRIC
 - BLUETOOTH_SCAN and BLUETOOTH_CONNECT (API-level dependent)
 - NEARBY_WIFI_DEVICES (API-level dependent)
 - POST_NOTIFICATIONS (Android 13+)
@@ -116,6 +155,7 @@ Disabled source gates prevent that source from participating in both scheduled a
 - Scanner noise controls support aggregate-only sweeps and one-off randomized ID suppression.
 - Operational logs and source timing diagnostics are first-class in settings and logs surfaces.
 - Summary metrics include all source types across the 24h reporting window.
+- Live-mode-only mode now applies a cold-start reset path that clears local encounters/devices/logs before secure startup continuation.
 
 ## Repository Layout
 
