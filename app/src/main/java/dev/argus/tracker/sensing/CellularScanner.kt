@@ -99,14 +99,13 @@ class CellularScanner(
                 .put("serviceState", state.state)
                 .put("isEmergencyOnly", emergencyOnly)
                 .put("isRoaming", roaming)
-
-            val nrState = runCatching {
-                state.javaClass.getMethod("getNrState").invoke(state) as Int
-            }.getOrNull()
-            if (nrState != null) {
-                payload.put("nrState", nrState)
-            }
         }
+
+        // Avoid hidden API reflection (ServiceState#getNrState is blocked on modern targets).
+        // Derive NR availability from public telephony data instead.
+        val nrAvailable = telephonyManager.dataNetworkType == TelephonyManager.NETWORK_TYPE_NR ||
+            this is CellInfoNr
+        payload.put("nrAvailable", nrAvailable)
 
         val connectionStatus = runCatching {
             this.javaClass.getMethod("getCellConnectionStatus").invoke(this) as Int
