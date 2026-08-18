@@ -1,21 +1,18 @@
 package dev.argus.tracker.ui
 
-import android.Manifest
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.nfc.NfcAdapter
-import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.hardware.Sensor
 import android.hardware.SensorManager
-import androidx.core.content.ContextCompat
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.worker.ScanSettings
 
@@ -72,56 +69,43 @@ object DetectionReadinessAdvisor {
             ?.adapter
             ?.isEnabled == true
 
-        val hasFineLocation = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val permissionReadinessItems = AppPermissions
+            .trackedRuntimePermissionStates(context)
+            .map { permissionState ->
+                val opensNotificationSettings = permissionState.id == "perm_notifications"
+                DetectionReadinessItem(
+                    id = permissionState.id,
+                    title = permissionState.title,
+                    recommendedValue = "Granted",
+                    currentValue = if (permissionState.granted) "Granted" else "Missing",
+                    isMissing = !permissionState.granted,
+                    openSettingsLabel = if (opensNotificationSettings) {
+                        "Open App Notifications"
+                    } else {
+                        "Open App Permissions"
+                    },
+                    settingsIntent = if (opensNotificationSettings) {
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    } else {
+                        appSettingsIntent
+                    }
+                )
+            }
 
-        val hasReadPhoneState = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.READ_PHONE_STATE
-        ) == PackageManager.PERMISSION_GRANTED
-
-        val hasBackgroundLocation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_BACKGROUND_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        val hasBleScan = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        val hasNearbyWifiDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        val hasNotifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        val hasMicrophone = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
+        val specialPermissionReadinessItems = AppPermissions
+            .trackedSpecialPermissionStates(context)
+            .map { permissionState ->
+                DetectionReadinessItem(
+                    id = permissionState.id,
+                    title = permissionState.title,
+                    recommendedValue = "Available",
+                    currentValue = if (permissionState.available) "Available" else "Unavailable",
+                    isMissing = !permissionState.available,
+                    openSettingsLabel = "Open App Settings",
+                    settingsIntent = appSettingsIntent
+                )
+            }
 
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val hasMagnetometer = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null
@@ -149,71 +133,7 @@ object DetectionReadinessAdvisor {
         val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
         val internetReady = networkCapabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
 
-        return listOf(
-            DetectionReadinessItem(
-                id = "perm_fine_location",
-                title = "Fine Location Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasFineLocation) "Granted" else "Missing",
-                isMissing = !hasFineLocation,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
-            DetectionReadinessItem(
-                id = "perm_read_phone_state",
-                title = "Phone State Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasReadPhoneState) "Granted" else "Missing",
-                isMissing = !hasReadPhoneState,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
-            DetectionReadinessItem(
-                id = "perm_background_location",
-                title = "Background Location Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasBackgroundLocation) "Granted" else "Missing",
-                isMissing = !hasBackgroundLocation,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
-            DetectionReadinessItem(
-                id = "perm_ble_scan",
-                title = "Bluetooth Scan Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasBleScan) "Granted" else "Missing",
-                isMissing = !hasBleScan,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
-            DetectionReadinessItem(
-                id = "perm_nearby_wifi",
-                title = "Nearby Wi-Fi Devices Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasNearbyWifiDevices) "Granted" else "Missing",
-                isMissing = !hasNearbyWifiDevices,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
-            DetectionReadinessItem(
-                id = "perm_notifications",
-                title = "Notifications Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasNotifications) "Granted" else "Missing",
-                isMissing = !hasNotifications,
-                openSettingsLabel = "Open App Notifications",
-                settingsIntent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-            ),
-            DetectionReadinessItem(
-                id = "perm_microphone",
-                title = "Microphone Permission",
-                recommendedValue = "Granted",
-                currentValue = if (hasMicrophone) "Granted" else "Missing",
-                isMissing = !hasMicrophone,
-                openSettingsLabel = "Open App Permissions",
-                settingsIntent = appSettingsIntent
-            ),
+        return permissionReadinessItems + specialPermissionReadinessItems + listOf(
             DetectionReadinessItem(
                 id = "setting_location_services",
                 title = "Location Services",

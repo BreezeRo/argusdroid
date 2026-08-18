@@ -13,10 +13,10 @@ import android.telephony.CellInfoWcdma
 import android.telephony.CellIdentityNr
 import android.telephony.TelephonyManager
 import android.util.Log
-import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.worker.ScanSettings
 import java.math.BigInteger
 import org.json.JSONObject
@@ -51,15 +51,7 @@ class CellularScanner(
     }
 
     private fun hasCellPermissions(): Boolean {
-        val hasFineLocation = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        val hasReadPhoneState = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.READ_PHONE_STATE
-        ) == PackageManager.PERMISSION_GRANTED
-        return hasFineLocation && hasReadPhoneState
+        return AppPermissions.hasCellularScanPermissions(context)
     }
 
     @SuppressLint("MissingPermission")

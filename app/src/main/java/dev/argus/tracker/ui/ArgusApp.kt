@@ -26,6 +26,11 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -133,6 +138,7 @@ import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.Polygon
 import com.google.maps.android.compose.rememberCameraPositionState
 import dev.argus.tracker.MainActivity
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.AppBackupManager
 import dev.argus.tracker.data.AppEncryptionManager
@@ -184,8 +190,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -238,6 +248,8 @@ private const val APPROACH_ALERT_COOLDOWN_MS = 2 * 60 * 1000L
 private const val TRACKER_ALERT_CHANNEL_ID = "argus_tracker_alerts"
 private const val TRACKER_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 private const val FLOCK_ALERT_CHANNEL_ID = "argus_flock_alerts"
+private const val CHAIN_EVENT_SYNC_DEBOUNCE_MS = 2500L
+private const val CHAIN_SYNC_MIN_GAP_MS = 10_000L
 private const val FLOCK_ALERT_COOLDOWN_MS = 10 * 60 * 1000L
 private const val CAMERA_IN_VIEW_ALERT_CHANNEL_ID = "argus_camera_in_view_alerts"
 private const val CAMERA_IN_VIEW_ALERT_COOLDOWN_MS = 3 * 60 * 1000L
@@ -831,6 +843,7 @@ fun ArgusApp(
     var chainAutoSyncEnabled by remember { mutableStateOf(ScanSettings.isChainAutoSyncEnabled(context)) }
     var chainAutoSyncIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainAutoSyncIntervalSeconds(context)) }
     var chainPersistentChannelEnabled by remember { mutableStateOf(ScanSettings.isChainPersistentChannelEnabled(context)) }
+    var lastChainSyncEpochMs by remember { mutableStateOf(0L) }
     var chainHeartbeatIntervalSeconds by remember { mutableStateOf(ScanSettings.getChainHeartbeatIntervalSeconds(context)) }
     var chainSharePreciseLocationEnabled by remember { mutableStateOf(ScanSettings.isChainSharePreciseLocationEnabled(context)) }
     var ownedDeviceKeys by remember { mutableStateOf(OwnedDeviceRegistry.read(context)) }
@@ -1417,9 +1430,43 @@ fun ArgusApp(
         if (chainSharedSecret.isBlank()) return@LaunchedEffect
 
         while (true) {
-            runCatching { app.container.chainLinkCoordinator.syncNow() }
+            val nowEpochMs = System.currentTimeMillis()
+            if (nowEpochMs - lastChainSyncEpochMs >= CHAIN_SYNC_MIN_GAP_MS) {
+                runCatching { app.container.chainLinkCoordinator.syncNow() }
+                    .onSuccess { lastChainSyncEpochMs = System.currentTimeMillis() }
+            }
             delay(chainAutoSyncIntervalSeconds.seconds)
         }
+    }
+
+    LaunchedEffect(
+        chainLinkEnabled,
+        chainAutoSyncEnabled,
+        chainSharedSecret,
+        secureDataUnlocked
+    ) {
+        if (!secureDataUnlocked) return@LaunchedEffect
+        if (!chainLinkEnabled || !chainAutoSyncEnabled) return@LaunchedEffect
+        if (chainSharedSecret.isBlank()) return@LaunchedEffect
+
+        app.container.repository.observeRecent(limit = 1)
+            .map { encounters ->
+                encounters.firstOrNull { it.provenance == EncounterProvenance.LOCAL }
+                    ?.let { encounter ->
+                        encounter.encounterFingerprint
+                            ?: "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}|${encounter.id}"
+                    }
+            }
+            .filterNotNull()
+            .distinctUntilChanged()
+            .drop(1)
+            .collect {
+                delay(CHAIN_EVENT_SYNC_DEBOUNCE_MS)
+                val nowEpochMs = System.currentTimeMillis()
+                if (nowEpochMs - lastChainSyncEpochMs < CHAIN_SYNC_MIN_GAP_MS) return@collect
+                runCatching { app.container.chainLinkCoordinator.syncNow() }
+                    .onSuccess { lastChainSyncEpochMs = System.currentTimeMillis() }
+            }
     }
 
     LaunchedEffect(sourceScanIntervals, sensorGateSettings) {
@@ -6674,17 +6721,47 @@ private fun DetectionPage(
     val missingReadinessItems = remember(readinessItems) {
         readinessItems.filter { it.isMissing }
     }
-    val permissionReadinessItems = remember(readinessItems) {
-        readinessItems.filter { it.id.startsWith("perm_") }
+    val runtimePermissionReadinessItems = remember(readinessItems) {
+        readinessItems.filter { item -> item.id.startsWith("perm_") && !item.id.startsWith("perm_special_") }
+    }
+    val specialPermissionReadinessItems = remember(readinessItems) {
+        readinessItems.filter { item -> item.id.startsWith("perm_special_") }
+    }
+    val permissionReadinessItems = remember(runtimePermissionReadinessItems, specialPermissionReadinessItems) {
+        runtimePermissionReadinessItems + specialPermissionReadinessItems
     }
     val nonPermissionMissingReadinessItems = remember(missingReadinessItems) {
         missingReadinessItems.filterNot { it.id.startsWith("perm_") }
+    }
+    val grantedRuntimePermissionReadinessCount = remember(runtimePermissionReadinessItems) {
+        runtimePermissionReadinessItems.count { !it.isMissing }
+    }
+    val grantedSpecialPermissionReadinessCount = remember(specialPermissionReadinessItems) {
+        specialPermissionReadinessItems.count { !it.isMissing }
     }
     val grantedPermissionReadinessCount = remember(permissionReadinessItems) {
         permissionReadinessItems.count { !it.isMissing }
     }
     val readyReadinessCount = remember(readinessItems) {
         readinessItems.count { !it.isMissing }
+    }
+    val permissionSummaryText = remember(
+        grantedPermissionReadinessCount,
+        permissionReadinessItems,
+        grantedRuntimePermissionReadinessCount,
+        runtimePermissionReadinessItems,
+        grantedSpecialPermissionReadinessCount,
+        specialPermissionReadinessItems
+    ) {
+        buildString {
+            append("$grantedPermissionReadinessCount/${permissionReadinessItems.size} available")
+            if (runtimePermissionReadinessItems.isNotEmpty()) {
+                append(" • Runtime $grantedRuntimePermissionReadinessCount/${runtimePermissionReadinessItems.size}")
+            }
+            if (specialPermissionReadinessItems.isNotEmpty()) {
+                append(" • Manifest/Special $grantedSpecialPermissionReadinessCount/${specialPermissionReadinessItems.size}")
+            }
+        }
     }
     val flightDisplayRadiusMeters = flightMapRadiusMiles.coerceIn(10, 1000) * 1609.344
     val topSpeedRecords = remember(selectedTab, selectedMapSubTab, meshInsightEncounters.size) {
@@ -7638,7 +7715,7 @@ private fun DetectionPage(
                                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         Text("Permissions", fontWeight = FontWeight.SemiBold)
                                         Text(
-                                            text = "$grantedPermissionReadinessCount/${permissionReadinessItems.size} granted",
+                                            text = permissionSummaryText,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -7650,29 +7727,69 @@ private fun DetectionPage(
 
                                 if (permissionsExpanded) {
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        permissionReadinessItems.forEach { item ->
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                                            ) {
-                                                Column(
-                                                    modifier = Modifier.weight(1f),
-                                                    verticalArrangement = Arrangement.spacedBy(1.dp)
+                                        if (runtimePermissionReadinessItems.isNotEmpty()) {
+                                            Text(
+                                                text = "Runtime",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            runtimePermissionReadinessItems.forEach { item ->
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                                                 ) {
-                                                    Text(
-                                                        text = item.title,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Medium
-                                                    )
-                                                    Text(
-                                                        text = item.currentValue,
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
-                                                    )
+                                                    Column(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalArrangement = Arrangement.spacedBy(1.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = item.title,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                        Text(
+                                                            text = item.currentValue,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                                                        )
+                                                    }
+                                                    OutlinedButton(onClick = { onOpenReadinessSetting(item) }) {
+                                                        Text("Open")
+                                                    }
                                                 }
-                                                OutlinedButton(onClick = { onOpenReadinessSetting(item) }) {
-                                                    Text("Open")
+                                            }
+                                        }
+                                        if (specialPermissionReadinessItems.isNotEmpty()) {
+                                            Text(
+                                                text = "Manifest and Special",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            specialPermissionReadinessItems.forEach { item ->
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalArrangement = Arrangement.spacedBy(1.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = item.title,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                        Text(
+                                                            text = item.currentValue,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = if (item.isMissing) Color(0xFFB3261E) else Color(0xFF2E7D32)
+                                                        )
+                                                    }
+                                                    OutlinedButton(onClick = { onOpenReadinessSetting(item) }) {
+                                                        Text("Open")
+                                                    }
                                                 }
                                             }
                                         }
@@ -8904,6 +9021,7 @@ private fun DetectionMeshNetworkPage(
     var refreshInProgress by remember { mutableStateOf(false) }
     var meshServiceActive by remember { mutableStateOf(MeshForegroundServiceController.isActive(context)) }
     var meshWipeGateState by remember { mutableStateOf(ScanSettings.getMeshWipeGateState(context)) }
+    var peerStatusNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(context) {
         MeshForegroundServiceController.observeActive(context).collect { isActive ->
@@ -8917,21 +9035,94 @@ private fun DetectionMeshNetworkPage(
         }
     }
 
+    LaunchedEffect(Unit) {
+        tickerFlow(periodMs = 5_000L).collect { now ->
+            peerStatusNowEpochMs = now
+        }
+    }
+
     val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
+    val requestedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.REQUESTED }
+    val discoveredCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.DISCOVERED }
+    val failedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.FAILED }
     val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
     val hasStrongSharedSecret = chainSharedSecret.trim().length >= CHAIN_SHARED_SECRET_MIN_LENGTH
     val meshReady = chainLinkEnabled && hasStrongSharedSecret
     val wipeGateLabel = if (meshWipeGateState.enabled) "Active" else "Inactive"
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
+    val hasLocationPermission = remember(context) {
+        AppPermissions.hasAnyLocationPermission(context)
+    }
+    val meshMapProperties = remember(hasLocationPermission, mapStyleOptions) {
+        MapProperties(
+            isMyLocationEnabled = hasLocationPermission,
+            mapStyleOptions = mapStyleOptions
+        )
+    }
     val meshMapCameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(37.4219999, -122.0840575), 2f)
     }
+    val currentLocation by LocationSnapshotProvider.observe(
+        context,
+        minUpdateIntervalMs = 2_000L
+    ).collectAsState(initial = LocationSnapshotProvider.read(context))
+    val meshAutoFocusAccuracyMeters = 20f
+    var meshIdentityModeEnabled by rememberSaveable { mutableStateOf(true) }
+    var meshIdentityShowFullNamesEnabled by rememberSaveable {
+        mutableStateOf(ScanSettings.DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED)
+    }
+    var meshAutoCenteredOnPreciseLocation by rememberSaveable { mutableStateOf(false) }
+    var meshLockedToCurrentLocation by rememberSaveable { mutableStateOf(false) }
     val peersWithSharedLocation = remember(chainMeshSnapshot.peers) {
         chainMeshSnapshot.peers.filter { peer ->
             isValidLatLon(peer.sharedLocationLat, peer.sharedLocationLon)
         }
     }
+    val peerMapPins = remember(peersWithSharedLocation, meshIdentityModeEnabled, meshIdentityShowFullNamesEnabled) {
+        peersWithSharedLocation.map { peer ->
+            val peerPoint = LatLng(peer.sharedLocationLat!!, peer.sharedLocationLon!!)
+            val identityLabel = peer.deviceName?.trim()?.takeIf { it.isNotBlank() } ?: peer.nodeId
+            val glyph = if (!meshIdentityModeEnabled) {
+                null
+            } else if (meshIdentityShowFullNamesEnabled) {
+                identityLabel
+            } else {
+                identityGlyph(identityLabel)
+            }
+
+            peer to MapPin(
+                position = peerPoint,
+                title = buildPinTitle(
+                    sourceLabel = if (meshIdentityModeEnabled) identityLabel else "Mesh Peer",
+                    primaryId = peer.nodeId,
+                    secondaryId = if (meshIdentityModeEnabled) null else peer.host,
+                    motionBadge = null
+                ),
+                snippetBuilder = {
+                    val host = peer.host.takeIf { it.isNotBlank() } ?: "host n/a"
+                    val accuracy = peer.sharedLocationAccuracyMeters
+                        ?.takeIf { it.isFinite() && it > 0f }
+                        ?.let { value -> " • ${String.format(Locale.US, "%.1f m", value)}" }
+                        .orEmpty()
+                    "${peer.state.name} • $host$accuracy"
+                },
+                searchableMetadata = "${peer.nodeId} ${peer.deviceName.orEmpty()} ${peer.host} ${peer.state.name}",
+                timestampEpochMs = peer.lastSeenEpochMs,
+                source = SourceCatalog.SOURCE_ARGUS_MESH,
+                primaryId = peer.nodeId,
+                secondaryId = peer.deviceName,
+                markerGlyphOverride = glyph,
+                trackerFamilyBadge = peer.state.name,
+                encounterTimestampEpochMs = peer.lastSeenEpochMs,
+                isLive = peer.state == ChainPeerState.CONNECTED
+            )
+        }
+    }
+    val meshLocationPreciseEnough = currentLocation?.accuracyMeters
+        ?.let { accuracy -> accuracy in 0f..meshAutoFocusAccuracyMeters }
+        ?: false
     LaunchedEffect(peersWithSharedLocation) {
+        if (meshLockedToCurrentLocation) return@LaunchedEffect
         if (peersWithSharedLocation.isEmpty()) return@LaunchedEffect
         if (peersWithSharedLocation.size == 1) {
             val only = peersWithSharedLocation.first()
@@ -8954,10 +9145,41 @@ private fun DetectionMeshNetworkPage(
             meshMapCameraPositionState.move(CameraUpdateFactory.newLatLngBounds(bounds, 120))
         }
     }
+    LaunchedEffect(currentLocation, meshLocationPreciseEnough, meshAutoCenteredOnPreciseLocation) {
+        if (meshAutoCenteredOnPreciseLocation) return@LaunchedEffect
+        if (!meshLocationPreciseEnough) return@LaunchedEffect
+        val location = currentLocation ?: return@LaunchedEffect
+        runCatching {
+            meshMapCameraPositionState.animate(
+                CameraUpdateFactory.newLatLngZoom(LatLng(location.lat, location.lon), 16f),
+                durationMs = 700
+            )
+        }
+        meshAutoCenteredOnPreciseLocation = true
+        meshLockedToCurrentLocation = true
+    }
     val connectedPeers = remember(chainMeshSnapshot.peers) {
         chainMeshSnapshot.peers
             .filter { it.state == ChainPeerState.CONNECTED }
             .sortedByDescending { it.lastSeenEpochMs }
+    }
+    val connectingPeers = remember(chainMeshSnapshot.peers) {
+        chainMeshSnapshot.peers
+            .filter { it.state == ChainPeerState.REQUESTED || it.state == ChainPeerState.DISCOVERED }
+            .sortedByDescending { it.lastSeenEpochMs }
+    }
+    val isConnectingNow = refreshInProgress || syncInProgress || connectingPeers.isNotEmpty()
+    val meshConnectionLabel = when {
+        !chainLinkEnabled -> "Disabled"
+        connectedCount > 0 -> "Connected"
+        isConnectingNow -> "Connecting"
+        else -> "Disconnected"
+    }
+    val meshConnectionColor = when {
+        !chainLinkEnabled -> MaterialTheme.colorScheme.onSurfaceVariant
+        connectedCount > 0 -> Color(0xFF2E7D32)
+        isConnectingNow -> Color(0xFFE65100)
+        else -> Color(0xFFB3261E)
     }
     val meshTwoColumn = LocalConfiguration.current.screenWidthDp >= 760
 
@@ -8993,10 +9215,45 @@ private fun DetectionMeshNetworkPage(
                 ) {
                     Text("Mesh Map", fontWeight = FontWeight.Bold)
                     Text(
-                        "Shared peer locations. Marker color: green connected, orange connecting/requested, red failed.",
+                        "Shared peer locations rendered with device-map style pins. Identity mode shows device names on markers.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("Identity Mode")
+                        Switch(
+                            checked = meshIdentityModeEnabled,
+                            onCheckedChange = { meshIdentityModeEnabled = it }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("Full identity labels")
+                        Switch(
+                            checked = meshIdentityShowFullNamesEnabled,
+                            onCheckedChange = { meshIdentityShowFullNamesEnabled = it },
+                            enabled = meshIdentityModeEnabled
+                        )
+                    }
+                    Text(
+                        "Auto-focus ${if (meshLocationPreciseEnough) "ready" else "waiting"}: requires location accuracy <= ${meshAutoFocusAccuracyMeters.toInt()} m (now ${currentLocation?.accuracyMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"}).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (meshLocationPreciseEnough) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!hasLocationPermission) {
+                        Text(
+                            "Grant location permission to use the native My Location button on the map.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFE65100)
+                        )
+                    }
                     if (peersWithSharedLocation.isEmpty()) {
                         Text(
                             "No peers with shared location yet.",
@@ -9004,29 +9261,35 @@ private fun DetectionMeshNetworkPage(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        GoogleMap(
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(260.dp),
-                            cameraPositionState = meshMapCameraPositionState,
-                            properties = MapProperties(mapStyleOptions = mapStyleOptions),
-                            uiSettings = MapUiSettings(zoomControlsEnabled = true)
+                                .height(260.dp)
                         ) {
-                            peersWithSharedLocation.forEach { peer ->
-                                val peerPoint = LatLng(peer.sharedLocationLat!!, peer.sharedLocationLon!!)
-                                val markerHue = when (peer.state) {
-                                    ChainPeerState.CONNECTED -> BitmapDescriptorFactory.HUE_GREEN
-                                    ChainPeerState.DISCOVERED,
-                                    ChainPeerState.REQUESTED -> BitmapDescriptorFactory.HUE_ORANGE
-                                    ChainPeerState.FAILED -> BitmapDescriptorFactory.HUE_RED
-                                }
-                                Marker(
-                                    state = remember(peer.nodeId, peerPoint) { MarkerState(position = peerPoint) },
-                                    title = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId,
-                                    snippet = "${peer.state.name} • ${peer.host}",
-                                    icon = BitmapDescriptorFactory.defaultMarker(markerHue)
+                            GoogleMap(
+                                modifier = Modifier.fillMaxSize(),
+                                cameraPositionState = meshMapCameraPositionState,
+                                properties = meshMapProperties,
+                                uiSettings = MapUiSettings(
+                                    zoomControlsEnabled = true,
+                                    myLocationButtonEnabled = hasLocationPermission,
+                                    compassEnabled = true
                                 )
+                            ) {
+                                peerMapPins.forEach { (peer, pin) ->
+                                    Marker(
+                                        state = remember(peer.nodeId, pin.position) { MarkerState(position = pin.position) },
+                                        title = pin.title,
+                                        snippet = pin.snippetBuilder?.invoke(),
+                                        icon = markerIconForPin(
+                                            pin = pin,
+                                            useSourceOnlyPinColors = true,
+                                            showTrackerFamilyBadge = true
+                                        )
+                                    )
+                                }
                             }
+
                         }
                     }
                 }
@@ -9041,10 +9304,35 @@ private fun DetectionMeshNetworkPage(
                     ) {
                         Text("Status", fontWeight = FontWeight.Bold)
                         Text("Chain Link: ${if (chainLinkEnabled) "On" else "Off"}")
+                        Row(
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (isConnectingNow && chainLinkEnabled && connectedCount == 0) {
+                                ConnectingPulseDot()
+                            }
+                            Text(
+                                "Mesh State: $meshConnectionLabel",
+                                color = meshConnectionColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Text(
                             "Passphrase: ${if (chainSharedSecret.isBlank()) "Missing" else if (hasStrongSharedSecret) "Strong" else "Weak"}"
                         )
                         Text("Peers: $connectedCount connected • $unconnectedCount not connected")
+                        Text(
+                            "Pending: $requestedCount requested • $discoveredCount discovered • $failedCount failed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (isConnectingNow && chainLinkEnabled) {
+                            Text(
+                                "Connection in progress. Keep both devices on the same LAN with app open and matching passphrase.",
+                                color = Color(0xFFE65100),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                         Text("Wipe Gate: $wipeGateLabel")
                         if (!meshReady) {
                             Text(
@@ -9189,7 +9477,43 @@ private fun DetectionMeshNetworkPage(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text("Connected Peers", fontWeight = FontWeight.Bold)
+                        Text("Peer Connectivity", fontWeight = FontWeight.Bold)
+                        if (connectingPeers.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                ConnectingPulseDot()
+                                Text(
+                                    "Connecting now",
+                                    color = Color(0xFFE65100),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            connectingPeers.take(8).forEach { peer ->
+                                val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
+                                Row(
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    ConnectingPulseDot()
+                                    Text("$peerDisplay @ ${peer.host}")
+                                }
+                                Text(
+                                    "${peer.state.name} • last handshake ${formatAgeFromEpoch(peer.lastSeenEpochMs, peerStatusNowEpochMs)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (!peer.lastFailure.isNullOrBlank()) {
+                                    Text(
+                                        "Reason: ${peer.lastFailure}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFB3261E)
+                                    )
+                                }
+                            }
+                        }
+                        Text("Connected peers", fontWeight = FontWeight.SemiBold)
                         if (connectedPeers.isEmpty()) {
                             Text("No connected peers.")
                         } else {
@@ -9197,7 +9521,7 @@ private fun DetectionMeshNetworkPage(
                                 val peerDisplay = peer.deviceName?.takeIf { it.isNotBlank() } ?: peer.nodeId
                                 Text("$peerDisplay @ ${peer.host}")
                                 Text(
-                                    "Last seen ${formatEpoch(peer.lastSeenEpochMs)}",
+                                    "Last handshake ${formatAgeFromEpoch(peer.lastSeenEpochMs, peerStatusNowEpochMs)} • Last sync ${formatAgeFromEpoch(peer.lastSuccessfulSyncEpochMs, peerStatusNowEpochMs)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -9355,8 +9679,7 @@ private fun MagneticMonitorMapPage(
     val hasMapsApiKey = remember(context) { hasGoogleMapsApiKey(context) }
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val hasLocationPermission = remember(context) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        AppPermissions.hasAnyLocationPermission(context)
     }
     val mapProperties = remember(hasLocationPermission, mapStyleOptions, showTrafficLayer) {
         MapProperties(
@@ -9747,8 +10070,7 @@ private fun DetectionMapPage(
     val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
     val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
     val hasLocationPermission = remember(context) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        AppPermissions.hasAnyLocationPermission(context)
     }
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
     var pinLimitExpanded by remember { mutableStateOf(false) }
@@ -9802,8 +10124,26 @@ private fun DetectionMapPage(
     val availableSignalLinkLegendItems = remember(legendItems) {
         legendItems.filter { item -> item.source in SIGNAL_LINK_LINE_SUPPORTED_SOURCES }
     }
-    val availableSignalLinkSources = remember(availableSignalLinkLegendItems) {
-        availableSignalLinkLegendItems.map { it.source }.toSet()
+    val signalLinkSelectableSources = remember(availableSignalLinkLegendItems, selectedSignalLinkSources) {
+        val preferredOrder = SOURCE_TYPE_UI_META_ORDERED.map { it.source }
+        val requestedSources = buildSet {
+            addAll(ScanSettings.DEFAULT_MAP_SIGNAL_LINK_SELECTED_SOURCES)
+            addAll(selectedSignalLinkSources)
+            addAll(availableSignalLinkLegendItems.map { it.source })
+        }.filter { source -> source in SIGNAL_LINK_LINE_SUPPORTED_SOURCES }
+            .toSet()
+
+        val availableBySource = availableSignalLinkLegendItems.associateBy { item -> item.source }
+        val orderedSources = preferredOrder.filter { source -> source in requestedSources } +
+            requestedSources.filterNot { source -> source in preferredOrder }.sorted()
+
+        orderedSources.map { source ->
+            availableBySource[source] ?: PinLegendItem(
+                source = source,
+                label = markerLegendLabelForSource(source),
+                color = markerLegendColorForSource(source)
+            )
+        }
     }
     val legendSources = remember(legendItems) { legendItems.map { it.source }.toSet() }
     var filteredVisiblePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
@@ -10494,8 +10834,14 @@ private fun DetectionMapPage(
         hiddenLegendSources = hiddenLegendSources.intersect(legendSources)
     }
 
-    LaunchedEffect(availableSignalLinkSources) {
-        selectedSignalLinkSources = selectedSignalLinkSources.filter { source -> source in availableSignalLinkSources }
+    LaunchedEffect(selectedSignalLinkSources) {
+        val sanitized = selectedSignalLinkSources
+            .map { source -> source.trim() }
+            .filter { source -> source in SIGNAL_LINK_LINE_SUPPORTED_SOURCES }
+            .distinct()
+        if (sanitized != selectedSignalLinkSources) {
+            selectedSignalLinkSources = sanitized
+        }
     }
     LaunchedEffect(signalLinkLinesEnabled) {
         ScanSettings.setMapSignalLinkLinesEnabled(context, signalLinkLinesEnabled)
@@ -11014,7 +11360,7 @@ private fun DetectionMapPage(
                                             signalLinkAllDevicesMaxRangeMeters = meters
                                         },
                                         allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
-                                        availableSources = availableSignalLinkLegendItems,
+                                        availableSources = signalLinkSelectableSources,
                                         selectedSources = selectedSignalLinkSourceSet,
                                         onSourceCheckedChange = { source, checked ->
                                             selectedSignalLinkSources = if (checked) {
@@ -11240,7 +11586,7 @@ private fun DetectionMapPage(
                                             signalLinkAllDevicesMaxRangeMeters = meters
                                         },
                                         allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
-                                        availableSources = availableSignalLinkLegendItems,
+                                        availableSources = signalLinkSelectableSources,
                                         selectedSources = selectedSignalLinkSourceSet,
                                         onSourceCheckedChange = { source, checked ->
                                             selectedSignalLinkSources = if (checked) {
@@ -11367,7 +11713,8 @@ private fun DetectionMapPage(
                         zoomGesturesEnabled = true,
                         scrollGesturesEnabled = true,
                         tiltGesturesEnabled = false,
-                        rotationGesturesEnabled = false,
+                        rotationGesturesEnabled = true,
+                        compassEnabled = true,
                         myLocationButtonEnabled = hasLocationPermission
                     )
                 ) {
@@ -11739,7 +12086,7 @@ private fun DetectionMapPage(
                                     signalLinkAllDevicesMaxRangeMeters = meters
                                 },
                                 allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
-                                availableSources = availableSignalLinkLegendItems,
+                                availableSources = signalLinkSelectableSources,
                                 selectedSources = selectedSignalLinkSourceSet,
                                 onSourceCheckedChange = { source, checked ->
                                     selectedSignalLinkSources = if (checked) {
@@ -17186,9 +17533,7 @@ private fun polygonContainsPoint(boundary: List<DetectionLocation>, lat: Double,
 }
 
 private fun hasPostNotificationsPermission(context: android.content.Context): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
-    return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-        PackageManager.PERMISSION_GRANTED
+    return AppPermissions.hasPostNotificationsPermission(context)
 }
 
 private fun ensureApproachNotificationChannel(context: android.content.Context) {
@@ -20091,6 +20436,39 @@ private fun formatEpoch(epochMs: Long): String {
     }.getOrElse {
         "invalid-time($epochMs)"
     }
+}
+
+private fun formatAgeFromEpoch(epochMs: Long?, nowEpochMs: Long): String {
+    val value = epochMs ?: return "n/a"
+    val deltaMs = (nowEpochMs - value).coerceAtLeast(0L)
+    val seconds = deltaMs / 1000L
+    return when {
+        seconds < 60L -> "${seconds}s ago"
+        seconds < 3600L -> "${seconds / 60L}m ago"
+        seconds < 86_400L -> "${seconds / 3600L}h ago"
+        else -> "${seconds / 86_400L}d ago"
+    }
+}
+
+@Composable
+private fun ConnectingPulseDot(
+    color: Color = Color(0xFFE65100)
+) {
+    val transition = rememberInfiniteTransition(label = "mesh-connecting-pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "mesh-connecting-pulse-alpha"
+    )
+    Text(
+        text = "●",
+        color = color.copy(alpha = alpha),
+        fontWeight = FontWeight.Bold
+    )
 }
 
 

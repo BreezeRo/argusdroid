@@ -12,6 +12,7 @@ import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.data.computeEncounterFingerprint
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterProvenance
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.worker.ScanSettings
 import androidx.core.app.NotificationCompat
@@ -231,6 +232,9 @@ class LocalMeshChainLinkCoordinator(
         val sharedSecretStrong = isStrongChainSharedSecret(sharedSecret)
 
         peers.forEach { peer ->
+            val existing = synchronized(peerStatusByNode) { peerStatusByNode[peer.nodeId] }
+            val recentlyConnected = existing?.state == ChainPeerState.CONNECTED &&
+                (now - existing.lastSeenEpochMs) <= CHAIN_CONNECTED_STATE_GRACE_MS
             val heartbeatOk = if (canUsePersistent && peer.persistentChannelEnabled && sharedSecretStrong) {
                 sendHeartbeat(peer, sharedSecret)
             } else {
@@ -240,7 +244,7 @@ class LocalMeshChainLinkCoordinator(
                 nodeId = peer.nodeId,
                 deviceName = peer.deviceName,
                 host = peer.host,
-                state = if (heartbeatOk) ChainPeerState.CONNECTED else ChainPeerState.DISCOVERED,
+                state = if (heartbeatOk || recentlyConnected) ChainPeerState.CONNECTED else ChainPeerState.DISCOVERED,
                 failure = null,
                 sharedLocationLat = peer.sharedLocationLat,
                 sharedLocationLon = peer.sharedLocationLon,
@@ -1234,6 +1238,13 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
+                    // Treat authenticated inbound sync as an active peer signal so both ends converge
+                    // on CONNECTED state even when one side initiated the sync.
+                    val requesterHost = socket.inetAddress?.hostAddress?.trim().orEmpty()
+                    if (requesterHost.isNotBlank()) {
+                        onIncomingHeartbeat(request.requesterNodeId, null, requesterHost)
+                    }
+
                     val receivedAt = System.currentTimeMillis()
                     val normalizedRemote = request.encounters.map { incoming ->
                         incoming.withInboundProvenance(
@@ -1620,9 +1631,7 @@ private fun decryptTransportPayload(sharedSecret: String, ivBase64: String, ciph
 }
 
 private fun hasPostNotificationsPermission(context: Context): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
-    return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-        PackageManager.PERMISSION_GRANTED
+    return AppPermissions.hasPostNotificationsPermission(context)
 }
 
 private fun ensureConnectivityNotificationChannel(context: Context) {
@@ -1743,6 +1752,7 @@ private const val CHAIN_HTTP_TIMEOUT_MS = 900
 private const val CHAIN_DISCOVERY_CONCURRENCY = 24
 private const val CHAIN_SERVER_ACCEPT_TIMEOUT_MS = 1000
 private const val CHAIN_MAX_AUTH_CLOCK_SKEW_MS = 2 * 60 * 1000L
+private const val CHAIN_CONNECTED_STATE_GRACE_MS = 90_000L
 private const val CHAIN_MAX_INCOMING_REQUESTS = 50
 private const val CHAIN_MAX_WIPE_NOTICES = 80
 private const val MESH_WIPE_ALERT_CHANNEL_ID = "argus_mesh_wipe_alerts"

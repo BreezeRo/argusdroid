@@ -9,6 +9,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -46,8 +47,8 @@ object LocationSnapshotProvider {
 
     @SuppressLint("MissingPermission")
     fun read(context: Context): DetectionLocation? {
-        val hasFine = hasFineLocationPermission(context)
-        val hasCoarse = hasCoarseLocationPermission(context)
+        val hasFine = AppPermissions.hasFineLocationPermission(context)
+        val hasCoarse = AppPermissions.hasCoarseLocationPermission(context)
         if (!hasFine && !hasCoarse) return null
 
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -84,8 +85,8 @@ object LocationSnapshotProvider {
 
     @SuppressLint("MissingPermission")
     fun observe(context: Context, minUpdateIntervalMs: Long = 5_000L): Flow<DetectionLocation?> = callbackFlow {
-        val hasFine = hasFineLocationPermission(context)
-        val hasCoarse = hasCoarseLocationPermission(context)
+        val hasFine = AppPermissions.hasFineLocationPermission(context)
+        val hasCoarse = AppPermissions.hasCoarseLocationPermission(context)
         if (!hasFine && !hasCoarse) {
             trySend(null)
             close()
@@ -187,18 +188,6 @@ object LocationSnapshotProvider {
         val location: Location,
         val score: Int
     )
-
-    private fun hasFineLocationPermission(context: Context): Boolean =
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-
-    private fun hasCoarseLocationPermission(context: Context): Boolean =
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
 
     private fun locationScore(location: Location, nowEpochMs: Long, hasFinePermission: Boolean): Int {
         val ageMs = (nowEpochMs - location.time).coerceAtLeast(0L)

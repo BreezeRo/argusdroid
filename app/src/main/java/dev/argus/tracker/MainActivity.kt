@@ -16,13 +16,13 @@ import android.util.Rational
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
+import androidx.core.app.ActivityCompat
 import androidx.fragment.app.FragmentActivity
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.NfcScanner
@@ -38,6 +38,7 @@ class MainActivity : FragmentActivity() {
         private const val ACTION_PIP_ZOOM_IN = "dev.argus.tracker.action.PIP_ZOOM_IN"
         private const val ACTION_PIP_ZOOM_OUT = "dev.argus.tracker.action.PIP_ZOOM_OUT"
         private const val ACTION_PIP_OPEN_APP = "dev.argus.tracker.action.PIP_OPEN_APP"
+        private const val RUNTIME_PERMISSIONS_REQUEST_CODE = 1001
     }
 
     private var currentIntent by mutableStateOf<Intent?>(null)
@@ -47,10 +48,6 @@ class MainActivity : FragmentActivity() {
     private val nfcReaderCallback = NfcAdapter.ReaderCallback { tag ->
         ingestNfcTag(tag)
     }
-
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -199,13 +196,14 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun requestRequiredPermissionsIfNeeded() {
-        val missing = requiredRuntimePermissions()
-            .filter { permission ->
-                ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
-            }
+        val missing = AppPermissions.missingStartupRuntimePermissions(this)
 
         if (missing.isNotEmpty()) {
-            permissionLauncher.launch(missing.toTypedArray())
+            ActivityCompat.requestPermissions(
+                this,
+                missing.toTypedArray(),
+                RUNTIME_PERMISSIONS_REQUEST_CODE
+            )
         }
     }
 
@@ -287,23 +285,4 @@ class MainActivity : FragmentActivity() {
         runCatching { startActivity(launchIntent) }
     }
 
-    private fun requiredRuntimePermissions(): List<String> {
-        val permissions = mutableListOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.READ_PHONE_STATE,
-            Manifest.permission.RECORD_AUDIO
-        )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions += Manifest.permission.BLUETOOTH_SCAN
-            permissions += Manifest.permission.BLUETOOTH_CONNECT
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissions += Manifest.permission.NEARBY_WIFI_DEVICES
-            permissions += Manifest.permission.POST_NOTIFICATIONS
-        }
-
-        return permissions
-    }
 }

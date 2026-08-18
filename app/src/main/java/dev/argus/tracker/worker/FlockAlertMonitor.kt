@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.data.EncounterRepository
 import dev.argus.tracker.ui.DeviceFlock
 import dev.argus.tracker.ui.detectDeviceFlocks
@@ -119,10 +120,6 @@ object FlockAlertMonitor {
     }
 
     private fun hasPostNotificationsPermission(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
-        return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.POST_NOTIFICATIONS
-        ) == PackageManager.PERMISSION_GRANTED
+        return AppPermissions.hasPostNotificationsPermission(context)
     }
 }

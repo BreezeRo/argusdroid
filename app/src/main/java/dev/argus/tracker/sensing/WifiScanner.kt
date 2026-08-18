@@ -10,6 +10,7 @@ import androidx.core.content.ContextCompat
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.worker.ScanSettings
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -176,22 +177,6 @@ class WifiScanner(
     }
 
     private fun hasWifiPermissions(): Boolean {
-        val fine = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        val nearbyWifi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-        val wifi = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_WIFI_STATE
-        ) == PackageManager.PERMISSION_GRANTED
-        return fine && nearbyWifi && wifi
+        return AppPermissions.hasWifiScanPermissions(context)
     }
 }

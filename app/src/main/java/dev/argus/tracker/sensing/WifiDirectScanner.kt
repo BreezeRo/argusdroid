@@ -15,6 +15,7 @@ import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
+import dev.argus.tracker.permissions.AppPermissions
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
@@ -140,13 +141,7 @@ class WifiDirectScanner(
     }
 
     private fun hasPermissions(): Boolean {
-        val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val nearbyWifi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-        return fine && nearbyWifi
+        return AppPermissions.hasWifiDirectPermissions(context)
     }
 
     private fun logSkipped(reason: String) {
