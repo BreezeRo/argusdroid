@@ -1457,7 +1457,6 @@ object ScanSettings {
 
     private fun canonicalSourceIntervalType(sourceType: String): String = when (sourceType) {
         SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
-        SourceCatalog.KEY_BT_CLASSIC,
         SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
         else -> sourceType
     }

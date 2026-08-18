@@ -882,7 +882,6 @@ fun ArgusApp(
     val intervalManagedSourceTypes = remember {
         ScanSettings.SOURCE_TYPES.filterNot {
             it == SourceCatalog.KEY_WIFI_DIRECT ||
-                it == SourceCatalog.KEY_BT_CLASSIC ||
                 it == SourceCatalog.KEY_REMOTE_ID ||
                 it == SourceCatalog.KEY_NFC
         }
@@ -4375,10 +4374,10 @@ private fun HomePage(
                         ),
                         HomeSensorToggle(
                             "bluetooth_le",
-                            "Bluetooth (LE + Classic + Remote ID)",
+                            "Bluetooth (LE + Remote ID)",
                             "Combined Bluetooth sensor collection",
                             sensorGateSettings.bluetoothLeEnabled,
-                            sensorStatusByName["Bluetooth (LE + Classic + Remote ID)"]
+                            sensorStatusByName["Bluetooth (LE + Remote ID)"]
                         ),
                         HomeSensorToggle(
                             "cellular",
@@ -4708,7 +4707,6 @@ private fun AppSettingsPage(
     val settingsTabs = listOf("Look", "Timing", "Detection", "Alerts", "Data")
     val intervalSourceTypes = ScanSettings.SOURCE_TYPES.filterNot {
         it == SourceCatalog.KEY_WIFI_DIRECT ||
-            it == SourceCatalog.KEY_BT_CLASSIC ||
             it == SourceCatalog.KEY_REMOTE_ID ||
             it == SourceCatalog.KEY_NFC
     }
@@ -14148,7 +14146,7 @@ private val SOURCE_TYPE_UI_META_ORDERED = listOf(
     SourceTypeUiMeta(
         source = SourceCatalog.SOURCE_BLUETOOTH_LE,
         scanType = SourceCatalog.KEY_BLE,
-        settingsLabel = "Bluetooth (LE + Classic + Remote ID)",
+        settingsLabel = "Bluetooth (LE + Remote ID)",
         legendLabel = "BLUETOOTH",
         listLabel = "BLUETOOTH",
         glyph = "BLE",
@@ -15012,7 +15010,6 @@ private fun mapSourceIntervalSeconds(
 
 private fun canonicalScanSourceType(sourceType: String): String = when (sourceType) {
     SourceCatalog.KEY_WIFI_DIRECT -> SourceCatalog.KEY_WIFI
-    SourceCatalog.KEY_BT_CLASSIC,
     SourceCatalog.KEY_REMOTE_ID -> SourceCatalog.KEY_BLE
     else -> sourceType
 }
@@ -15110,7 +15107,10 @@ private fun enabledSourceTypes(sensorGateSettings: SensorGateSettings): List<Str
 
 private fun enabledIntervalSourceTypes(sensorGateSettings: SensorGateSettings): List<String> = buildList {
     if (sensorGateSettings.wifiEnabled) add(SourceCatalog.KEY_WIFI)
-    if (sensorGateSettings.bluetoothLeEnabled) add(SourceCatalog.KEY_BLE)
+    if (sensorGateSettings.bluetoothLeEnabled) {
+        add(SourceCatalog.KEY_BLE)
+        add(SourceCatalog.KEY_BT_CLASSIC)
+    }
     if (sensorGateSettings.cellularEnabled) add(SourceCatalog.KEY_CELLULAR)
     if (sensorGateSettings.sdrEnabled) add(SourceCatalog.KEY_CAMERA)
     if (sensorGateSettings.aviationAdsbEnabled || sensorGateSettings.aviationPublicEnabled) add(SourceCatalog.KEY_AIRCRAFT)

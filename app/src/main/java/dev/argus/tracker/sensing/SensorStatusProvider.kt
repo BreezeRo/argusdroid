@@ -62,7 +62,7 @@ object SensorStatusProvider {
                 factoredByArgus = ScanSettings.isWifiSensorEnabled(context)
             ),
             SensorStatus(
-                name = "Bluetooth (LE + Classic + Remote ID)",
+                name = "Bluetooth (LE + Remote ID)",
                 isOn = bleOn,
                 factoredByArgus = ScanSettings.isBleSensorEnabled(context)
             ),
