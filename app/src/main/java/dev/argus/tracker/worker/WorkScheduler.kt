@@ -45,6 +45,13 @@ object WorkScheduler {
     }
 
     fun prepareStartupBootstrapOnLaunch(context: Context): Boolean {
+        if (!ScanSettings.isTrackingEnabled(context)) {
+            ScanSettings.setStartupBootstrapWaitRequired(context, false)
+            ScanSettings.setLastAppLaunchEpochMs(context, System.currentTimeMillis())
+            WorkManager.getInstance(context).cancelUniqueWork(STARTUP_BOOTSTRAP_WORK_NAME)
+            return false
+        }
+
         val nowEpochMs = System.currentTimeMillis()
         val lastLaunchEpochMs = ScanSettings.getLastAppLaunchEpochMs(context)
         val idleMs = lastLaunchEpochMs?.let { (nowEpochMs - it).coerceAtLeast(0L) }
