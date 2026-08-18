@@ -1,4 +1,4 @@
-package dev.argus.tracker.sensing
+﻿package dev.argus.tracker.sensing
 
 import android.content.Context
 import android.content.Intent
@@ -7,6 +7,7 @@ import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Parcelable
+import dev.argus.tracker.data.SecureSettingsStore
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -41,7 +42,7 @@ object NfcTagIngestStore {
     }
 
     fun drain(context: Context, maxItems: Int = 100): List<JSONObject> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val raw = prefs.getString(KEY_EVENTS, "[]").orEmpty()
         val source = runCatching { JSONArray(raw) }.getOrElse { JSONArray() }
         if (source.length() == 0) return emptyList()
@@ -59,7 +60,7 @@ object NfcTagIngestStore {
     }
 
     private fun append(context: Context, payload: JSONObject) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val raw = prefs.getString(KEY_EVENTS, "[]").orEmpty()
         val existing = runCatching { JSONArray(raw) }.getOrElse { JSONArray() }
 
@@ -185,3 +186,5 @@ object NfcTagIngestStore {
         NfcAdapter.ACTION_NDEF_DISCOVERED
     )
 }
+
+

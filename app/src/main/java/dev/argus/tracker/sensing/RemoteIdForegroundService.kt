@@ -1,4 +1,4 @@
-package dev.argus.tracker.sensing
+﻿package dev.argus.tracker.sensing
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.DefaultAppContainer
+import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -139,11 +140,11 @@ object RemoteIdForegroundServiceController {
             ScanSettings.isRemoteIdSensorEnabled(context)
 
     fun isActive(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_REMOTE_ID_FOREGROUND_ACTIVE, false)
 
     internal fun setActive(context: Context, active: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_REMOTE_ID_FOREGROUND_ACTIVE, active)
             .apply()
@@ -168,3 +169,5 @@ object RemoteIdForegroundServiceController {
         context.stopService(Intent(context, RemoteIdForegroundService::class.java))
     }
 }
+
+

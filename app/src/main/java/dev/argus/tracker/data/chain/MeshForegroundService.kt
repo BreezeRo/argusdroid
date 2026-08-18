@@ -1,4 +1,4 @@
-package dev.argus.tracker.data.chain
+﻿package dev.argus.tracker.data.chain
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -109,11 +110,11 @@ object MeshForegroundServiceController {
             ScanSettings.isChainPersistentChannelEnabled(context)
 
     fun isActive(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MESH_FOREGROUND_ACTIVE, false)
 
     fun observeActive(context: Context): Flow<Boolean> = callbackFlow {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
             if (key == KEY_MESH_FOREGROUND_ACTIVE) {
                 trySend(sharedPreferences.getBoolean(KEY_MESH_FOREGROUND_ACTIVE, false))
@@ -127,7 +128,7 @@ object MeshForegroundServiceController {
     }.conflate()
 
     internal fun setActive(context: Context, active: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MESH_FOREGROUND_ACTIVE, active)
             .apply()
@@ -152,3 +153,5 @@ object MeshForegroundServiceController {
         context.stopService(Intent(context, MeshForegroundService::class.java))
     }
 }
+
+

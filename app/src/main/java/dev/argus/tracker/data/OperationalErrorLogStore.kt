@@ -1,4 +1,4 @@
-package dev.argus.tracker.data
+﻿package dev.argus.tracker.data
 
 import android.content.Context
 import org.json.JSONArray
@@ -19,7 +19,7 @@ object OperationalErrorLogStore {
     private const val DEDUPE_WINDOW_MS = 60_000L
 
     fun read(context: Context): List<OperationalErrorLogEntry> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val raw = prefs.getString(KEY_ERROR_LOG_ENTRIES, "[]") ?: "[]"
         val array = runCatching { JSONArray(raw) }.getOrElse { JSONArray() }
         return buildList {
@@ -96,9 +96,11 @@ object OperationalErrorLogStore {
             )
         }
 
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_ERROR_LOG_ENTRIES, array.toString())
             .apply()
     }
 }
+
+

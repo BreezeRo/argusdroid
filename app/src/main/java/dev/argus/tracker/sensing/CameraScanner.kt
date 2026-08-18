@@ -1,6 +1,7 @@
-package dev.argus.tracker.sensing
+﻿package dev.argus.tracker.sensing
 
 import android.content.Context
+import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
 import dev.argus.tracker.domain.SignalScanner
@@ -199,7 +200,7 @@ class CameraScanner(
     }
 
     private fun shouldFetchPublic(location: DetectionLocation, now: Long): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val lastFetch = prefs.getLong(KEY_LAST_FETCH_EPOCH_MS, 0L)
         if (lastFetch > 0L && now - lastFetch < FETCH_MIN_INTERVAL_MS) return false
 
@@ -212,7 +213,7 @@ class CameraScanner(
     }
 
     private fun rememberFetchLocation(location: DetectionLocation, now: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_LAST_FETCH_EPOCH_MS, now)
             .putString(KEY_LAST_FETCH_LAT, location.lat.toString())
@@ -374,3 +375,5 @@ class CameraScanner(
         )
     }
 }
+
+

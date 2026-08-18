@@ -1,4 +1,4 @@
-package dev.argus.tracker.data
+﻿package dev.argus.tracker.data
 
 import android.content.Context
 
@@ -12,7 +12,7 @@ object OwnedSignalRegistry {
     fun keyFor(source: String, primaryId: String): String = "$source|$primaryId"
 
     fun read(context: Context): Set<String> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         return prefs.getStringSet(KEY_OWNED_DEVICE_KEYS, emptySet())?.toSet() ?: emptySet()
     }
 
@@ -29,9 +29,11 @@ object OwnedSignalRegistry {
             current -= key
         }
 
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putStringSet(KEY_OWNED_DEVICE_KEYS, current)
             .apply()
     }
 }
+
+

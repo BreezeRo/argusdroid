@@ -1,4 +1,4 @@
-package dev.argus.tracker.data
+﻿package dev.argus.tracker.data
 
 import android.content.Context
 import dev.argus.tracker.domain.Encounter
@@ -154,7 +154,7 @@ object AppBackupManager {
         createdEpochMs: Long
     ): JSONObject {
         val encounters = repository.listAll(MAX_EXPORT_ENCOUNTERS)
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
 
         return JSONObject().apply {
             put("schema", BACKUP_SCHEMA)
@@ -376,7 +376,7 @@ object AppBackupManager {
     }
 
     private fun applySettings(context: Context, array: JSONArray) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val preservedChainNodeId = prefs.getString(KEY_CHAIN_NODE_ID, null)
         val edit = prefs.edit()
         edit.clear()
@@ -425,3 +425,5 @@ object AppBackupManager {
         return optDouble(key)
     }
 }
+
+

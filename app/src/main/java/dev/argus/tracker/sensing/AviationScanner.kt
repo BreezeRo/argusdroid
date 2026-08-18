@@ -1,8 +1,9 @@
-package dev.argus.tracker.sensing
+﻿package dev.argus.tracker.sensing
 
 import android.content.Context
 import android.util.Log
 import dev.argus.tracker.data.chain.MeshPeerSnapshotStore
+import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterSource
@@ -653,7 +654,7 @@ class AviationScanner(
 
     private fun readPublicFeedCache(requestUrl: String): CachedPublicFeed? {
         if (!requestUrl.contains("opensky-network.org")) return null
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val cachedUrl = prefs.getString(KEY_PUBLIC_FEED_CACHE_URL, "").orEmpty()
         if (cachedUrl != requestUrl) return null
         val cacheFile = context.cacheDir.resolve(OPENSKY_CACHE_DIR).resolve(OPENSKY_CACHE_FILE_NAME)
@@ -671,7 +672,7 @@ class AviationScanner(
         runCatching { cacheDir.mkdirs() }
         val cacheFile = cacheDir.resolve(OPENSKY_CACHE_FILE_NAME)
         runCatching { cacheFile.writeText(body) }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_PUBLIC_FEED_CACHE_URL, requestUrl)
             .putLong(KEY_PUBLIC_FEED_CACHE_FETCHED_AT_MS, fetchedAtEpochMs)
@@ -726,7 +727,7 @@ class AviationScanner(
     }
 
     private fun evaluateOpenSkyRequestGate(nowEpochMs: Long): RequestGateDecision {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val dayIndexUtc = nowEpochMs / 86_400_000L
         val storedDayIndexUtc = prefs.getLong(KEY_OPENSKY_DAY_INDEX_UTC, dayIndexUtc)
         val requestsToday = if (storedDayIndexUtc == dayIndexUtc) {
@@ -762,7 +763,7 @@ class AviationScanner(
     }
 
     private fun markOpenSkyRequestMade(nowEpochMs: Long) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val dayIndexUtc = nowEpochMs / 86_400_000L
         val storedDayIndexUtc = prefs.getLong(KEY_OPENSKY_DAY_INDEX_UTC, dayIndexUtc)
         val previousCount = if (storedDayIndexUtc == dayIndexUtc) {
@@ -780,28 +781,28 @@ class AviationScanner(
     }
 
     private fun shouldEmitRateLimitLog(nowEpochMs: Long): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val lastLoggedAt = prefs.getLong(KEY_OPENSKY_LAST_RATE_LIMIT_LOG_EPOCH_MS, 0L)
         if (lastLoggedAt <= 0L) return true
         return nowEpochMs - lastLoggedAt >= OPENSKY_RATE_LIMIT_LOG_INTERVAL_MS
     }
 
     private fun markRateLimitLogEmitted(nowEpochMs: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_OPENSKY_LAST_RATE_LIMIT_LOG_EPOCH_MS, nowEpochMs)
             .apply()
     }
 
     private fun shouldEmitMeshGateLog(nowEpochMs: Long): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val lastLoggedAt = prefs.getLong(KEY_OPENSKY_LAST_MESH_SKIP_LOG_EPOCH_MS, 0L)
         if (lastLoggedAt <= 0L) return true
         return nowEpochMs - lastLoggedAt >= OPENSKY_RATE_LIMIT_LOG_INTERVAL_MS
     }
 
     private fun markMeshGateLogEmitted(nowEpochMs: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_OPENSKY_LAST_MESH_SKIP_LOG_EPOCH_MS, nowEpochMs)
             .apply()
@@ -858,3 +859,5 @@ class AviationScanner(
         return value.takeIf { it.isFinite() }
     }
 }
+
+

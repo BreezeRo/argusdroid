@@ -1,6 +1,7 @@
-package dev.argus.tracker.data.chain
+﻿package dev.argus.tracker.data.chain
 
 import android.content.Context
+import dev.argus.tracker.data.SecureSettingsStore
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -32,14 +33,14 @@ object MeshPeerSnapshotStore {
             })
         }
 
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_SNAPSHOT_JSON, root.toString())
             .apply()
     }
 
     fun read(context: Context): MeshPeerSnapshot? {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_SNAPSHOT_JSON, null)
             ?.trim()
             ?.takeIf { it.isNotBlank() }
@@ -67,3 +68,5 @@ object MeshPeerSnapshotStore {
         )
     }
 }
+
+

@@ -1,7 +1,8 @@
-package dev.argus.tracker.worker
+﻿package dev.argus.tracker.worker
 
 import android.content.Context
 import android.os.Build
+import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.domain.SourceCatalog
 import java.util.Locale
 import java.util.UUID
@@ -28,6 +29,7 @@ object ScanSettings {
     private const val KEY_AVIATION_PUBLIC_RADIUS_MILES = "aviation_public_radius_miles"
     private const val KEY_REMOTE_ID_INGEST_TOKEN = "remote_id_ingest_token"
     private const val KEY_APPROACH_DETECTION_ENABLED = "approach_detection_enabled"
+    private const val KEY_LIVE_MODE_ONLY_ENABLED = "live_mode_only_enabled"
     private const val KEY_APPROACH_NOTIFICATIONS_ENABLED = "approach_notifications_enabled"
     private const val KEY_TRACKER_NOTIFICATIONS_ENABLED = "tracker_notifications_enabled"
     private const val KEY_FLOCK_NOTIFICATIONS_ENABLED = "flock_notifications_enabled"
@@ -37,6 +39,7 @@ object ScanSettings {
     private const val KEY_FLOCK_ALERT_LAST_SIGNATURE = "flock_alert_last_signature"
     private const val KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED = "no_fly_pass_through_notifications_enabled"
     private const val KEY_NFC_NOTIFICATIONS_ENABLED = "nfc_notifications_enabled"
+    private const val KEY_STINGRAY_NOTIFICATIONS_ENABLED = "stingray_notifications_enabled"
     private const val KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED = "magnetic_increase_notifications_enabled"
     private const val KEY_MAGNETIC_RHYTHM_BEEP_ENABLED = "magnetic_rhythm_beep_enabled"
     private const val KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = "magnetic_event_trigger_threshold_ut"
@@ -67,11 +70,19 @@ object ScanSettings {
     private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
     private const val KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL = "map_no_fly_render_quality_level"
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
+    private const val KEY_MAP_IDENTITY_FULL_NAMES_ENABLED = "map_identity_full_names_enabled"
+    private const val KEY_STICKY_COMPASS_MAP_ENABLED = "sticky_compass_map_enabled"
+    private const val KEY_STICKY_COMPASS_MAP_LIVE_MODE = "sticky_compass_map_live_mode"
+    private const val KEY_STICKY_COMPASS_MAP_PIP_ELIGIBLE = "sticky_compass_map_pip_eligible"
     private const val KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "wifi_randomized_one_off_suppression_enabled"
     private const val KEY_WIFI_AGGREGATE_ONLY_ENABLED = "wifi_aggregate_only_enabled"
     private const val KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = "ble_randomized_one_off_suppression_enabled"
     private const val KEY_BLE_AGGREGATE_ONLY_ENABLED = "ble_aggregate_only_enabled"
     private const val KEY_BLE_SWEEP_IDENTIFIABLE_ONLY_ENABLED = "ble_sweep_identifiable_only_enabled"
+    private const val KEY_FULL_ENCRYPTION_ENABLED = "full_encryption_enabled"
+    private const val KEY_FULL_ENCRYPTION_UNLOCK_METHOD = "full_encryption_unlock_method"
+    private const val KEY_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS = "full_encryption_auto_lock_timeout_seconds"
+    private const val KEY_FULL_ENCRYPTION_PIN_WIPE_ENABLED = "full_encryption_pin_wipe_enabled"
     private const val KEY_LAST_APP_LAUNCH_EPOCH_MS = "last_app_launch_epoch_ms"
     private const val KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED = "startup_bootstrap_wait_required"
     private const val KEY_HOME_POINT_LAT = "home_point_lat"
@@ -102,6 +113,11 @@ object ScanSettings {
     const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
     const val DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL = 2
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
+    const val DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED = false
+    const val DEFAULT_STICKY_COMPASS_MAP_ENABLED = false
+    const val STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP = "FOLLOW_DEVICE_MAP"
+    const val STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY = "FORCE_LIVE_ONLY"
+    const val DEFAULT_STICKY_COMPASS_MAP_LIVE_MODE = STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP
     const val DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
     const val DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED = true
     const val DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED = true
@@ -134,9 +150,26 @@ object ScanSettings {
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_MAP_CLUSTER_RANGE_LEVELS = (1..5).toList()
     val ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS = (1..3).toList()
+    val ALLOWED_STICKY_COMPASS_MAP_LIVE_MODES = listOf(
+        STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP,
+        STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY
+    )
     val ALLOWED_APP_THEME_MODES = listOf("SYSTEM", "LIGHT", "DARK")
+    const val FULL_ENCRYPTION_UNLOCK_METHOD_BIOMETRIC = "BIOMETRIC_OR_DEVICE_CREDENTIAL"
+    const val FULL_ENCRYPTION_UNLOCK_METHOD_PIN = "PIN"
+    const val FULL_ENCRYPTION_UNLOCK_METHOD_PASSWORD = "PASSWORD"
+    const val DEFAULT_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS = 60L
+    val ALLOWED_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS = listOf(0L, 15L, 30L, 60L, 120L, 300L, 600L, 1800L)
+    val ALLOWED_FULL_ENCRYPTION_UNLOCK_METHODS = listOf(
+        FULL_ENCRYPTION_UNLOCK_METHOD_BIOMETRIC,
+        FULL_ENCRYPTION_UNLOCK_METHOD_PIN,
+        FULL_ENCRYPTION_UNLOCK_METHOD_PASSWORD
+    )
     val SOURCE_TYPES = SourceCatalog.SCAN_SOURCE_KEYS
     val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
+
+    @Volatile
+    private var stickyCompassMapPipEligibleCache: Boolean? = null
 
     data class SourceScanTiming(
         val sourceType: String,
@@ -188,7 +221,7 @@ object ScanSettings {
     )
 
     fun observeOperationalState(context: Context): Flow<OperationalState> = callbackFlow {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
 
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             trySend(getOperationalState(context))
@@ -203,7 +236,7 @@ object ScanSettings {
     }.conflate()
 
     fun getScanIntervalSeconds(context: Context): Long {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val configuredSeconds = if (prefs.contains(KEY_SCAN_INTERVAL_SECONDS)) {
             prefs.getLong(KEY_SCAN_INTERVAL_SECONDS, DEFAULT_SCAN_INTERVAL_SECONDS)
         } else if (prefs.contains(LEGACY_KEY_SCAN_INTERVAL_MINUTES)) {
@@ -223,25 +256,25 @@ object ScanSettings {
         } else {
             DEFAULT_SCAN_INTERVAL_SECONDS
         }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_SCAN_INTERVAL_SECONDS, safeValue)
             .apply()
     }
 
     fun isTrackingEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_TRACKING_ENABLED, false)
 
     fun setTrackingEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_TRACKING_ENABLED, enabled)
             .apply()
     }
 
     fun isWifiSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_WIFI_ENABLED, true)
 
     fun setWifiSensorEnabled(context: Context, enabled: Boolean) {
@@ -249,7 +282,7 @@ object ScanSettings {
     }
 
     fun isBleSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_BLE_ENABLED, true)
 
     fun setBleSensorEnabled(context: Context, enabled: Boolean) {
@@ -269,7 +302,7 @@ object ScanSettings {
     }
 
     fun isNfcSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_NFC_ENABLED, true)
 
     fun setNfcSensorEnabled(context: Context, enabled: Boolean) {
@@ -277,7 +310,7 @@ object ScanSettings {
     }
 
     fun isCellularSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_CELLULAR_ENABLED, true)
 
     fun setCellularSensorEnabled(context: Context, enabled: Boolean) {
@@ -292,7 +325,7 @@ object ScanSettings {
     }
 
     fun isSdrSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_SDR_ENABLED, true)
 
     fun setSdrSensorEnabled(context: Context, enabled: Boolean) {
@@ -300,7 +333,7 @@ object ScanSettings {
     }
 
     fun isAviationAdsbSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, true)
 
     fun setAviationAdsbSensorEnabled(context: Context, enabled: Boolean) {
@@ -308,7 +341,7 @@ object ScanSettings {
     }
 
     fun isAviationPublicSensorEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_SENSOR_AVIATION_PUBLIC_ENABLED, true)
 
     fun setAviationPublicSensorEnabled(context: Context, enabled: Boolean) {
@@ -316,181 +349,203 @@ object ScanSettings {
     }
 
     fun getAviationPublicFeedUrl(context: Context): String =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_AVIATION_PUBLIC_FEED_URL, DEFAULT_AVIATION_PUBLIC_FEED_URL)
             .orEmpty()
             .trim()
 
     fun setAviationPublicFeedUrl(context: Context, url: String) {
         val safe = url.trim().ifBlank { DEFAULT_AVIATION_PUBLIC_FEED_URL }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_AVIATION_PUBLIC_FEED_URL, safe)
             .apply()
     }
 
     fun getAviationPublicRadiusMiles(context: Context): Int {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getInt(KEY_AVIATION_PUBLIC_RADIUS_MILES, DEFAULT_AVIATION_PUBLIC_RADIUS_MILES)
         return value.coerceIn(10, 300)
     }
 
     fun setAviationPublicRadiusMiles(context: Context, miles: Int) {
         val safe = miles.coerceIn(10, 300)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putInt(KEY_AVIATION_PUBLIC_RADIUS_MILES, safe)
             .apply()
     }
 
     fun getRemoteIdIngestToken(context: Context): String =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_REMOTE_ID_INGEST_TOKEN, "")
             .orEmpty()
             .trim()
 
     fun setRemoteIdIngestToken(context: Context, token: String) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_REMOTE_ID_INGEST_TOKEN, token.trim())
             .apply()
     }
 
     fun isApproachDetectionEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_APPROACH_DETECTION_ENABLED, true)
 
     fun setApproachDetectionEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_APPROACH_DETECTION_ENABLED, enabled)
             .apply()
     }
 
+    fun isLiveModeOnlyEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_LIVE_MODE_ONLY_ENABLED, false)
+
+    fun setLiveModeOnlyEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_LIVE_MODE_ONLY_ENABLED, enabled)
+            .apply()
+    }
+
     fun isApproachNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, false)
 
     fun setApproachNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_APPROACH_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isTrackerNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, true)
 
     fun setTrackerNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_TRACKER_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isFlockNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_FLOCK_NOTIFICATIONS_ENABLED, true)
 
     fun setFlockNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_FLOCK_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isCameraInViewNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_CAMERA_IN_VIEW_NOTIFICATIONS_ENABLED, true)
 
     fun setCameraInViewNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CAMERA_IN_VIEW_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun getFlockMonitorLastRunEpochMs(context: Context): Long =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS, 0L)
 
     fun setFlockMonitorLastRunEpochMs(context: Context, epochMs: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_FLOCK_MONITOR_LAST_RUN_EPOCH_MS, epochMs)
             .apply()
     }
 
     fun getFlockAlertLastNotificationEpochMs(context: Context): Long =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS, 0L)
 
     fun setFlockAlertLastNotificationEpochMs(context: Context, epochMs: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_FLOCK_ALERT_LAST_NOTIFICATION_EPOCH_MS, epochMs)
             .apply()
     }
 
     fun getFlockAlertLastSignature(context: Context): String =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_FLOCK_ALERT_LAST_SIGNATURE, "")
             .orEmpty()
 
     fun setFlockAlertLastSignature(context: Context, signature: String) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_FLOCK_ALERT_LAST_SIGNATURE, signature.trim())
             .apply()
     }
 
     fun isNfcNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, true)
 
     fun setNfcNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_NFC_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
+    fun isStingrayNotificationsEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_STINGRAY_NOTIFICATIONS_ENABLED, true)
+
+    fun setStingrayNotificationsEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_STINGRAY_NOTIFICATIONS_ENABLED, enabled)
+            .apply()
+    }
+
     fun isNoFlyPassThroughNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, true)
 
     fun setNoFlyPassThroughNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isMagneticIncreaseNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED, true)
 
     fun setMagneticIncreaseNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAGNETIC_INCREASE_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isMagneticRhythmBeepEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAGNETIC_RHYTHM_BEEP_ENABLED, true)
 
     fun setMagneticRhythmBeepEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAGNETIC_RHYTHM_BEEP_ENABLED, enabled)
             .apply()
     }
 
     fun getMagneticEventTriggerThresholdMicroTesla(context: Context): Double =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getFloat(
                 KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT,
                 DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT.toFloat()
@@ -506,14 +561,14 @@ object ScanSettings {
             MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT,
             MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT
         )
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putFloat(KEY_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT, safeThreshold.toFloat())
             .apply()
     }
 
     fun getMagneticGpsAccuracyRequirementMeters(context: Context): Double =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getFloat(
                 KEY_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
                 DEFAULT_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS.toFloat()
@@ -529,58 +584,58 @@ object ScanSettings {
             MIN_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS,
             MAX_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
         )
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putFloat(KEY_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS, safeMeters.toFloat())
             .apply()
     }
 
     fun isMeshConnectivityNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, false)
 
     fun setMeshConnectivityNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MESH_CONNECTIVITY_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isMeshWipeNotificationsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MESH_WIPE_NOTIFICATIONS_ENABLED, true)
 
     fun setMeshWipeNotificationsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MESH_WIPE_NOTIFICATIONS_ENABLED, enabled)
             .apply()
     }
 
     fun isForeignDirectAcousticEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED, false)
 
     fun setForeignDirectAcousticEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_FOREIGN_DIRECT_ACOUSTIC_ENABLED, enabled)
             .apply()
     }
 
     fun isForeignDirectMagneticEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED, false)
 
     fun setForeignDirectMagneticEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_FOREIGN_DIRECT_MAGNETIC_ENABLED, enabled)
             .apply()
     }
 
     fun getHomePoint(context: Context): HomePoint? {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val lat = prefs.getString(KEY_HOME_POINT_LAT, null)?.toDoubleOrNull()
         val lon = prefs.getString(KEY_HOME_POINT_LON, null)?.toDoubleOrNull()
         if (lat == null || lon == null) return null
@@ -602,7 +657,7 @@ object ScanSettings {
         val safeLat = lat.coerceIn(-90.0, 90.0)
         val safeLon = lon.coerceIn(-180.0, 180.0)
         val safeRadius = radiusMeters.coerceIn(MIN_HOME_POINT_RADIUS_METERS, MAX_HOME_POINT_RADIUS_METERS)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_HOME_POINT_LAT, String.format(Locale.US, "%.6f", safeLat))
             .putString(KEY_HOME_POINT_LON, String.format(Locale.US, "%.6f", safeLon))
@@ -611,7 +666,7 @@ object ScanSettings {
     }
 
     fun clearHomePoint(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .remove(KEY_HOME_POINT_LAT)
             .remove(KEY_HOME_POINT_LON)
@@ -631,18 +686,18 @@ object ScanSettings {
     }
 
     fun isChainLinkEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_CHAIN_LINK_ENABLED, false)
 
     fun setChainLinkEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CHAIN_LINK_ENABLED, enabled)
             .apply()
     }
 
     fun getChainNodeId(context: Context): String {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val existing = prefs.getString(KEY_CHAIN_NODE_ID, null)?.trim().orEmpty()
         if (existing.isNotEmpty()) return existing
         val generated = "argus-${UUID.randomUUID().toString().take(12)}"
@@ -651,45 +706,45 @@ object ScanSettings {
     }
 
     fun getChainSyncWindowMinutes(context: Context): Long {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_CHAIN_SYNC_WINDOW_MINUTES, DEFAULT_CHAIN_SYNC_WINDOW_MINUTES)
         return value.coerceIn(15L, 24L * 60L)
     }
 
     fun setChainSyncWindowMinutes(context: Context, minutes: Long) {
         val safe = minutes.coerceIn(15L, 24L * 60L)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_CHAIN_SYNC_WINDOW_MINUTES, safe)
             .apply()
     }
 
     fun getChainSharedSecret(context: Context): String =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_CHAIN_SHARED_SECRET, "")
             .orEmpty()
             .trim()
 
     fun setChainSharedSecret(context: Context, secret: String) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_CHAIN_SHARED_SECRET, secret.trim())
             .apply()
     }
 
     fun isChainAutoSyncEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_CHAIN_AUTO_SYNC_ENABLED, true)
 
     fun setChainAutoSyncEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CHAIN_AUTO_SYNC_ENABLED, enabled)
             .apply()
     }
 
     fun getChainAutoSyncIntervalSeconds(context: Context): Long {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_CHAIN_AUTO_SYNC_INTERVAL_SECONDS, DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS)
         return value.takeIf { it in ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS }
             ?: DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS
@@ -701,25 +756,25 @@ object ScanSettings {
         } else {
             DEFAULT_CHAIN_AUTO_SYNC_INTERVAL_SECONDS
         }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_CHAIN_AUTO_SYNC_INTERVAL_SECONDS, safeValue)
             .apply()
     }
 
     fun isChainPersistentChannelEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED, true)
 
     fun setChainPersistentChannelEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CHAIN_PERSISTENT_CHANNEL_ENABLED, enabled)
             .apply()
     }
 
     fun getChainHeartbeatIntervalSeconds(context: Context): Long {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS)
         return value.takeIf { it in ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS }
             ?: DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS
@@ -731,14 +786,14 @@ object ScanSettings {
         } else {
             DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS
         }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_CHAIN_HEARTBEAT_INTERVAL_SECONDS, safeValue)
             .apply()
     }
 
     fun getChainDeviceName(context: Context): String {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val existing = prefs.getString(KEY_CHAIN_DEVICE_NAME, null)?.trim().orEmpty()
         if (existing.isNotEmpty()) return existing
 
@@ -749,32 +804,32 @@ object ScanSettings {
 
     fun setChainDeviceName(context: Context, name: String) {
         val normalized = name.trim().ifBlank { "Argus Device" }.take(40)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_CHAIN_DEVICE_NAME, normalized)
             .apply()
     }
 
     fun isChainSharePreciseLocationEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED, false)
 
     fun setChainSharePreciseLocationEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CHAIN_SHARE_PRECISE_LOCATION_ENABLED, enabled)
             .apply()
     }
 
     fun clearAlertLogs(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .remove(KEY_ALERT_LOG_ENTRIES)
             .apply()
     }
 
     fun clearScanIntervalChangeEvents(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .remove(KEY_SCAN_INTERVAL_CHANGE_EVENTS)
             .apply()
@@ -786,7 +841,7 @@ object ScanSettings {
     }
 
     fun resetMeshNetworkSettings(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_CHAIN_LINK_ENABLED, false)
             .putString(KEY_CHAIN_SHARED_SECRET, "")
@@ -806,7 +861,7 @@ object ScanSettings {
     }
 
     fun getMeshWipeGateState(context: Context): MeshWipeGateState {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val enabled = prefs.getBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
         val sessionId = prefs.getString(KEY_MESH_WIPE_GATE_SESSION_ID, null)?.trim()?.ifBlank { null }
         val initiatorNodeId = prefs.getString(KEY_MESH_WIPE_GATE_INITIATOR_NODE_ID, null)?.trim()?.ifBlank { null }
@@ -822,7 +877,7 @@ object ScanSettings {
     }
 
     fun observeMeshWipeGateState(context: Context): Flow<MeshWipeGateState> = callbackFlow {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
 
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (
@@ -845,7 +900,7 @@ object ScanSettings {
     }.conflate()
 
     fun isMeshWipeGateEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
 
     fun beginMeshWipeGate(
@@ -854,7 +909,7 @@ object ScanSettings {
         initiatorNodeId: String,
         initiatorDeviceName: String?
     ) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, true)
             .putString(KEY_MESH_WIPE_GATE_SESSION_ID, sessionId.trim())
@@ -865,7 +920,7 @@ object ScanSettings {
     }
 
     fun completeMeshWipeGate(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MESH_WIPE_GATE_ENABLED, false)
             .putLong(KEY_MESH_WIPE_GATE_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -873,18 +928,18 @@ object ScanSettings {
     }
 
     fun isMapClusteringEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAP_CLUSTERING_ENABLED, DEFAULT_MAP_CLUSTERING_ENABLED)
 
     fun setMapClusteringEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAP_CLUSTERING_ENABLED, enabled)
             .apply()
     }
 
     fun getMapClusterRangeLevel(context: Context): Int {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getInt(KEY_MAP_CLUSTER_RANGE_LEVEL, DEFAULT_MAP_CLUSTER_RANGE_LEVEL)
         return raw.takeIf { it in ALLOWED_MAP_CLUSTER_RANGE_LEVELS }
             ?: DEFAULT_MAP_CLUSTER_RANGE_LEVEL
@@ -893,36 +948,36 @@ object ScanSettings {
     fun setMapClusterRangeLevel(context: Context, level: Int) {
         val safe = level.takeIf { it in ALLOWED_MAP_CLUSTER_RANGE_LEVELS }
             ?: DEFAULT_MAP_CLUSTER_RANGE_LEVEL
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putInt(KEY_MAP_CLUSTER_RANGE_LEVEL, safe)
             .apply()
     }
 
     fun isMapTrafficEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAP_TRAFFIC_ENABLED, DEFAULT_MAP_TRAFFIC_ENABLED)
 
     fun setMapTrafficEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAP_TRAFFIC_ENABLED, enabled)
             .apply()
     }
 
     fun isMapNoFlyZonesEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAP_NO_FLY_ZONES_ENABLED, DEFAULT_MAP_NO_FLY_ZONES_ENABLED)
 
     fun setMapNoFlyZonesEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAP_NO_FLY_ZONES_ENABLED, enabled)
             .apply()
     }
 
     fun getMapNoFlyRenderQualityLevel(context: Context): Int {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getInt(KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL, DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL)
         return raw.takeIf { it in ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS }
             ?: DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
@@ -931,67 +986,122 @@ object ScanSettings {
     fun setMapNoFlyRenderQualityLevel(context: Context, level: Int) {
         val safe = level.takeIf { it in ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS }
             ?: DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putInt(KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL, safe)
             .apply()
     }
 
     fun isMapScannerSweepAnimationEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED, DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED)
 
     fun setMapScannerSweepAnimationEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED, enabled)
             .apply()
     }
 
+    fun isMapIdentityFullNamesEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_MAP_IDENTITY_FULL_NAMES_ENABLED, DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED)
+
+    fun setMapIdentityFullNamesEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_MAP_IDENTITY_FULL_NAMES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isStickyCompassMapEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_STICKY_COMPASS_MAP_ENABLED, DEFAULT_STICKY_COMPASS_MAP_ENABLED)
+
+    fun setStickyCompassMapEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_STICKY_COMPASS_MAP_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getStickyCompassMapLiveMode(context: Context): String {
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getString(KEY_STICKY_COMPASS_MAP_LIVE_MODE, DEFAULT_STICKY_COMPASS_MAP_LIVE_MODE)
+            .orEmpty()
+            .trim()
+            .uppercase(Locale.US)
+        return raw.takeIf { it in ALLOWED_STICKY_COMPASS_MAP_LIVE_MODES }
+            ?: DEFAULT_STICKY_COMPASS_MAP_LIVE_MODE
+    }
+
+    fun setStickyCompassMapLiveMode(context: Context, mode: String) {
+        val safe = mode.trim().uppercase(Locale.US)
+            .takeIf { it in ALLOWED_STICKY_COMPASS_MAP_LIVE_MODES }
+            ?: DEFAULT_STICKY_COMPASS_MAP_LIVE_MODE
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putString(KEY_STICKY_COMPASS_MAP_LIVE_MODE, safe)
+            .apply()
+    }
+
+    fun isStickyCompassMapPipEligible(context: Context): Boolean =
+        stickyCompassMapPipEligibleCache ?: SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_STICKY_COMPASS_MAP_PIP_ELIGIBLE, false)
+            .also { stickyCompassMapPipEligibleCache = it }
+
+    fun setStickyCompassMapPipEligible(context: Context, eligible: Boolean) {
+        stickyCompassMapPipEligibleCache = eligible
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_STICKY_COMPASS_MAP_PIP_ELIGIBLE, eligible)
+            .apply()
+    }
+
     fun isWifiRandomizedOneOffSuppressionEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(
                 KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED,
                 DEFAULT_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
             )
 
     fun setWifiRandomizedOneOffSuppressionEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_WIFI_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED, enabled)
             .apply()
     }
 
     fun isWifiAggregateOnlyEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(
                 KEY_WIFI_AGGREGATE_ONLY_ENABLED,
                 DEFAULT_WIFI_AGGREGATE_ONLY_ENABLED
             )
 
     fun setWifiAggregateOnlyEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_WIFI_AGGREGATE_ONLY_ENABLED, enabled)
             .apply()
     }
 
     fun isBleRandomizedOneOffSuppressionEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(
                 KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED,
                 DEFAULT_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED
             )
 
     fun setBleRandomizedOneOffSuppressionEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_BLE_RANDOMIZED_ONE_OFF_SUPPRESSION_ENABLED, enabled)
             .apply()
     }
 
     fun isBleAggregateOnlyEnabled(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         return if (prefs.contains(KEY_BLE_AGGREGATE_ONLY_ENABLED)) {
             prefs.getBoolean(
                 KEY_BLE_AGGREGATE_ONLY_ENABLED,
@@ -1006,38 +1116,98 @@ object ScanSettings {
         }
     }
 
+    fun isFullEncryptionEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_FULL_ENCRYPTION_ENABLED, false)
+
+    fun setFullEncryptionEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_FULL_ENCRYPTION_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getFullEncryptionUnlockMethod(context: Context): String {
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getString(KEY_FULL_ENCRYPTION_UNLOCK_METHOD, FULL_ENCRYPTION_UNLOCK_METHOD_BIOMETRIC)
+            .orEmpty()
+            .trim()
+            .uppercase()
+        return raw.takeIf { it in ALLOWED_FULL_ENCRYPTION_UNLOCK_METHODS }
+            ?: FULL_ENCRYPTION_UNLOCK_METHOD_BIOMETRIC
+    }
+
+    fun setFullEncryptionUnlockMethod(context: Context, method: String) {
+        val safe = method.trim().uppercase().takeIf { it in ALLOWED_FULL_ENCRYPTION_UNLOCK_METHODS }
+            ?: FULL_ENCRYPTION_UNLOCK_METHOD_BIOMETRIC
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putString(KEY_FULL_ENCRYPTION_UNLOCK_METHOD, safe)
+            .apply()
+    }
+
+    fun getFullEncryptionAutoLockTimeoutSeconds(context: Context): Long {
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getLong(
+                KEY_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS,
+                DEFAULT_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS
+            )
+        return value.takeIf { it in ALLOWED_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS }
+            ?: DEFAULT_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS
+    }
+
+    fun setFullEncryptionAutoLockTimeoutSeconds(context: Context, seconds: Long) {
+        val safe = seconds.takeIf { it in ALLOWED_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS }
+            ?: DEFAULT_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putLong(KEY_FULL_ENCRYPTION_AUTO_LOCK_TIMEOUT_SECONDS, safe)
+            .apply()
+    }
+
+    fun isFullEncryptionPinWipeEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_FULL_ENCRYPTION_PIN_WIPE_ENABLED, false)
+
+    fun setFullEncryptionPinWipeEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_FULL_ENCRYPTION_PIN_WIPE_ENABLED, enabled)
+            .apply()
+    }
+
     fun setBleAggregateOnlyEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_BLE_AGGREGATE_ONLY_ENABLED, enabled)
             .apply()
     }
 
     fun getLastAppLaunchEpochMs(context: Context): Long? =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_LAST_APP_LAUNCH_EPOCH_MS, -1L)
             .takeIf { it > 0L }
 
     fun setLastAppLaunchEpochMs(context: Context, epochMs: Long) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_LAST_APP_LAUNCH_EPOCH_MS, epochMs.coerceAtLeast(0L))
             .apply()
     }
 
     fun isStartupBootstrapWaitRequired(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED, true)
 
     fun setStartupBootstrapWaitRequired(context: Context, required: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_STARTUP_BOOTSTRAP_WAIT_REQUIRED, required)
             .apply()
     }
 
     fun getAppThemeMode(context: Context): String {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getString(KEY_APP_THEME_MODE, DEFAULT_APP_THEME_MODE)
             .orEmpty()
             .trim()
@@ -1048,21 +1218,21 @@ object ScanSettings {
     fun setAppThemeMode(context: Context, mode: String) {
         val safe = mode.trim().uppercase().takeIf { it in ALLOWED_APP_THEME_MODES }
             ?: DEFAULT_APP_THEME_MODE
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putString(KEY_APP_THEME_MODE, safe)
             .apply()
     }
 
     fun getLastScanDurationMs(context: Context): Long? {
-        val value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val value = SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(KEY_LAST_SCAN_DURATION_MS, -1L)
         return value.takeIf { it >= 0L }
     }
 
     fun setLastScanDurationMs(context: Context, durationMs: Long) {
         val safeValue = durationMs.coerceAtLeast(0L)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(KEY_LAST_SCAN_DURATION_MS, safeValue)
             .apply()
@@ -1075,7 +1245,7 @@ object ScanSettings {
         reason: String,
         timestampEpochMs: Long = System.currentTimeMillis()
     ) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val existing = decodeIntervalChangeEvents(prefs.getString(KEY_SCAN_INTERVAL_CHANGE_EVENTS, null))
         val updated = (existing + IntervalChangeEvent(
             timestampEpochMs = timestampEpochMs,
@@ -1090,17 +1260,17 @@ object ScanSettings {
     }
 
     fun getScanIntervalChangeEvents(context: Context, limit: Int = 10): List<IntervalChangeEvent> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val all = decodeIntervalChangeEvents(prefs.getString(KEY_SCAN_INTERVAL_CHANGE_EVENTS, null))
         return all.takeLast(limit.coerceAtLeast(1)).asReversed()
     }
 
     fun isAutoAdjustScanIntervalEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED, false)
 
     fun setAutoAdjustScanIntervalEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_AUTO_ADJUST_SCAN_INTERVAL_ENABLED, enabled)
             .apply()
@@ -1110,7 +1280,7 @@ object ScanSettings {
         val normalizedType = sourceType.trim().lowercase()
         val canonicalType = canonicalSourceIntervalType(normalizedType)
         if (canonicalType !in SOURCE_TYPES) return DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
         val value = prefs.getLong(key, defaultSourceScanIntervalSeconds(canonicalType))
         return value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
@@ -1122,7 +1292,7 @@ object ScanSettings {
         if (canonicalType !in SOURCE_TYPES) return
         val safeValue = seconds.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
         val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(key, safeValue)
             .apply()
@@ -1149,7 +1319,7 @@ object ScanSettings {
         val normalizedType = sourceType.trim().lowercase()
         if (normalizedType !in SOURCE_TYPES) return 0L
         val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX)
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(key, 0L)
             .coerceAtLeast(0L)
     }
@@ -1159,7 +1329,7 @@ object ScanSettings {
         if (normalizedType !in SOURCE_TYPES) return
         val safeValue = epochMs.coerceAtLeast(0L)
         val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_SCAN_EPOCH_MS_SUFFIX)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(key, safeValue)
             .apply()
@@ -1172,7 +1342,7 @@ object ScanSettings {
         val normalizedType = sourceType.trim().lowercase()
         if (normalizedType !in SOURCE_TYPES) return 0L
         val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_RAW_OBSERVATION_EPOCH_MS_SUFFIX)
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return SecureSettingsStore.prefs(context, PREFS_NAME)
             .getLong(key, 0L)
             .coerceAtLeast(0L)
     }
@@ -1182,7 +1352,7 @@ object ScanSettings {
         if (normalizedType !in SOURCE_TYPES) return
         val safeValue = epochMs.coerceAtLeast(0L)
         val key = sourceTimingKey(normalizedType, KEY_SOURCE_LAST_RAW_OBSERVATION_EPOCH_MS_SUFFIX)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putLong(key, safeValue)
             .apply()
@@ -1195,7 +1365,7 @@ object ScanSettings {
         val normalizedType = sourceType.trim().lowercase()
         if (normalizedType.isBlank()) return
         val safeValue = durationMs.coerceAtLeast(0L)
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val countKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_COUNT_SUFFIX)
         val totalKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_TOTAL_MS_SUFFIX)
         val maxKey = sourceTimingKey(normalizedType, KEY_SOURCE_TIMING_MAX_MS_SUFFIX)
@@ -1218,7 +1388,7 @@ object ScanSettings {
     }
 
     fun getSourceScanTimings(context: Context): List<SourceScanTiming> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         return SOURCE_TYPES.mapNotNull { type ->
             val count = prefs.getLong(sourceTimingKey(type, KEY_SOURCE_TIMING_COUNT_SUFFIX), 0L)
             if (count <= 0L) return@mapNotNull null
@@ -1287,7 +1457,7 @@ object ScanSettings {
         "${sourceType}${suffix}"
 
     private fun setSensorEnabled(context: Context, key: String, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(key, enabled)
             .apply()
@@ -1299,3 +1469,5 @@ object ScanSettings {
         else -> "${seconds}s"
     }
 }
+
+

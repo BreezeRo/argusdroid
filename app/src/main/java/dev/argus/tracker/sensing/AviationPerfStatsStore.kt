@@ -1,6 +1,7 @@
-package dev.argus.tracker.sensing
+﻿package dev.argus.tracker.sensing
 
 import android.content.Context
+import dev.argus.tracker.data.SecureSettingsStore
 
 data class AviationPerfSnapshot(
     val lastUpdatedEpochMs: Long,
@@ -33,7 +34,7 @@ object AviationPerfStatsStore {
     private const val KEY_PARSE_FAILURES = "aviation_perf_parse_failures"
 
     fun snapshot(context: Context): AviationPerfSnapshot {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         return AviationPerfSnapshot(
             lastUpdatedEpochMs = prefs.getLong(KEY_LAST_UPDATED_EPOCH_MS, 0L),
             lastSource = prefs.getString(KEY_LAST_SOURCE, "none").orEmpty(),
@@ -51,7 +52,7 @@ object AviationPerfStatsStore {
     }
 
     fun recordCacheHit(context: Context, source: String, payloadBytes: Int) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val currentHits = prefs.getInt(KEY_CACHE_HITS, 0)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -62,7 +63,7 @@ object AviationPerfStatsStore {
     }
 
     fun recordNetworkFetch(context: Context, payloadBytes: Int) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val currentCount = prefs.getInt(KEY_NETWORK_FETCHES, 0)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -73,7 +74,7 @@ object AviationPerfStatsStore {
     }
 
     fun recordRateLimitedSkip(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val currentCount = prefs.getInt(KEY_RATE_LIMITED_SKIPS, 0)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -83,7 +84,7 @@ object AviationPerfStatsStore {
     }
 
     fun recordHttpFailure(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val currentCount = prefs.getInt(KEY_HTTP_FAILURES, 0)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -93,7 +94,7 @@ object AviationPerfStatsStore {
     }
 
     fun recordParseFailure(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val currentCount = prefs.getInt(KEY_PARSE_FAILURES, 0)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
@@ -110,7 +111,7 @@ object AviationPerfStatsStore {
         parseDurationMs: Long,
         source: String
     ) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         prefs.edit()
             .putLong(KEY_LAST_UPDATED_EPOCH_MS, System.currentTimeMillis())
             .putString(KEY_LAST_SOURCE, source)
@@ -121,3 +122,5 @@ object AviationPerfStatsStore {
             .apply()
     }
 }
+
+
