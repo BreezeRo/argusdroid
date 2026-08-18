@@ -55,6 +55,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -279,7 +280,6 @@ private const val MOVING_PATH_RENDER_POINT_LIMIT = 900
 private const val MAP_RENDER_PIN_LIMIT_FAR = 260
 private const val MAP_RENDER_PIN_LIMIT_MID = 420
 private const val MAP_RENDER_PIN_LIMIT_NEAR_SAFE = 650
-private const val MAP_DENSE_FORCE_DOT_THRESHOLD = 700
 private const val MAP_SWEEP_ANIMATION_STEP_DEGREES = 8f
 private const val MAP_SWEEP_ANIMATION_FRAME_MS = 140L
 private const val MAP_SWEEP_DISABLE_PIN_THRESHOLD = 280
@@ -303,7 +303,6 @@ private const val DEVICE_ANALYSIS_WINDOW_MS = 24L * 60L * 60L * 1000L
 private const val DEVICE_ANALYSIS_MAX_ENCOUNTERS = 12_000
 private const val ENCOUNTERS_TAB_MAX_DATASET = 20_000
 private const val DEVICE_MAP_CANDIDATE_ENCOUNTER_CAP = 140
-private const val DEVICE_MAP_PROGRESSIVE_PUBLISH_CHUNK = 96
 private const val ACTION_OPEN_APPROACH_MAP = "dev.argus.tracker.action.OPEN_APPROACH_MAP"
 private const val ACTION_OPEN_NO_FLY_INCIDENT_PATH = "dev.argus.tracker.action.OPEN_NO_FLY_INCIDENT_PATH"
 private const val ACTION_OPEN_MAGNETIC_MONITOR = "dev.argus.tracker.action.OPEN_MAGNETIC_MONITOR"
@@ -771,6 +770,9 @@ fun ArgusApp(
     }
     var mapScannerSweepAnimationEnabled by remember {
         mutableStateOf(ScanSettings.isMapScannerSweepAnimationEnabled(context))
+    }
+    var mapScannerSweepAnimationSpeedPreset by remember {
+        mutableStateOf(ScanSettings.getMapScannerSweepAnimationSpeedPreset(context))
     }
     var mapIdentityFullNamesEnabled by remember {
         mutableStateOf(ScanSettings.isMapIdentityFullNamesEnabled(context))
@@ -1307,6 +1309,7 @@ fun ArgusApp(
         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
+        mapScannerSweepAnimationSpeedPreset = ScanSettings.getMapScannerSweepAnimationSpeedPreset(context)
         mapIdentityFullNamesEnabled = ScanSettings.isMapIdentityFullNamesEnabled(context)
         stickyCompassMapEnabled = ScanSettings.isStickyCompassMapEnabled(context)
         stickyCompassMapLiveMode = ScanSettings.getStickyCompassMapLiveMode(context)
@@ -2220,6 +2223,7 @@ fun ArgusApp(
                     mapNoFlyZonesEnabled = mapNoFlyZonesEnabled,
                     mapNoFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                    mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
                     mapIdentityFullNamesEnabled = mapIdentityFullNamesEnabled,
                     stickyCompassMapEnabled = stickyCompassMapEnabled,
                     stickyCompassMapLiveMode = stickyCompassMapLiveMode,
@@ -2229,6 +2233,14 @@ fun ArgusApp(
                     bleAggregateOnlyEnabled = bleAggregateOnlyEnabled,
                     suppressedWifiRandomizedOneOffCount = suppressedWifiRandomizedOneOffCount,
                     suppressedBleRandomizedOneOffCount = suppressedBleRandomizedOneOffCount,
+                    ownedDeviceCount = ownedDeviceKeys.size,
+                    ownedDeviceEstimatedBytes = estimateOwnedDeviceKeySetBytes(ownedDeviceKeys),
+                    recentEncounterCount = recent.size,
+                    recentEncounterEstimatedBytes = recent.sumOf { estimateEncounterHeapBytes(it) },
+                    alertLogCount = alertLogs.size,
+                    alertLogEstimatedBytes = estimateAlertLogListBytes(alertLogs),
+                    errorLogCount = errorLogs.size,
+                    errorLogEstimatedBytes = estimateOperationalErrorLogListBytes(errorLogs),
                     sourceScanIntervals = sourceScanIntervals,
                     sourceLastScanEpochs = sourceLastScanEpochs,
                     lastScanDurationMs = lastScanDurationMs,
@@ -2412,6 +2424,10 @@ fun ArgusApp(
                         mapScannerSweepAnimationEnabled = enabled
                         ScanSettings.setMapScannerSweepAnimationEnabled(context, enabled)
                     },
+                    onMapScannerSweepAnimationSpeedPresetSelected = { preset ->
+                        mapScannerSweepAnimationSpeedPreset = preset
+                        ScanSettings.setMapScannerSweepAnimationSpeedPreset(context, preset)
+                    },
                     onMapIdentityFullNamesEnabledChanged = { enabled ->
                         mapIdentityFullNamesEnabled = enabled
                         ScanSettings.setMapIdentityFullNamesEnabled(context, enabled)
@@ -2546,6 +2562,7 @@ fun ArgusApp(
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
+                        mapScannerSweepAnimationSpeedPreset = ScanSettings.getMapScannerSweepAnimationSpeedPreset(context)
                         mapIdentityFullNamesEnabled = ScanSettings.isMapIdentityFullNamesEnabled(context)
                         stickyCompassMapEnabled = ScanSettings.isStickyCompassMapEnabled(context)
                         stickyCompassMapLiveMode = ScanSettings.getStickyCompassMapLiveMode(context)
@@ -2608,6 +2625,7 @@ fun ArgusApp(
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
+                        mapScannerSweepAnimationSpeedPreset = ScanSettings.getMapScannerSweepAnimationSpeedPreset(context)
                         mapIdentityFullNamesEnabled = ScanSettings.isMapIdentityFullNamesEnabled(context)
                         stickyCompassMapEnabled = ScanSettings.isStickyCompassMapEnabled(context)
                         stickyCompassMapLiveMode = ScanSettings.getStickyCompassMapLiveMode(context)
@@ -2664,6 +2682,10 @@ fun ArgusApp(
                         ScanSettings.setMapScannerSweepAnimationEnabled(
                             context,
                             ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
+                        )
+                        ScanSettings.setMapScannerSweepAnimationSpeedPreset(
+                            context,
+                            ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
                         )
                         ScanSettings.setMapIdentityFullNamesEnabled(
                             context,
@@ -2726,6 +2748,7 @@ fun ArgusApp(
                         mapNoFlyZonesEnabled = ScanSettings.DEFAULT_MAP_NO_FLY_ZONES_ENABLED
                         mapNoFlyRenderQualityLevel = ScanSettings.DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL
                         mapScannerSweepAnimationEnabled = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED
+                        mapScannerSweepAnimationSpeedPreset = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
                         mapIdentityFullNamesEnabled = ScanSettings.DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED
                         stickyCompassMapEnabled = ScanSettings.DEFAULT_STICKY_COMPASS_MAP_ENABLED
                         stickyCompassMapLiveMode = ScanSettings.DEFAULT_STICKY_COMPASS_MAP_LIVE_MODE
@@ -2862,6 +2885,7 @@ fun ArgusApp(
                         mapNoFlyZonesEnabled = ScanSettings.isMapNoFlyZonesEnabled(context)
                         mapNoFlyRenderQualityLevel = ScanSettings.getMapNoFlyRenderQualityLevel(context)
                         mapScannerSweepAnimationEnabled = ScanSettings.isMapScannerSweepAnimationEnabled(context)
+                        mapScannerSweepAnimationSpeedPreset = ScanSettings.getMapScannerSweepAnimationSpeedPreset(context)
                         mapIdentityFullNamesEnabled = ScanSettings.isMapIdentityFullNamesEnabled(context)
                         stickyCompassMapEnabled = ScanSettings.isStickyCompassMapEnabled(context)
                         stickyCompassMapLiveMode = ScanSettings.getStickyCompassMapLiveMode(context)
@@ -2917,6 +2941,7 @@ fun ArgusApp(
                         ScanSettings.setMapClusterRangeLevel(context, level)
                     },
                     mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                    mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
                     mapIdentityFullNamesEnabled = mapIdentityFullNamesEnabled,
                     onMapIdentityFullNamesEnabledChanged = { enabled ->
                         mapIdentityFullNamesEnabled = enabled
@@ -3432,7 +3457,8 @@ fun ArgusApp(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.88f))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .clickable(onClick = {})
                 ) {
                     Column(
                         modifier = Modifier
@@ -4534,6 +4560,7 @@ private fun AppSettingsPage(
     mapNoFlyZonesEnabled: Boolean,
     mapNoFlyRenderQualityLevel: Int,
     mapScannerSweepAnimationEnabled: Boolean,
+    mapScannerSweepAnimationSpeedPreset: String,
     mapIdentityFullNamesEnabled: Boolean,
     stickyCompassMapEnabled: Boolean,
     stickyCompassMapLiveMode: String,
@@ -4543,6 +4570,14 @@ private fun AppSettingsPage(
     bleAggregateOnlyEnabled: Boolean,
     suppressedWifiRandomizedOneOffCount: Int,
     suppressedBleRandomizedOneOffCount: Int,
+    ownedDeviceCount: Int,
+    ownedDeviceEstimatedBytes: Long,
+    recentEncounterCount: Int,
+    recentEncounterEstimatedBytes: Long,
+    alertLogCount: Int,
+    alertLogEstimatedBytes: Long,
+    errorLogCount: Int,
+    errorLogEstimatedBytes: Long,
     sourceScanIntervals: Map<String, Long>,
     sourceLastScanEpochs: Map<String, Long>,
     lastScanDurationMs: Long?,
@@ -4601,6 +4636,7 @@ private fun AppSettingsPage(
     onMapNoFlyZonesEnabledChanged: (Boolean) -> Unit,
     onMapNoFlyRenderQualityLevelSelected: (Int) -> Unit,
     onMapScannerSweepAnimationEnabledChanged: (Boolean) -> Unit,
+    onMapScannerSweepAnimationSpeedPresetSelected: (String) -> Unit,
     onMapIdentityFullNamesEnabledChanged: (Boolean) -> Unit,
     onStickyCompassMapEnabledChanged: (Boolean) -> Unit,
     onStickyCompassMapLiveModeSelected: (String) -> Unit,
@@ -4632,6 +4668,7 @@ private fun AppSettingsPage(
     var themeModeExpanded by remember { mutableStateOf(false) }
     var mapClusterRangeExpanded by remember { mutableStateOf(false) }
     var noFlyRenderQualityExpanded by remember { mutableStateOf(false) }
+    var mapScannerSweepSpeedPresetExpanded by remember { mutableStateOf(false) }
     var stickyCompassMapLiveModeExpanded by remember { mutableStateOf(false) }
     var backupActionInProgress by remember { mutableStateOf(false) }
     var backupStatusMessage by remember { mutableStateOf<String?>(null) }
@@ -4652,6 +4689,11 @@ private fun AppSettingsPage(
     var defaultsResetInProgress by remember { mutableStateOf(false) }
     var selectedSettingsTab by rememberSaveable { mutableStateOf(0) }
     var memoryMonitorEnabled by rememberSaveable { mutableStateOf(true) }
+    var memoryPrettyViewEnabled by rememberSaveable { mutableStateOf(true) }
+    var runtimeSectionExpanded by rememberSaveable { mutableStateOf(true) }
+    var deviceSectionExpanded by rememberSaveable { mutableStateOf(false) }
+    var encounterSectionExpanded by rememberSaveable { mutableStateOf(false) }
+    var logsSectionExpanded by rememberSaveable { mutableStateOf(false) }
     val hasStrongPassphrase = backupPassphrase.trim().length >= 8
     val normalizedUnlockPin = fullEncryptionPin.trim()
     val normalizedUnlockPinConfirm = fullEncryptionPinConfirm.trim()
@@ -4663,7 +4705,7 @@ private fun AppSettingsPage(
         normalizedUnlockPin.isNotEmpty() && normalizedUnlockPin == normalizedUnlockPinConfirm
     val hasMatchingUnlockPassword =
         normalizedUnlockPassword.isNotEmpty() && normalizedUnlockPassword == normalizedUnlockPasswordConfirm
-    val settingsTabs = listOf("Look", "Schedule", "Detection", "Alerts", "Data")
+    val settingsTabs = listOf("Look", "Timing", "Detection", "Alerts", "Data")
     val intervalSourceTypes = ScanSettings.SOURCE_TYPES.filterNot {
         it == SourceCatalog.KEY_WIFI_DIRECT ||
             it == SourceCatalog.KEY_BT_CLASSIC ||
@@ -4916,7 +4958,39 @@ private fun AppSettingsPage(
                                 onCheckedChange = onMapScannerSweepAnimationEnabledChanged
                             )
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Scanner sweep speed")
+                            Button(
+                                onClick = { mapScannerSweepSpeedPresetExpanded = true },
+                                enabled = mapScannerSweepAnimationEnabled
+                            ) {
+                                Text(mapScannerSweepSpeedPresetLabel(mapScannerSweepAnimationSpeedPreset))
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = mapScannerSweepSpeedPresetExpanded,
+                            onDismissRequest = { mapScannerSweepSpeedPresetExpanded = false }
+                        ) {
+                            ScanSettings.ALLOWED_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESETS.forEach { preset ->
+                                DropdownMenuItem(
+                                    text = { Text(mapScannerSweepSpeedPresetLabel(preset)) },
+                                    onClick = {
+                                        onMapScannerSweepAnimationSpeedPresetSelected(preset)
+                                        mapScannerSweepSpeedPresetExpanded = false
+                                    }
+                                )
+                            }
+                        }
                         Text("Radial sweep overlay animation on maps. Turn off for better performance.")
+                        Text(
+                            "Preset behavior: Conservative prioritizes stability with dense maps, Balanced is smoother than Conservative, Smooth is the smoothest and disables dynamic pin-count speed adjustment.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -5497,6 +5571,54 @@ private fun AppSettingsPage(
                     } else {
                         0f
                     }
+                val deviceDataBytes =
+                    ownedDeviceEstimatedBytes +
+                        memorySnapshot.visibleDeviceRowsEstimatedBytes +
+                        memorySnapshot.deviceAnalysisListEstimatedBytes +
+                        memorySnapshot.deviceMapCandidateEstimatedBytes +
+                        memorySnapshot.deviceMapPinPoolEstimatedBytes +
+                        memorySnapshot.activeDeviceMapPinsEstimatedBytes
+                val encounterDataBytes =
+                    recentEncounterEstimatedBytes +
+                        memorySnapshot.visibleEncounterRowsEstimatedBytes +
+                        memorySnapshot.pipelineEncounterEstimatedBytes +
+                        memorySnapshot.deviceAnalysisWindowEstimatedBytes
+                val logsDataBytes =
+                    alertLogEstimatedBytes +
+                        errorLogEstimatedBytes
+
+                val runtimeRows = listOf(
+                    "Heap used" to memorySnapshot.usedHeapBytes,
+                    "Native heap allocated" to memorySnapshot.nativeHeapAllocatedBytes,
+                    "Process PSS" to memorySnapshot.processTotalPssBytes,
+                    "Runtime pin cache" to memorySnapshot.runtimePinEstimatedBytes,
+                    "Disk pin cache payload" to memorySnapshot.diskCachePayloadBytes,
+                    "Marker icon caches" to memorySnapshot.iconCacheEstimatedBytes
+                )
+                val deviceRows = listOf(
+                    "Owned device registry" to ownedDeviceEstimatedBytes,
+                    "Visible device rows" to memorySnapshot.visibleDeviceRowsEstimatedBytes,
+                    "Device analysis list" to memorySnapshot.deviceAnalysisListEstimatedBytes,
+                    "Device-map candidates" to memorySnapshot.deviceMapCandidateEstimatedBytes,
+                    "Device-map pin pool" to memorySnapshot.deviceMapPinPoolEstimatedBytes,
+                    "Active device-map pins" to memorySnapshot.activeDeviceMapPinsEstimatedBytes
+                )
+                val encounterRows = listOf(
+                    "Recent encounter stream" to recentEncounterEstimatedBytes,
+                    "Visible encounter rows" to memorySnapshot.visibleEncounterRowsEstimatedBytes,
+                    "Pipeline encounters" to memorySnapshot.pipelineEncounterEstimatedBytes,
+                    "Device analysis window" to memorySnapshot.deviceAnalysisWindowEstimatedBytes
+                )
+                val logRows = listOf(
+                    "Alert logs" to alertLogEstimatedBytes,
+                    "Operational error logs" to errorLogEstimatedBytes
+                )
+
+                val runtimeMax = runtimeRows.maxOfOrNull { it.second }?.coerceAtLeast(1L) ?: 1L
+                val deviceMax = deviceRows.maxOfOrNull { it.second }?.coerceAtLeast(1L) ?: 1L
+                val encounterMax = encounterRows.maxOfOrNull { it.second }?.coerceAtLeast(1L) ?: 1L
+                val logMax = logRows.maxOfOrNull { it.second }?.coerceAtLeast(1L) ?: 1L
+
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(12.dp),
@@ -5513,75 +5635,171 @@ private fun AppSettingsPage(
                                 onCheckedChange = { enabled -> memoryMonitorEnabled = enabled }
                             )
                         }
-                        LinearProgressIndicator(
-                            progress = { heapPressure },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            "Heap used ${formatBytesMiB(memorySnapshot.usedHeapBytes)} / max ${formatBytesMiB(memorySnapshot.maxHeapBytes)} (${(heapPressure * 100f).toInt()}%)"
-                        )
-                        Text(
-                            "Heap free ${formatBytesMiB(memorySnapshot.freeHeapBytes)} • allocated ${formatBytesMiB(memorySnapshot.totalHeapBytes)}"
-                        )
-                        Text(
-                            "Native heap ${formatBytesAdaptive(memorySnapshot.nativeHeapAllocatedBytes)} / ${formatBytesAdaptive(memorySnapshot.nativeHeapSizeBytes)} (free ${formatBytesAdaptive(memorySnapshot.nativeHeapFreeBytes)})"
-                        )
-                        Text(
-                            "Process PSS ${formatBytesAdaptive(memorySnapshot.processTotalPssBytes)} • private dirty ${formatBytesAdaptive(memorySnapshot.processPrivateDirtyBytes)} • shared dirty ${formatBytesAdaptive(memorySnapshot.processSharedDirtyBytes)}"
-                        )
-                        Text(
-                            "Runtime map-pin cache: ${memorySnapshot.runtimePinCount} pins • ${formatBytesAdaptive(memorySnapshot.runtimePinEstimatedBytes)} est • age ${formatAgeSeconds(memorySnapshot.runtimePinAgeMs)}"
-                        )
-                        Text(
-                            "Disk map-pin cache payload: ${memorySnapshot.diskCachePayloadChars} chars • ${formatBytesAdaptive(memorySnapshot.diskCachePayloadBytes)} UTF-8 • age ${formatAgeSeconds(memorySnapshot.diskCacheAgeMs)}"
-                        )
-                        Text(
-                            "Marker icon caches total: ${memorySnapshot.iconCacheEntryCount} entries • ${formatBytesAdaptive(memorySnapshot.iconCacheEstimatedBytes)} est"
-                        )
-                        Text(
-                            "Device icons: ${memorySnapshot.iconCacheDeviceEntries} • ${formatBytesAdaptive(memorySnapshot.iconCacheDeviceEstimatedBytes)} est"
-                        )
-                        Text(
-                            "Dot icons: ${memorySnapshot.iconCacheDotEntries} • ${formatBytesAdaptive(memorySnapshot.iconCacheDotEstimatedBytes)} est"
-                        )
-                        Text(
-                            "Aircraft icons: ${memorySnapshot.iconCacheAircraftEntries} • ${formatBytesAdaptive(memorySnapshot.iconCacheAircraftEstimatedBytes)} est"
-                        )
-                        Text(
-                            "Cluster icons: ${memorySnapshot.iconCacheClusterEntries} • ${formatBytesAdaptive(memorySnapshot.iconCacheClusterEstimatedBytes)} est"
-                        )
-                        Text(
-                            "No-fly icons: ${memorySnapshot.iconCacheNoFlyEntries} • ${formatBytesAdaptive(memorySnapshot.iconCacheNoFlyEstimatedBytes)} est"
-                        )
-                        Text(
-                            "Visible device rows: ${memorySnapshot.visibleDeviceRows} • ${formatBytesAdaptive(memorySnapshot.visibleDeviceRowsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.visibleDeviceRowsSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Visible encounter rows: ${memorySnapshot.visibleEncounterRows} • ${formatBytesAdaptive(memorySnapshot.visibleEncounterRowsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.visibleEncounterRowsSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Active device-map pins: ${memorySnapshot.activeDeviceMapPins} • ${formatBytesAdaptive(memorySnapshot.activeDeviceMapPinsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.activeDeviceMapPinsSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Pipeline encounters: ${memorySnapshot.pipelineEncounterCount} • ${formatBytesAdaptive(memorySnapshot.pipelineEncounterEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.pipelineEncounterSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Device analysis window: ${memorySnapshot.deviceAnalysisWindowCount} • ${formatBytesAdaptive(memorySnapshot.deviceAnalysisWindowEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceAnalysisWindowSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Device analysis list: ${memorySnapshot.deviceAnalysisListCount} • ${formatBytesAdaptive(memorySnapshot.deviceAnalysisListEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceAnalysisListSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Device-map candidates: ${memorySnapshot.deviceMapCandidateCount} • ${formatBytesAdaptive(memorySnapshot.deviceMapCandidateEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceMapCandidateSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Device-map pin pool: ${memorySnapshot.deviceMapPinPoolCount} • ${formatBytesAdaptive(memorySnapshot.deviceMapPinPoolEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceMapPinPoolSampleAgeMs)} ago"
-                        )
-                        Text(
-                            "Estimates exclude native bitmap payload inside map descriptors; use deltas to spot growth trends.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text("Pretty meter view", fontWeight = FontWeight.Medium)
+                            Switch(
+                                checked = memoryPrettyViewEnabled,
+                                onCheckedChange = { enabled -> memoryPrettyViewEnabled = enabled }
+                            )
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Runtime", fontWeight = FontWeight.SemiBold)
+                                    TextButton(onClick = { runtimeSectionExpanded = !runtimeSectionExpanded }) {
+                                        Text(if (runtimeSectionExpanded) "Collapse" else "Expand")
+                                    }
+                                }
+                                AnimatedVisibility(visible = runtimeSectionExpanded) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        if (memoryPrettyViewEnabled) {
+                                            LinearProgressIndicator(
+                                                progress = { heapPressure },
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Text(
+                                                "Heap used ${formatBytesMiB(memorySnapshot.usedHeapBytes)} / max ${formatBytesMiB(memorySnapshot.maxHeapBytes)} (${(heapPressure * 100f).toInt()}%)"
+                                            )
+                                            runtimeRows.forEach { (label, value) ->
+                                                val ratio = (value.toFloat() / runtimeMax.toFloat()).coerceIn(0f, 1f)
+                                                Text("$label • ${formatBytesAdaptive(value)}")
+                                                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                                            }
+                                        } else {
+                                            Text("Heap free ${formatBytesMiB(memorySnapshot.freeHeapBytes)} • allocated ${formatBytesMiB(memorySnapshot.totalHeapBytes)}")
+                                            Text("Native heap ${formatBytesAdaptive(memorySnapshot.nativeHeapAllocatedBytes)} / ${formatBytesAdaptive(memorySnapshot.nativeHeapSizeBytes)} (free ${formatBytesAdaptive(memorySnapshot.nativeHeapFreeBytes)})")
+                                            Text("Process PSS ${formatBytesAdaptive(memorySnapshot.processTotalPssBytes)} • private dirty ${formatBytesAdaptive(memorySnapshot.processPrivateDirtyBytes)} • shared dirty ${formatBytesAdaptive(memorySnapshot.processSharedDirtyBytes)}")
+                                            Text("Runtime map-pin cache: ${memorySnapshot.runtimePinCount} pins • ${formatBytesAdaptive(memorySnapshot.runtimePinEstimatedBytes)} est • age ${formatAgeSeconds(memorySnapshot.runtimePinAgeMs)}")
+                                            Text("Disk map-pin cache payload: ${memorySnapshot.diskCachePayloadChars} chars • ${formatBytesAdaptive(memorySnapshot.diskCachePayloadBytes)} UTF-8 • age ${formatAgeSeconds(memorySnapshot.diskCacheAgeMs)}")
+                                            Text("Marker icon caches total: ${memorySnapshot.iconCacheEntryCount} entries • ${formatBytesAdaptive(memorySnapshot.iconCacheEstimatedBytes)} est")
+                                        }
+                                        Text(
+                                            "Estimates exclude native bitmap payload inside map descriptors; use deltas to spot growth trends.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Device Data", fontWeight = FontWeight.SemiBold)
+                                    TextButton(onClick = { deviceSectionExpanded = !deviceSectionExpanded }) {
+                                        Text(if (deviceSectionExpanded) "Collapse" else "Expand")
+                                    }
+                                }
+                                AnimatedVisibility(visible = deviceSectionExpanded) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        if (memoryPrettyViewEnabled) {
+                                            Text("Estimated device data footprint: ${formatBytesAdaptive(deviceDataBytes)}")
+                                            deviceRows.forEach { (label, value) ->
+                                                val ratio = (value.toFloat() / deviceMax.toFloat()).coerceIn(0f, 1f)
+                                                Text("$label • ${formatBytesAdaptive(value)}")
+                                                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                                            }
+                                        } else {
+                                            Text("Owned device registry: $ownedDeviceCount entries • ${formatBytesAdaptive(ownedDeviceEstimatedBytes)} est")
+                                            Text("Visible device rows: ${memorySnapshot.visibleDeviceRows} • ${formatBytesAdaptive(memorySnapshot.visibleDeviceRowsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.visibleDeviceRowsSampleAgeMs)} ago")
+                                            Text("Device analysis list: ${memorySnapshot.deviceAnalysisListCount} • ${formatBytesAdaptive(memorySnapshot.deviceAnalysisListEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceAnalysisListSampleAgeMs)} ago")
+                                            Text("Device-map candidates: ${memorySnapshot.deviceMapCandidateCount} • ${formatBytesAdaptive(memorySnapshot.deviceMapCandidateEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceMapCandidateSampleAgeMs)} ago")
+                                            Text("Device-map pin pool: ${memorySnapshot.deviceMapPinPoolCount} • ${formatBytesAdaptive(memorySnapshot.deviceMapPinPoolEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceMapPinPoolSampleAgeMs)} ago")
+                                            Text("Active device-map pins: ${memorySnapshot.activeDeviceMapPins} • ${formatBytesAdaptive(memorySnapshot.activeDeviceMapPinsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.activeDeviceMapPinsSampleAgeMs)} ago")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Encounter Data", fontWeight = FontWeight.SemiBold)
+                                    TextButton(onClick = { encounterSectionExpanded = !encounterSectionExpanded }) {
+                                        Text(if (encounterSectionExpanded) "Collapse" else "Expand")
+                                    }
+                                }
+                                AnimatedVisibility(visible = encounterSectionExpanded) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        if (memoryPrettyViewEnabled) {
+                                            Text("Estimated encounter data footprint: ${formatBytesAdaptive(encounterDataBytes)}")
+                                            encounterRows.forEach { (label, value) ->
+                                                val ratio = (value.toFloat() / encounterMax.toFloat()).coerceIn(0f, 1f)
+                                                Text("$label • ${formatBytesAdaptive(value)}")
+                                                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                                            }
+                                        } else {
+                                            Text("Recent encounter stream: $recentEncounterCount • ${formatBytesAdaptive(recentEncounterEstimatedBytes)} est")
+                                            Text("Visible encounter rows: ${memorySnapshot.visibleEncounterRows} • ${formatBytesAdaptive(memorySnapshot.visibleEncounterRowsEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.visibleEncounterRowsSampleAgeMs)} ago")
+                                            Text("Pipeline encounters: ${memorySnapshot.pipelineEncounterCount} • ${formatBytesAdaptive(memorySnapshot.pipelineEncounterEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.pipelineEncounterSampleAgeMs)} ago")
+                                            Text("Device analysis window: ${memorySnapshot.deviceAnalysisWindowCount} • ${formatBytesAdaptive(memorySnapshot.deviceAnalysisWindowEstimatedBytes)} est • sampled ${formatAgeSeconds(memorySnapshot.deviceAnalysisWindowSampleAgeMs)} ago")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Logs Data", fontWeight = FontWeight.SemiBold)
+                                    TextButton(onClick = { logsSectionExpanded = !logsSectionExpanded }) {
+                                        Text(if (logsSectionExpanded) "Collapse" else "Expand")
+                                    }
+                                }
+                                AnimatedVisibility(visible = logsSectionExpanded) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        if (memoryPrettyViewEnabled) {
+                                            Text("Estimated log data footprint: ${formatBytesAdaptive(logsDataBytes)}")
+                                            logRows.forEach { (label, value) ->
+                                                val ratio = (value.toFloat() / logMax.toFloat()).coerceIn(0f, 1f)
+                                                Text("$label • ${formatBytesAdaptive(value)}")
+                                                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                                            }
+                                        } else {
+                                            Text("Alert logs: $alertLogCount entries • ${formatBytesAdaptive(alertLogEstimatedBytes)} est")
+                                            Text("Operational error logs: $errorLogCount entries • ${formatBytesAdaptive(errorLogEstimatedBytes)} est")
+                                            Text("Auto-adjust activity log entries: ${scanIntervalChangeEvents.size}")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6302,6 +6520,7 @@ private fun DetectionPage(
     mapClusterRangeLevel: Int,
     onMapClusterRangeLevelChanged: (Int) -> Unit,
     mapScannerSweepAnimationEnabled: Boolean,
+    mapScannerSweepAnimationSpeedPreset: String,
     mapIdentityFullNamesEnabled: Boolean,
     onMapIdentityFullNamesEnabledChanged: (Boolean) -> Unit,
     stickyCompassMapEnabled: Boolean,
@@ -6997,27 +7216,46 @@ private fun DetectionPage(
         }
     }
 
-    LaunchedEffect(allDeviceCandidates, isDeviceLocationTabActive) {
+    LaunchedEffect(allDeviceCandidates, isDeviceLocationTabActive, sourceScanIntervals) {
         if (!isDeviceLocationTabActive) {
             return@LaunchedEffect
         }
+
+        val nowEpochMs = System.currentTimeMillis()
+        val cameraSourceType = SourceCatalog.KEY_CAMERA
+        val cameraLastScanEpochMs = ScanSettings.getSourceLastScanEpochMs(context, cameraSourceType)
+        val cameraIntervalSeconds = sourceScanIntervals[cameraSourceType]
+            ?: ScanSettings.DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS
+        val cameraScanFreshnessWindowMs = maxOf(cameraIntervalSeconds * 3000L, 15_000L)
+        val hasFreshCameraSourceScan =
+            cameraLastScanEpochMs > 0L && (nowEpochMs - cameraLastScanEpochMs) <= cameraScanFreshnessWindowMs
+        val cachedCameraPins = estimatedDeviceLocationPins.filter { pin ->
+            pin.source == EncounterSource.CAMERA.name
+        }
+        val hasCameraCandidates = allDeviceCandidates.any { candidate ->
+            candidate.source == EncounterSource.CAMERA.name
+        }
+        val shouldHoldCachedCameraPins = !hasCameraCandidates && !hasFreshCameraSourceScan && cachedCameraPins.isNotEmpty()
 
         if (!deviceCandidatesPrepared) {
             return@LaunchedEffect
         }
 
         if (allDeviceCandidates.isEmpty()) {
-            estimatedDeviceLocationPins = emptyList()
+            estimatedDeviceLocationPins = if (shouldHoldCachedCameraPins) {
+                cachedCameraPins
+            } else {
+                emptyList()
+            }
             deviceMapResolveInProgress = false
             deviceMapResolveStartedEpochMs = System.currentTimeMillis()
             deviceMapResolveTotalCandidates = 0
             deviceMapResolveProcessedCandidates = 0
-            deviceMapResolvePublishedPins = 0
+            deviceMapResolvePublishedPins = estimatedDeviceLocationPins.size
             deviceMapResolveCompletedEpochMs = System.currentTimeMillis()
             return@LaunchedEffect
         }
 
-        val nowEpochMs = System.currentTimeMillis()
         deviceMapResolveInProgress = true
         deviceMapResolveStartedEpochMs = nowEpochMs
         deviceMapResolveTotalCandidates = allDeviceCandidates.size
@@ -7200,23 +7438,26 @@ private fun DetectionPage(
                 )
 
                 deviceMapResolveProcessedCandidates = index + 1
-
-                if ((index + 1) % DEVICE_MAP_PROGRESSIVE_PUBLISH_CHUNK == 0 && builtPins.isNotEmpty()) {
-                    estimatedDeviceLocationPins = builtPins.toList()
-                    deviceMapResolvePublishedPins = builtPins.size
-                }
             }
 
             builtPins
         }
 
-        estimatedDeviceLocationPins = resolvedPins
-        deviceMapResolvePublishedPins = resolvedPins.size
+        val resolvedHasCameraPins = resolvedPins.any { pin -> pin.source == EncounterSource.CAMERA.name }
+        val mergedPins = if (shouldHoldCachedCameraPins && !resolvedHasCameraPins) {
+            (resolvedPins + cachedCameraPins)
+                .distinctBy { pin -> "${pin.source}|${pin.primaryId}" }
+        } else {
+            resolvedPins
+        }
+
+        estimatedDeviceLocationPins = mergedPins
+        deviceMapResolvePublishedPins = mergedPins.size
         deviceMapResolveProcessedCandidates = deviceMapResolveTotalCandidates
         deviceMapResolveCompletedEpochMs = System.currentTimeMillis()
         deviceMapResolveInProgress = false
-        DeviceMapPinRuntimeCache.put(resolvedPins)
-        DeviceMapPinDiskCache.put(context, resolvedPins)
+        DeviceMapPinRuntimeCache.put(mergedPins)
+        DeviceMapPinDiskCache.put(context, mergedPins)
     }
 
     Column(
@@ -7668,6 +7909,7 @@ private fun DetectionPage(
                         mapClusterRangeLevel = mapClusterRangeLevel,
                         onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
                         mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                        mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
                         onPinDetailsClick = { pin ->
                             if (pin.motionBadge == "MOVING") {
                                 onMovingDeviceMapPinClick(pin.source, pin.primaryId)
@@ -7767,7 +8009,6 @@ private fun DetectionPage(
                                 .toList()
                                 .let { pins ->
                                     val preLimit = (bluetoothMapPinLimit.coerceAtLeast(1) * 2)
-                                        .coerceAtMost(MAP_RENDER_PIN_LIMIT_MID)
                                     val bounded = selectVisiblePinsWithSourceCoverage(
                                         pins = pins,
                                         pinLimit = preLimit
@@ -7796,6 +8037,7 @@ private fun DetectionPage(
                         mapClusterRangeLevel = mapClusterRangeLevel,
                         onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
                         mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                        mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
                         onPinDetailsClick = { pin ->
                             if (pin.motionBadge == "MOVING") {
                                 onMovingDeviceMapPinClick(pin.source, pin.primaryId)
@@ -7914,6 +8156,7 @@ private fun DetectionPage(
                             mapClusterRangeLevel = mapClusterRangeLevel,
                             onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
                             mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                            mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
                             onPinDetailsClick = { pin ->
                                 onDeviceMapPinClick(
                                     pin.source,
@@ -9017,6 +9260,7 @@ private data class MagneticHeatSample(
 )
 
 private data class MagneticHotspotCell(
+    val cellKey: String,
     val lat: Double,
     val lon: Double,
     val averageMagnitudeMicroTesla: Double,
@@ -9081,9 +9325,10 @@ private fun aggregateMagneticHotspots(
         }
     }
 
-    return cells.values
-        .map { acc ->
+    return cells.entries
+        .map { (cellKey, acc) ->
             MagneticHotspotCell(
+                cellKey = cellKey,
                 lat = acc.latSum / acc.count,
                 lon = acc.lonSum / acc.count,
                 averageMagnitudeMicroTesla = acc.magSum / acc.count,
@@ -9130,6 +9375,9 @@ private fun MagneticMonitorMapPage(
     val gpsRequirementOptions = ScanSettings.ALLOWED_MAGNETIC_GPS_ACCURACY_REQUIREMENT_METERS
     var pinLimitExpanded by remember { mutableStateOf(false) }
     var gpsRequirementExpanded by remember { mutableStateOf(false) }
+    var controlsExpanded by rememberSaveable { mutableStateOf(false) }
+    var hasAppliedInitialFocus by rememberSaveable { mutableStateOf(false) }
+    var lastHandledFocusRequestNonce by rememberSaveable { mutableStateOf(Int.MIN_VALUE) }
     var magneticGpsAccuracyRequirementMeters by rememberSaveable {
         mutableStateOf(ScanSettings.getMagneticGpsAccuracyRequirementMeters(context))
     }
@@ -9146,11 +9394,29 @@ private fun MagneticMonitorMapPage(
             .minOrNull()
     }
     val visibleSamples = remember(samples, pinLimit) { samples.take(pinLimit.coerceAtLeast(1)) }
+    val sampleCellDegrees = 0.00012
     val hotspotCells = remember(visibleSamples) {
         aggregateMagneticHotspots(
             samples = visibleSamples,
-            maxCells = 700
+            maxCells = 700,
+            cellDegrees = sampleCellDegrees
         )
+    }
+    val samplesByHotspotCellKey = remember(visibleSamples, sampleCellDegrees) {
+        visibleSamples
+            .groupBy { sample ->
+                val latCell = kotlin.math.floor(sample.lat / sampleCellDegrees).toInt()
+                val lonCell = kotlin.math.floor(sample.lon / sampleCellDegrees).toInt()
+                "$latCell:$lonCell"
+            }
+            .mapValues { (_, grouped) -> grouped.sortedBy { it.timestampEpochMs } }
+    }
+    var selectedHotspotCellKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedHotspotCell = remember(hotspotCells, selectedHotspotCellKey) {
+        hotspotCells.firstOrNull { it.cellKey == selectedHotspotCellKey }
+    }
+    val selectedHotspotSamples = remember(samplesByHotspotCellKey, selectedHotspotCellKey) {
+        selectedHotspotCellKey?.let { key -> samplesByHotspotCellKey[key] }.orEmpty()
     }
     val recentLiveSamples = remember(visibleSamples) {
         val latestTs = visibleSamples.maxOfOrNull { it.timestampEpochMs } ?: 0L
@@ -9158,7 +9424,13 @@ private fun MagneticMonitorMapPage(
         visibleSamples.filter { it.timestampEpochMs >= recentCutoff }.take(120)
     }
 
-    LaunchedEffect(samples, currentLocation, focusRequestNonce) {
+    val magneticCollectingNow = hasHighAccuracyFix && currentLocation != null
+    val magneticCollectionStatusLabel = if (magneticCollectingNow) "Collecting" else "Waiting"
+    val magneticCollectionStatusColor = if (magneticCollectingNow) Color(0xFF2E7D32) else Color(0xFFE65100)
+
+    LaunchedEffect(focusRequestNonce, currentLocation, samples) {
+        val shouldRefocus = !hasAppliedInitialFocus || focusRequestNonce != lastHandledFocusRequestNonce
+        if (!shouldRefocus) return@LaunchedEffect
         val target = currentLocation?.let { LatLng(it.lat, it.lon) }
             ?: samples.firstOrNull()?.let { LatLng(it.lat, it.lon) }
             ?: return@LaunchedEffect
@@ -9166,6 +9438,8 @@ private fun MagneticMonitorMapPage(
             update = CameraUpdateFactory.newLatLngZoom(target, 16f),
             durationMs = 700
         )
+        hasAppliedInitialFocus = true
+        lastHandledFocusRequestNonce = focusRequestNonce
     }
 
     Column(
@@ -9177,86 +9451,110 @@ private fun MagneticMonitorMapPage(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text("Magnetic Heatmap", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Records high-accuracy GPS magnetic samples and builds hotspot intensity over time.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    "High-accuracy GPS gate: ${if (hasHighAccuracyFix) "OPEN" else "WAITING"} (required <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m${lowestSeenAccuracyMeters?.let { " • lowest seen ${String.format(Locale.US, "%.1f", it)} m" } ?: " • lowest seen n/a"})",
-                    color = if (hasHighAccuracyFix) Color(0xFF2E7D32) else Color(0xFFE65100),
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    "GPS accuracy now: ${currentLocation?.accuracyMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"} • Requirement: <= ${String.format(Locale.US, "%.1f m", magneticGpsAccuracyRequirementMeters)} • Hotspot cells: ${hotspotCells.size} • Samples: ${samples.size}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (!hasHighAccuracyFix) {
-                    Text(
-                        "Live overlay paused while GPS gate is WAITING; historical hotspots remain visible.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFE65100),
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { controlsExpanded = !controlsExpanded },
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
-                    Box(modifier = Modifier.widthIn(min = 190.dp)) {
-                        OutlinedButton(onClick = { pinLimitExpanded = true }) {
-                            Text("Samples shown: $pinLimit")
+                    Text("Magnetic Heatmap", style = MaterialTheme.typography.titleMedium)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("●", color = magneticCollectionStatusColor, fontWeight = FontWeight.Bold)
+                        Text(
+                            magneticCollectionStatusLabel,
+                            color = magneticCollectionStatusColor,
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+                AnimatedVisibility(visible = controlsExpanded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Records high-accuracy GPS magnetic samples and builds hotspot intensity over time.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "High-accuracy GPS gate: ${if (hasHighAccuracyFix) "OPEN" else "WAITING"} (required <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m${lowestSeenAccuracyMeters?.let { " • lowest seen ${String.format(Locale.US, "%.1f", it)} m" } ?: " • lowest seen n/a"})",
+                            color = if (hasHighAccuracyFix) Color(0xFF2E7D32) else Color(0xFFE65100),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "GPS accuracy now: ${currentLocation?.accuracyMeters?.let { String.format(Locale.US, "%.1f m", it) } ?: "n/a"} • Requirement: <= ${String.format(Locale.US, "%.1f m", magneticGpsAccuracyRequirementMeters)} • Hotspot cells: ${hotspotCells.size} • Samples: ${samples.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (!hasHighAccuracyFix) {
+                            Text(
+                                "Live overlay paused while GPS gate is WAITING; historical hotspots remain visible.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFE65100),
+                                fontWeight = FontWeight.Medium
+                            )
                         }
-                        DropdownMenu(
-                            expanded = pinLimitExpanded,
-                            onDismissRequest = { pinLimitExpanded = false }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
-                            pinLimitOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option.toString()) },
-                                    onClick = {
-                                        onPinLimitChange(option)
-                                        pinLimitExpanded = false
+                            Box(modifier = Modifier.widthIn(min = 190.dp)) {
+                                OutlinedButton(onClick = { pinLimitExpanded = true }) {
+                                    Text("Samples shown: $pinLimit")
+                                }
+                                DropdownMenu(
+                                    expanded = pinLimitExpanded,
+                                    onDismissRequest = { pinLimitExpanded = false }
+                                ) {
+                                    pinLimitOptions.forEach { option ->
+                                        DropdownMenuItem(
+                                            text = { Text(option.toString()) },
+                                            onClick = {
+                                                onPinLimitChange(option)
+                                                pinLimitExpanded = false
+                                            }
+                                        )
                                     }
-                                )
+                                }
+                            }
+
+                            Button(
+                                onClick = onOpenStatusTab,
+                                modifier = Modifier.height(40.dp)
+                            ) {
+                                Text("Open Status")
                             }
                         }
-                    }
 
-                    Button(
-                        onClick = onOpenStatusTab,
-                        modifier = Modifier.height(40.dp)
-                    ) {
-                        Text("Open Status")
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    Box(modifier = Modifier.widthIn(min = 240.dp)) {
-                        OutlinedButton(onClick = { gpsRequirementExpanded = true }) {
-                            Text("GPS gate <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m")
-                        }
-                        DropdownMenu(
-                            expanded = gpsRequirementExpanded,
-                            onDismissRequest = { gpsRequirementExpanded = false }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
-                            gpsRequirementOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(String.format(Locale.US, "<= %.1f m", option)) },
-                                    onClick = {
-                                        magneticGpsAccuracyRequirementMeters = option
-                                        ScanSettings.setMagneticGpsAccuracyRequirementMeters(context, option)
-                                        gpsRequirementExpanded = false
+                            Box(modifier = Modifier.widthIn(min = 240.dp)) {
+                                OutlinedButton(onClick = { gpsRequirementExpanded = true }) {
+                                    Text("GPS gate <= ${String.format(Locale.US, "%.1f", magneticGpsAccuracyRequirementMeters)} m")
+                                }
+                                DropdownMenu(
+                                    expanded = gpsRequirementExpanded,
+                                    onDismissRequest = { gpsRequirementExpanded = false }
+                                ) {
+                                    gpsRequirementOptions.forEach { option ->
+                                        DropdownMenuItem(
+                                            text = { Text(String.format(Locale.US, "<= %.1f m", option)) },
+                                            onClick = {
+                                                magneticGpsAccuracyRequirementMeters = option
+                                                ScanSettings.setMagneticGpsAccuracyRequirementMeters(context, option)
+                                                gpsRequirementExpanded = false
+                                            }
+                                        )
                                     }
-                                )
+                                }
                             }
                         }
                     }
@@ -9319,7 +9617,11 @@ private fun MagneticMonitorMapPage(
                         radius = 1.0,
                         strokeWidth = 0f,
                         strokeColor = Color.Transparent,
-                        fillColor = hotspotColor
+                        fillColor = hotspotColor,
+                        clickable = true,
+                        onClick = {
+                            selectedHotspotCellKey = cell.cellKey
+                        }
                     )
                 }
 
@@ -9335,6 +9637,52 @@ private fun MagneticMonitorMapPage(
                     }
                 }
             }
+        }
+
+        selectedHotspotCell?.let { cell ->
+            AlertDialog(
+                onDismissRequest = { selectedHotspotCellKey = null },
+                title = { Text("Heatmap Hotspot") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Avg magnitude: ${String.format(Locale.US, "%.1f", cell.averageMagnitudeMicroTesla)} uT",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text("Samples in cell: ${cell.sampleCount}")
+                        Text("Latest sample: ${formatEpoch(cell.latestTimestampEpochMs)}")
+                        Text(
+                            "Location: ${String.format(Locale.US, "%.5f", cell.lat)}, ${String.format(Locale.US, "%.5f", cell.lon)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        if (selectedHotspotSamples.size >= 2) {
+                            Text(
+                                "Trend chart (${selectedHotspotSamples.size} samples)",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium
+                            )
+                            MagneticSignalVisualizer(
+                                samples = selectedHotspotSamples.map { it.magnitudeMicroTesla },
+                                thresholdMicroTesla = cell.averageMagnitudeMicroTesla,
+                                currentMagnitudeMicroTesla = selectedHotspotSamples.lastOrNull()?.magnitudeMicroTesla
+                            )
+                        } else {
+                            Text(
+                                "Chart unavailable for this hotspot (needs at least 2 samples).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedHotspotCellKey = null }) {
+                        Text("Close")
+                    }
+                }
+            )
         }
     }
 }
@@ -9360,6 +9708,7 @@ private fun DetectionMapPage(
     mapClusterRangeLevel: Int = ScanSettings.DEFAULT_MAP_CLUSTER_RANGE_LEVEL,
     onMapClusterRangeLevelChange: (Int) -> Unit = {},
     mapScannerSweepAnimationEnabled: Boolean = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED,
+    mapScannerSweepAnimationSpeedPreset: String = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET,
     onPinDetailsClick: (MapPin) -> Unit,
     liveUpdatesAllowed: Boolean = true,
     useSourceOnlyPinColors: Boolean = false,
@@ -9437,6 +9786,27 @@ private fun DetectionMapPage(
             legendItemsForPins(visiblePins)
         }
     }
+    var signalLinkLinesEnabled by rememberSaveable {
+        mutableStateOf(ScanSettings.isMapSignalLinkLinesEnabled(context))
+    }
+    var cameraSignalLinkInViewOnly by rememberSaveable {
+        mutableStateOf(ScanSettings.isMapSignalLinkCameraInViewOnlyEnabled(context))
+    }
+    var signalLinkAllDevicesEnabled by rememberSaveable {
+        mutableStateOf(ScanSettings.isMapSignalLinkAllDevicesEnabled(context))
+    }
+    var signalLinkAllDevicesMaxRangeMeters by rememberSaveable {
+        mutableStateOf(ScanSettings.getMapSignalLinkAllDevicesMaxRangeMeters(context))
+    }
+    var selectedSignalLinkSources by rememberSaveable {
+        mutableStateOf(ScanSettings.getMapSignalLinkSelectedSources(context))
+    }
+    val availableSignalLinkLegendItems = remember(legendItems) {
+        legendItems.filter { item -> item.source in SIGNAL_LINK_LINE_SUPPORTED_SOURCES }
+    }
+    val availableSignalLinkSources = remember(availableSignalLinkLegendItems) {
+        availableSignalLinkLegendItems.map { it.source }.toSet()
+    }
     val legendSources = remember(legendItems) { legendItems.map { it.source }.toSet() }
     var filteredVisiblePins by remember { mutableStateOf<List<MapPin>>(emptyList()) }
     LaunchedEffect(visiblePins, hiddenLegendSources, metadataFilterQuery) {
@@ -9513,6 +9883,61 @@ private fun DetectionMapPage(
         remember { mutableStateOf<DetectionLocation?>(null) }
     }
     val currentLocation = currentLocationOverride ?: observedCurrentLocation
+    val selectedSignalLinkSourceSet = remember(selectedSignalLinkSources) {
+        selectedSignalLinkSources.toSet()
+    }
+    var nearestSignalLinkTargets by remember { mutableStateOf<List<SignalLinkLineTarget>>(emptyList()) }
+    LaunchedEffect(
+        currentLocation,
+        displayFilteredPins,
+        signalLinkLinesEnabled,
+        selectedSignalLinkSourceSet,
+        cameraSignalLinkInViewOnly,
+        signalLinkAllDevicesEnabled,
+        signalLinkAllDevicesMaxRangeMeters
+    ) {
+        nearestSignalLinkTargets = withContext(Dispatchers.Default) {
+            val location = currentLocation
+            if (
+                !signalLinkLinesEnabled ||
+                    location == null ||
+                    selectedSignalLinkSourceSet.isEmpty()
+            ) {
+                emptyList()
+            } else {
+                resolveSignalLinkTargets(
+                    currentLocation = location,
+                    pins = displayFilteredPins,
+                    selectedSources = selectedSignalLinkSourceSet,
+                    cameraRequiresInView = cameraSignalLinkInViewOnly,
+                    includeAllDevices = signalLinkAllDevicesEnabled,
+                    allDevicesMaxRangeMeters = signalLinkAllDevicesMaxRangeMeters
+                )
+            }
+        }
+    }
+    val signalLinkTargetBySource = remember(nearestSignalLinkTargets) {
+        nearestSignalLinkTargets
+            .groupBy { it.source }
+            .mapValues { (_, targets) ->
+                targets.minByOrNull { target -> target.distanceMeters } ?: targets.first()
+            }
+    }
+    val signalLinkWavePhase by produceState(
+        initialValue = 0f,
+        key1 = signalLinkLinesEnabled,
+        key2 = nearestSignalLinkTargets.size
+    ) {
+        if (!signalLinkLinesEnabled || nearestSignalLinkTargets.isEmpty()) {
+            value = 0f
+            return@produceState
+        }
+        while (true) {
+            delay(120.milliseconds)
+            val next = value + 0.11f
+            value = if (next >= 1f) next - 1f else next
+        }
+    }
     var coverageAnchorLocation by remember { mutableStateOf(currentLocation) }
     var coverageAnchorUpdatedEpochMs by remember { mutableStateOf(0L) }
     LaunchedEffect(currentLocation, liveMapUpdateIntervalSeconds) {
@@ -9728,13 +10153,8 @@ private fun DetectionMapPage(
     val zoomBucket = remember(cameraPositionState.position.zoom) {
         (cameraPositionState.position.zoom * 2f).roundToInt()
     }
-    val renderPinLimit = remember(zoomBucket, pinLimit) {
-        val bucketZoom = zoomBucket / 2f
-        when {
-            bucketZoom < 8.0f -> MAP_RENDER_PIN_LIMIT_FAR
-            bucketZoom < 11.0f -> MAP_RENDER_PIN_LIMIT_MID
-            else -> pinLimit.coerceAtMost(MAP_RENDER_PIN_LIMIT_NEAR_SAFE)
-        }
+    val renderPinLimit = remember(pinLimit) {
+        pinLimit.coerceAtLeast(1)
     }
     val renderedPins by produceState(
         initialValue = displayFilteredPins,
@@ -9804,15 +10224,25 @@ private fun DetectionMapPage(
     val shouldClusterPins = remember(useDenseDotMarkers, mapClusteringEnabled) {
         useDenseDotMarkers && mapClusteringEnabled
     }
+    val signalLinkForcedSinglePinKeys = remember(nearestSignalLinkTargets) {
+        nearestSignalLinkTargets
+            .map { target -> mapPinStableKey(target.pin) }
+            .toSet()
+    }
     val mapRenderItems by produceState(
         initialValue = emptyList<MapRenderItem>(),
         key1 = renderedPins,
         key2 = shouldClusterPins,
-        key3 = "$zoomBucket|$mapClusterRangeLevel"
+        key3 = "$zoomBucket|$mapClusterRangeLevel|${signalLinkForcedSinglePinKeys.size}|${signalLinkForcedSinglePinKeys.hashCode()}"
     ) {
         value = withContext(Dispatchers.Default) {
             if (shouldClusterPins) {
-                clusterPinsForRender(renderedPins, zoomBucket / 2f, mapClusterRangeLevel)
+                clusterPinsForRender(
+                    pins = renderedPins,
+                    zoom = zoomBucket / 2f,
+                    rangeLevel = mapClusterRangeLevel,
+                    forceSinglePinKeys = signalLinkForcedSinglePinKeys
+                )
             } else {
                 renderedPins.map { pin -> MapRenderItem.SinglePin(pin) }
             }
@@ -9826,26 +10256,64 @@ private fun DetectionMapPage(
         mapScannerSweepAnimationEnabled &&
             !mapTouchInProgress
     }
-    val sweepAnimationFrameMs = remember(renderedPins.size) {
-        when {
-            renderedPins.size > 2_000 -> 320L
-            renderedPins.size > 1_200 -> 260L
-            renderedPins.size > 700 -> 210L
-            renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 170L
-            else -> MAP_SWEEP_ANIMATION_FRAME_MS
+    val safeSweepPreset = remember(mapScannerSweepAnimationSpeedPreset) {
+        mapScannerSweepAnimationSpeedPreset
+            .takeIf { it in ScanSettings.ALLOWED_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESETS }
+            ?: ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
+    }
+    val baseSweepAnimationFrameMs = remember(safeSweepPreset) {
+        when (safeSweepPreset) {
+            ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE -> 220L
+            ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH -> 90L
+            else -> 120L // Balanced
         }
     }
-    val sweepAnimationStepDegrees = remember(renderedPins.size) {
-        when {
-            renderedPins.size > 2_000 -> 16f
-            renderedPins.size > 1_200 -> 14f
-            renderedPins.size > 700 -> 12f
-            renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 10f
-            else -> MAP_SWEEP_ANIMATION_STEP_DEGREES
+    val baseSweepAnimationStepDegrees = remember(safeSweepPreset) {
+        when (safeSweepPreset) {
+            ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE -> 9f
+            ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH -> 5f
+            else -> 7f // Balanced
         }
     }
-    val effectivePreciseDotsEnabled = remember(preciseDotsEnabled, renderedPins.size) {
-        preciseDotsEnabled || renderedPins.size >= MAP_DENSE_FORCE_DOT_THRESHOLD
+    val sweepDynamicAdjustmentEnabled = remember(safeSweepPreset) {
+        safeSweepPreset != ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH
+    }
+    val sweepAnimationFrameMs = remember(renderedPins.size, baseSweepAnimationFrameMs, sweepDynamicAdjustmentEnabled, safeSweepPreset) {
+        if (!sweepDynamicAdjustmentEnabled) {
+            baseSweepAnimationFrameMs
+        } else {
+            when {
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 2_000 -> 420L
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 1_200 -> 330L
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 700 -> 280L
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 240L
+                renderedPins.size > 2_000 -> 240L
+                renderedPins.size > 1_200 -> 190L
+                renderedPins.size > 700 -> 155L
+                renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 135L
+                else -> baseSweepAnimationFrameMs
+            }
+        }
+    }
+    val sweepAnimationStepDegrees = remember(renderedPins.size, baseSweepAnimationStepDegrees, sweepDynamicAdjustmentEnabled, safeSweepPreset) {
+        if (!sweepDynamicAdjustmentEnabled) {
+            baseSweepAnimationStepDegrees
+        } else {
+            when {
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 2_000 -> 12f
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 1_200 -> 11f
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > 700 -> 10f
+                safeSweepPreset == ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE && renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 9.5f
+                renderedPins.size > 2_000 -> 10f
+                renderedPins.size > 1_200 -> 9f
+                renderedPins.size > 700 -> 8.5f
+                renderedPins.size > MAP_SWEEP_DISABLE_PIN_THRESHOLD -> 8f
+                else -> baseSweepAnimationStepDegrees
+            }
+        }
+    }
+    val effectivePreciseDotsEnabled = remember(preciseDotsEnabled) {
+        preciseDotsEnabled
     }
     val radarSweepHeadingDeg by produceState(
         initialValue = 0f,
@@ -9877,7 +10345,7 @@ private fun DetectionMapPage(
                     .asSequence()
                     .mapNotNull { item ->
                         val pin = (item as? MapRenderItem.SinglePin)?.pin ?: return@mapNotNull null
-                        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                        val key = mapPinStableKey(pin)
                         key to pin.snippetBuilder?.invoke()
                     }
                     .toMap()
@@ -10028,6 +10496,25 @@ private fun DetectionMapPage(
         hiddenLegendSources = hiddenLegendSources.intersect(legendSources)
     }
 
+    LaunchedEffect(availableSignalLinkSources) {
+        selectedSignalLinkSources = selectedSignalLinkSources.filter { source -> source in availableSignalLinkSources }
+    }
+    LaunchedEffect(signalLinkLinesEnabled) {
+        ScanSettings.setMapSignalLinkLinesEnabled(context, signalLinkLinesEnabled)
+    }
+    LaunchedEffect(cameraSignalLinkInViewOnly) {
+        ScanSettings.setMapSignalLinkCameraInViewOnlyEnabled(context, cameraSignalLinkInViewOnly)
+    }
+    LaunchedEffect(signalLinkAllDevicesEnabled) {
+        ScanSettings.setMapSignalLinkAllDevicesEnabled(context, signalLinkAllDevicesEnabled)
+    }
+    LaunchedEffect(signalLinkAllDevicesMaxRangeMeters) {
+        ScanSettings.setMapSignalLinkAllDevicesMaxRangeMeters(context, signalLinkAllDevicesMaxRangeMeters)
+    }
+    LaunchedEffect(selectedSignalLinkSources) {
+        ScanSettings.setMapSignalLinkSelectedSources(context, selectedSignalLinkSources)
+    }
+
     LaunchedEffect(renderedNoFlyZones, selectedNoFlyZoneId) {
         if (selectedNoFlyZoneId == null) return@LaunchedEffect
         if (renderedNoFlyZones.none { it.zone.id == selectedNoFlyZoneId }) {
@@ -10131,9 +10618,7 @@ private fun DetectionMapPage(
                     )
                     AssistChip(
                         onClick = {
-                            if (renderedPins.size < MAP_DENSE_FORCE_DOT_THRESHOLD) {
-                                preciseDotsEnabled = !preciseDotsEnabled
-                            }
+                            preciseDotsEnabled = !preciseDotsEnabled
                         },
                         label = {
                             Text(
@@ -10519,6 +11004,29 @@ private fun DetectionMapPage(
                                             }
                                         }
                                     }
+                                    SignalLinkLinesControlPanel(
+                                        enabled = signalLinkLinesEnabled,
+                                        onEnabledChange = { signalLinkLinesEnabled = it },
+                                        cameraInViewOnlyForLines = cameraSignalLinkInViewOnly,
+                                        onCameraInViewOnlyForLinesChange = { cameraSignalLinkInViewOnly = it },
+                                        allDevicesEnabled = signalLinkAllDevicesEnabled,
+                                        onAllDevicesEnabledChange = { signalLinkAllDevicesEnabled = it },
+                                        allDevicesMaxRangeMeters = signalLinkAllDevicesMaxRangeMeters,
+                                        onAllDevicesMaxRangeMetersChange = { meters ->
+                                            signalLinkAllDevicesMaxRangeMeters = meters
+                                        },
+                                        allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
+                                        availableSources = availableSignalLinkLegendItems,
+                                        selectedSources = selectedSignalLinkSourceSet,
+                                        onSourceCheckedChange = { source, checked ->
+                                            selectedSignalLinkSources = if (checked) {
+                                                (selectedSignalLinkSources + source).distinct()
+                                            } else {
+                                                selectedSignalLinkSources.filterNot { it == source }
+                                            }
+                                        },
+                                        activeTargetsBySource = signalLinkTargetBySource
+                                    )
                                 }
                             }
                         }
@@ -10722,6 +11230,29 @@ private fun DetectionMapPage(
                                             }
                                         }
                                     }
+                                    SignalLinkLinesControlPanel(
+                                        enabled = signalLinkLinesEnabled,
+                                        onEnabledChange = { signalLinkLinesEnabled = it },
+                                        cameraInViewOnlyForLines = cameraSignalLinkInViewOnly,
+                                        onCameraInViewOnlyForLinesChange = { cameraSignalLinkInViewOnly = it },
+                                        allDevicesEnabled = signalLinkAllDevicesEnabled,
+                                        onAllDevicesEnabledChange = { signalLinkAllDevicesEnabled = it },
+                                        allDevicesMaxRangeMeters = signalLinkAllDevicesMaxRangeMeters,
+                                        onAllDevicesMaxRangeMetersChange = { meters ->
+                                            signalLinkAllDevicesMaxRangeMeters = meters
+                                        },
+                                        allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
+                                        availableSources = availableSignalLinkLegendItems,
+                                        selectedSources = selectedSignalLinkSourceSet,
+                                        onSourceCheckedChange = { source, checked ->
+                                            selectedSignalLinkSources = if (checked) {
+                                                (selectedSignalLinkSources + source).distinct()
+                                            } else {
+                                                selectedSignalLinkSources.filterNot { it == source }
+                                            }
+                                        },
+                                        activeTargetsBySource = signalLinkTargetBySource
+                                    )
                                 }
                             }
                         }
@@ -10754,7 +11285,7 @@ private fun DetectionMapPage(
                             Text("Network: ${if (hasNetwork) "available" else "unavailable"}")
                             Text("Render stages: input=${pins.size}, visible=${visiblePins.size}, filtered=${displayFilteredPins.size}, sampled=${renderedPins.size}, mapItems=${mapRenderItems.size}")
                             Text("Pins rendered: ${renderedPins.size}/${pins.size}")
-                            Text("Dense safety: dots=${if (effectivePreciseDotsEnabled) "forced/on" else "off"}, clustering=${if (mapClusteringEnabled) "on" else "off"}, near-limit=$MAP_RENDER_PIN_LIMIT_NEAR_SAFE")
+                            Text("Dense safety: dots=${if (effectivePreciseDotsEnabled) "on" else "off"}, clustering=${if (mapClusteringEnabled) "on" else "off"}, near-limit=$MAP_RENDER_PIN_LIMIT_NEAR_SAFE")
                             additionalDiagnostics.forEach { line ->
                                 Text(line)
                             }
@@ -10857,6 +11388,27 @@ private fun DetectionMapPage(
                         mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
                         radarSweepHeadingDeg = radarSweepHeadingDeg
                     )
+                    val lineOrigin = currentLocation?.let { location -> LatLng(location.lat, location.lon) }
+                    if (signalLinkLinesEnabled && lineOrigin != null) {
+                        nearestSignalLinkTargets.forEach { target ->
+                            val lineColor = markerLegendColorForSource(target.source)
+                            val endpoint = target.pin.position
+                            Polyline(
+                                points = listOf(lineOrigin, endpoint),
+                                color = lineColor.copy(alpha = 0.35f),
+                                width = 2.5f
+                            )
+                            Polyline(
+                                points = buildSignalWavePolylinePoints(
+                                    start = lineOrigin,
+                                    end = endpoint,
+                                    phase = signalLinkWavePhase
+                                ),
+                                color = lineColor.copy(alpha = 0.92f),
+                                width = 5.5f
+                            )
+                        }
+                    }
                     MapRenderLayer(
                         mapRenderItems = mapRenderItems,
                         preciseDotsEnabled = effectivePreciseDotsEnabled,
@@ -11177,6 +11729,29 @@ private fun DetectionMapPage(
                                     }
                                 }
                             }
+                            SignalLinkLinesControlPanel(
+                                enabled = signalLinkLinesEnabled,
+                                onEnabledChange = { signalLinkLinesEnabled = it },
+                                cameraInViewOnlyForLines = cameraSignalLinkInViewOnly,
+                                onCameraInViewOnlyForLinesChange = { cameraSignalLinkInViewOnly = it },
+                                allDevicesEnabled = signalLinkAllDevicesEnabled,
+                                onAllDevicesEnabledChange = { signalLinkAllDevicesEnabled = it },
+                                allDevicesMaxRangeMeters = signalLinkAllDevicesMaxRangeMeters,
+                                onAllDevicesMaxRangeMetersChange = { meters ->
+                                    signalLinkAllDevicesMaxRangeMeters = meters
+                                },
+                                allDevicesRangeOptionsMeters = SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS,
+                                availableSources = availableSignalLinkLegendItems,
+                                selectedSources = selectedSignalLinkSourceSet,
+                                onSourceCheckedChange = { source, checked ->
+                                    selectedSignalLinkSources = if (checked) {
+                                        (selectedSignalLinkSources + source).distinct()
+                                    } else {
+                                        selectedSignalLinkSources.filterNot { it == source }
+                                    }
+                                },
+                                activeTargetsBySource = signalLinkTargetBySource
+                            )
                             Text("Pin Color Legend", fontWeight = FontWeight.Bold)
                             if (legendItems.isNotEmpty()) {
                                 OutlinedTextField(
@@ -11221,6 +11796,161 @@ private fun DetectionMapPage(
                                 Text("No source pins available for legend yet.")
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SignalLinkLinesControlPanel(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    cameraInViewOnlyForLines: Boolean,
+    onCameraInViewOnlyForLinesChange: (Boolean) -> Unit,
+    allDevicesEnabled: Boolean,
+    onAllDevicesEnabledChange: (Boolean) -> Unit,
+    allDevicesMaxRangeMeters: Double,
+    onAllDevicesMaxRangeMetersChange: (Double) -> Unit,
+    allDevicesRangeOptionsMeters: List<Double>,
+    availableSources: List<PinLegendItem>,
+    selectedSources: Set<String>,
+    onSourceCheckedChange: (String, Boolean) -> Unit,
+    activeTargetsBySource: Map<String, SignalLinkLineTarget>
+) {
+    var allDevicesRangeExpanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("Signal Link Lines", fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Draw nearest target link per selected type")
+            Switch(
+                checked = enabled,
+                onCheckedChange = onEnabledChange
+            )
+        }
+        if (!enabled) {
+            Text(
+                "Enable to render animated source-matched signal lines from your position.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@Column
+        }
+        if (availableSources.isEmpty()) {
+            Text(
+                "No line-eligible source types are visible on this map.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@Column
+        }
+        Text(
+            "One line per selected type (to the nearest visible device).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Camera line requires in-view")
+            Switch(
+                checked = cameraInViewOnlyForLines,
+                onCheckedChange = onCameraInViewOnlyForLinesChange
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Draw lines to all devices")
+            Switch(
+                checked = allDevicesEnabled,
+                onCheckedChange = onAllDevicesEnabledChange
+            )
+        }
+        if (allDevicesEnabled) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text("Max line range")
+                Button(onClick = { allDevicesRangeExpanded = true }) {
+                    Text(signalLinkRangeLabel(allDevicesMaxRangeMeters))
+                }
+                DropdownMenu(
+                    expanded = allDevicesRangeExpanded,
+                    onDismissRequest = { allDevicesRangeExpanded = false }
+                ) {
+                    allDevicesRangeOptionsMeters.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(signalLinkRangeLabel(option)) },
+                            onClick = {
+                                onAllDevicesMaxRangeMetersChange(option)
+                                allDevicesRangeExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                "Only devices within this range qualify for line drawing for checked source types.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            "Uses camera in-view gate (<= ${String.format(Locale.US, "%.0f", CAMERA_IN_VIEW_DISTANCE_THRESHOLD_METERS)} m).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (allDevicesEnabled) {
+            Text(
+                "All-devices mode active: draws to all visible devices for checked source types.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        availableSources.forEach { item ->
+            val checked = item.source in selectedSources
+            val activeTarget = activeTargetsBySource[item.source]
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = checked,
+                        onCheckedChange = { value -> onSourceCheckedChange(item.source, value) },
+                        enabled = true
+                    )
+                    Text("●", color = item.color, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.widthIn(min = 8.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text(item.label, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            activeTarget?.let { target ->
+                                "Nearest ${formatDistanceFeetMiles(target.distanceMeters)}"
+                            } ?: "No target in view",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -11359,7 +12089,7 @@ private fun MapRenderLayer(
                     0f
                 }
                 val showMarkerDetails = !preciseDotsEnabled
-                val markerKey = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+                val markerKey = mapPinStableKey(pin)
                 Marker(
                     state = markerState,
                     title = if (showMarkerDetails) pin.title else null,
@@ -11914,6 +12644,54 @@ private fun estimateStringHeapBytes(value: String?): Long {
     return 40L + (value.length.toLong() * 2L)
 }
 
+private fun estimateOwnedDeviceKeySetBytes(keys: Set<String>): Long {
+    if (keys.isEmpty()) return 0L
+    var bytes = 56L
+    keys.forEach { key ->
+        bytes += 72L
+        bytes += estimateStringHeapBytes(key)
+    }
+    return bytes
+}
+
+private fun estimateAlertLogHeapBytes(entry: AlertLogEntry): Long {
+    var bytes = 152L
+    bytes += estimateStringHeapBytes(entry.type.name)
+    bytes += estimateStringHeapBytes(entry.source)
+    bytes += estimateStringHeapBytes(entry.primaryId)
+    bytes += estimateStringHeapBytes(entry.message)
+    bytes += 24L
+    return bytes
+}
+
+private fun estimateAlertLogListBytes(entries: List<AlertLogEntry>): Long {
+    if (entries.isEmpty()) return 0L
+    var bytes = 56L
+    entries.forEach { entry ->
+        bytes += estimateAlertLogHeapBytes(entry)
+    }
+    return bytes
+}
+
+private fun estimateOperationalErrorLogHeapBytes(entry: OperationalErrorLogEntry): Long {
+    var bytes = 152L
+    bytes += estimateStringHeapBytes(entry.category)
+    bytes += estimateStringHeapBytes(entry.source)
+    bytes += estimateStringHeapBytes(entry.message)
+    bytes += estimateStringHeapBytes(entry.severity)
+    bytes += 24L
+    return bytes
+}
+
+private fun estimateOperationalErrorLogListBytes(entries: List<OperationalErrorLogEntry>): Long {
+    if (entries.isEmpty()) return 0L
+    var bytes = 56L
+    entries.forEach { entry ->
+        bytes += estimateOperationalErrorLogHeapBytes(entry)
+    }
+    return bytes
+}
+
 private fun estimateMapPinHeapBytes(pin: MapPin): Long {
     var bytes = 160L
     bytes += 16L
@@ -12441,6 +13219,41 @@ private data class PinLegendItem(
     val color: Color
 )
 
+private data class SignalLinkLineTarget(
+    val source: String,
+    val pin: MapPin,
+    val distanceMeters: Double
+)
+
+private val SIGNAL_LINK_LINE_SUPPORTED_SOURCES = setOf(
+    SourceCatalog.SOURCE_AIRCRAFT,
+    SourceCatalog.SOURCE_CAMERA,
+    SourceCatalog.SOURCE_REMOTE_ID,
+    SourceCatalog.SOURCE_CELL,
+    SourceCatalog.SOURCE_WIFI,
+    SourceCatalog.SOURCE_WIFI_SWEEP,
+    SourceCatalog.SOURCE_WIFI_DIRECT,
+    SourceCatalog.SOURCE_BLUETOOTH_LE,
+    SourceCatalog.SOURCE_BLUETOOTH_LE_SWEEP,
+    SourceCatalog.SOURCE_BLUETOOTH_CLASSIC,
+    SourceCatalog.SOURCE_NFC,
+    SourceCatalog.SOURCE_SDR,
+    SourceCatalog.SOURCE_UNKNOWN_RF,
+    SourceCatalog.SOURCE_ARGUS_MESH
+)
+
+private val SIGNAL_LINK_ALL_RANGE_OPTIONS_METERS = listOf(
+    100.0,
+    250.0,
+    500.0,
+    1000.0,
+    2500.0,
+    5000.0,
+    10000.0,
+    25000.0,
+    50000.0
+)
+
 private sealed class MapRenderItem {
     data class SinglePin(val pin: MapPin) : MapRenderItem()
 
@@ -12526,6 +13339,119 @@ private fun offsetLatLng(base: LatLng, distanceMeters: Double, bearingDegrees: D
     )
 
     return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
+}
+
+private fun resolveSignalLinkTargets(
+    currentLocation: DetectionLocation,
+    pins: List<MapPin>,
+    selectedSources: Set<String>,
+    cameraRequiresInView: Boolean = false,
+    includeAllDevices: Boolean = false,
+    allDevicesMaxRangeMeters: Double = 5000.0
+): List<SignalLinkLineTarget> {
+    if (pins.isEmpty()) return emptyList()
+    if (selectedSources.isEmpty()) return emptyList()
+
+    fun cameraPasses(distanceMeters: Double, source: String): Boolean {
+        if (source != SourceCatalog.SOURCE_CAMERA || !cameraRequiresInView) return true
+        return distanceMeters <= CAMERA_IN_VIEW_DISTANCE_THRESHOLD_METERS
+    }
+
+    if (includeAllDevices) {
+        val maxRange = allDevicesMaxRangeMeters.coerceAtLeast(1.0)
+        return pins
+            .asSequence()
+            .filter { pin -> pin.source in selectedSources }
+            .mapNotNull { pin ->
+                val distance = distanceFromLocationMeters(
+                    fromLat = currentLocation.lat,
+                    fromLon = currentLocation.lon,
+                    toLat = pin.position.latitude,
+                    toLon = pin.position.longitude
+                ) ?: return@mapNotNull null
+                if (distance > maxRange) return@mapNotNull null
+                if (!cameraPasses(distance, pin.source)) return@mapNotNull null
+                SignalLinkLineTarget(
+                    source = pin.source,
+                    pin = pin,
+                    distanceMeters = distance
+                )
+            }
+            .sortedBy { it.distanceMeters }
+            .toList()
+    }
+
+    return selectedSources
+        .mapNotNull { source ->
+            val nearest = pins
+                .asSequence()
+                .filter { pin -> pin.source == source }
+                .mapNotNull { pin ->
+                    val distance = distanceFromLocationMeters(
+                        fromLat = currentLocation.lat,
+                        fromLon = currentLocation.lon,
+                        toLat = pin.position.latitude,
+                        toLon = pin.position.longitude
+                    ) ?: return@mapNotNull null
+                    pin to distance
+                }
+                .filter { (_, distance) -> cameraPasses(distance, source) }
+                .minByOrNull { (_, distance) -> distance }
+
+            nearest?.let { (pin, distance) ->
+                SignalLinkLineTarget(
+                    source = source,
+                    pin = pin,
+                    distanceMeters = distance
+                )
+            }
+        }
+        .sortedBy { it.distanceMeters }
+}
+
+private fun signalLinkRangeLabel(meters: Double): String {
+    return if (meters >= 1000.0) {
+        String.format(Locale.US, "%.1f km", meters / 1000.0)
+    } else {
+        String.format(Locale.US, "%.0f m", meters)
+    }
+}
+
+private fun buildSignalWavePolylinePoints(
+    start: LatLng,
+    end: LatLng,
+    phase: Float,
+    waveCount: Int = 7,
+    sampleCount: Int = 56
+): List<LatLng> {
+    val distanceMeters = distanceFromLocationMeters(
+        fromLat = start.latitude,
+        fromLon = start.longitude,
+        toLat = end.latitude,
+        toLon = end.longitude
+    ) ?: return listOf(start, end)
+    if (!distanceMeters.isFinite() || distanceMeters < 5.0) return listOf(start, end)
+
+    val heading = bearingDegrees(start, end) ?: return listOf(start, end)
+    val safeSamples = sampleCount.coerceAtLeast(8)
+    val ampMeters = (distanceMeters * 0.012).coerceIn(4.0, 22.0)
+    val phaseRad = (phase % 1f) * (2f * Math.PI.toFloat())
+    val points = ArrayList<LatLng>(safeSamples + 1)
+
+    for (index in 0..safeSamples) {
+        val t = index.toDouble() / safeSamples.toDouble()
+        val alongMeters = distanceMeters * t
+        val basePoint = offsetLatLng(start, alongMeters, heading)
+        val envelope = sin(Math.PI * t).coerceAtLeast(0.0)
+        val offsetMeters = sin((t * waveCount * 2.0 * Math.PI) + phaseRad) * ampMeters * envelope
+        val point = if (offsetMeters == 0.0) {
+            basePoint
+        } else {
+            offsetLatLng(basePoint, kotlin.math.abs(offsetMeters), heading + if (offsetMeters >= 0.0) 90.0 else -90.0)
+        }
+        points += point
+    }
+    return points
 }
 
 private fun buildRadarSweepSectorPoints(
@@ -12760,6 +13686,11 @@ private fun noFlyZoneAltitudeLabel(zone: NoFlyZoneOverlayProvider.NoFlyZonePolyg
     else -> "Altitude: unspecified"
 }
 
+private fun mapPinStableKey(pin: MapPin): String {
+    val secondaryIdPart = pin.secondaryId.orEmpty()
+    return "${pin.source}|${pin.primaryId}|$secondaryIdPart|${pin.timestampEpochMs}|${pin.position.latitude}|${pin.position.longitude}"
+}
+
 private fun selectVisiblePinsWithSourceCoverage(pins: List<MapPin>, pinLimit: Int): List<MapPin> {
     if (pins.isEmpty()) return emptyList()
     val safeLimit = pinLimit.coerceAtLeast(1)
@@ -12781,12 +13712,12 @@ private fun selectVisiblePinsWithSourceCoverage(pins: List<MapPin>, pinLimit: In
 
     val selected = LinkedHashMap<String, MapPin>()
     newestPerSource.forEach { pin ->
-        selected["${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"] = pin
+        selected[mapPinStableKey(pin)] = pin
     }
 
     pins.forEach { pin ->
         if (selected.size >= safeLimit) return@forEach
-        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        val key = mapPinStableKey(pin)
         if (!selected.containsKey(key)) {
             selected[key] = pin
         }
@@ -13051,7 +13982,7 @@ private fun samplePinsForCamera(pins: List<MapPin>, maxPoints: Int): List<MapPin
 
     fun add(pin: MapPin?) {
         if (pin == null || selected.size >= safeLimit) return
-        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        val key = mapPinStableKey(pin)
         selected[key] = pin
     }
 
@@ -13089,7 +14020,7 @@ private fun samplePinsForRender(pins: List<MapPin>, maxPoints: Int): List<MapPin
 
     val selected = LinkedHashMap<String, MapPin>()
     newestPerSource.take(safeLimit).forEach { pin ->
-        val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+        val key = mapPinStableKey(pin)
         selected[key] = pin
     }
 
@@ -13098,7 +14029,7 @@ private fun samplePinsForRender(pins: List<MapPin>, maxPoints: Int): List<MapPin
         var index = 0.0
         while (selected.size < safeLimit && index < pins.size) {
             val pin = pins[index.toInt().coerceIn(0, pins.lastIndex)]
-            val key = "${pin.source}|${pin.primaryId}|${pin.timestampEpochMs}"
+            val key = mapPinStableKey(pin)
             selected[key] = pin
             index += step
         }
@@ -13502,6 +14433,12 @@ private fun stickyCompassMapLiveModeLabel(mode: String): String = when (mode) {
     else -> "Follow Device Map"
 }
 
+private fun mapScannerSweepSpeedPresetLabel(preset: String): String = when (preset) {
+    ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE -> "Conservative"
+    ScanSettings.MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH -> "Smooth"
+    else -> "Balanced"
+}
+
 private data class NoFlyRenderQualityProfile(
     val maxRenderCount: Int,
     val maxMarkerCount: Int,
@@ -13535,52 +14472,115 @@ private fun mapClusterRangeScale(level: Int): Double = when (level) {
     else -> 1.00
 }
 
-private fun clusterPinsForRender(pins: List<MapPin>, zoom: Float, rangeLevel: Int): List<MapRenderItem> {
+private fun clusterPinsForRender(
+    pins: List<MapPin>,
+    zoom: Float,
+    rangeLevel: Int,
+    forceSinglePinKeys: Set<String> = emptySet()
+): List<MapRenderItem> {
     if (pins.size < 8) {
         return pins.map { MapRenderItem.SinglePin(it) }
     }
 
-    val baseCellDegrees = when {
-        zoom < 7.0f -> 0.25
-        zoom < 9.0f -> 0.12
-        zoom < 11.0f -> 0.06
-        else -> 0.03
+    // At high zoom levels, render all pins individually for precise inspection.
+    if (zoom >= 13.5f) {
+        return pins.map { MapRenderItem.SinglePin(it) }
     }
-    val cellDegrees = (baseCellDegrees * mapClusterRangeScale(rangeLevel)).coerceAtLeast(0.01)
 
-    val grouped = LinkedHashMap<String, MutableList<MapPin>>()
-    pins.forEach { pin ->
-        val latKey = kotlin.math.floor(pin.position.latitude / cellDegrees).toInt()
-        val lonKey = kotlin.math.floor(pin.position.longitude / cellDegrees).toInt()
+    val baseClusterRadiusMeters = when {
+        zoom < 7.0f -> 18_000.0
+        zoom < 9.0f -> 9_000.0
+        zoom < 11.0f -> 4_500.0
+        else -> 2_200.0
+    }
+    val clusterRadiusMeters = (baseClusterRadiusMeters * mapClusterRangeScale(rangeLevel)).coerceAtLeast(150.0)
+
+    val latCellDegrees = (clusterRadiusMeters / 111_132.0).coerceAtLeast(0.001)
+    val lonCellDegrees = latCellDegrees
+
+    val stableKeys = pins.map(::mapPinStableKey)
+    val bucketToIndices = LinkedHashMap<String, MutableList<Int>>()
+    pins.forEachIndexed { index, pin ->
+        val latKey = kotlin.math.floor(pin.position.latitude / latCellDegrees).toInt()
+        val lonKey = kotlin.math.floor(pin.position.longitude / lonCellDegrees).toInt()
         val key = "$latKey:$lonKey"
-        grouped.getOrPut(key) { mutableListOf() }.add(pin)
+        bucketToIndices.getOrPut(key) { mutableListOf() }.add(index)
     }
 
-    return grouped.values.map { bucket ->
-        if (bucket.size == 1) {
-            MapRenderItem.SinglePin(bucket.first())
-        } else {
-            val lat = bucket.map { it.position.latitude }.average()
-            val lon = bucket.map { it.position.longitude }.average()
-            val sourceCounts = bucket.groupingBy { it.source }.eachCount()
-            val dominantSource = sourceCounts.maxByOrNull { it.value }?.key ?: "UNKNOWN_RF"
-            val liveCount = bucket.count { it.isLive }
-            val topSourcesSummary = sourceCounts.entries
-                .sortedByDescending { it.value }
-                .take(3)
-                .joinToString(" • ") { (source, count) ->
-                    "${markerLegendLabelForSource(source)} $count"
-                }
-            val summary = "${bucket.size} pins • Live $liveCount • $topSourcesSummary"
-            MapRenderItem.Cluster(
-                position = LatLng(lat, lon),
-                count = bucket.size,
-                source = dominantSource,
-                summary = summary,
-                isLive = liveCount > 0
-            )
+    val visited = BooleanArray(pins.size)
+    val result = ArrayList<MapRenderItem>(pins.size)
+
+    pins.indices.forEach { seedIndex ->
+        if (visited[seedIndex]) return@forEach
+
+        val seed = pins[seedIndex]
+        val seedStableKey = stableKeys[seedIndex]
+        if (seedStableKey in forceSinglePinKeys) {
+            visited[seedIndex] = true
+            result += MapRenderItem.SinglePin(seed)
+            return@forEach
         }
+        val seedLatKey = kotlin.math.floor(seed.position.latitude / latCellDegrees).toInt()
+        val seedLonKey = kotlin.math.floor(seed.position.longitude / lonCellDegrees).toInt()
+
+        val memberIndices = mutableListOf<Int>()
+        for (latOffset in -1..1) {
+            for (lonOffset in -1..1) {
+                val key = "${seedLatKey + latOffset}:${seedLonKey + lonOffset}"
+                val candidates = bucketToIndices[key] ?: continue
+                candidates.forEach { candidateIndex ->
+                    if (visited[candidateIndex]) return@forEach
+                    val candidateStableKey = stableKeys[candidateIndex]
+                    if (candidateStableKey in forceSinglePinKeys) return@forEach
+                    val candidate = pins[candidateIndex]
+                    val distanceMeters = distanceFromLocationMeters(
+                        fromLat = seed.position.latitude,
+                        fromLon = seed.position.longitude,
+                        toLat = candidate.position.latitude,
+                        toLon = candidate.position.longitude
+                    ) ?: return@forEach
+                    if (distanceMeters <= clusterRadiusMeters) {
+                        visited[candidateIndex] = true
+                        memberIndices += candidateIndex
+                    }
+                }
+            }
+        }
+
+        if (memberIndices.isEmpty()) {
+            visited[seedIndex] = true
+            result += MapRenderItem.SinglePin(seed)
+            return@forEach
+        }
+
+        if (memberIndices.size == 1) {
+            result += MapRenderItem.SinglePin(seed)
+            return@forEach
+        }
+
+        val bucket = memberIndices.map { pins[it] }
+        val lat = bucket.map { it.position.latitude }.average()
+        val lon = bucket.map { it.position.longitude }.average()
+        val sourceCounts = bucket.groupingBy { it.source }.eachCount()
+        val dominantSource = sourceCounts.maxByOrNull { it.value }?.key ?: "UNKNOWN_RF"
+        val liveCount = bucket.count { it.isLive }
+        val topSourcesSummary = sourceCounts.entries
+            .sortedByDescending { it.value }
+            .take(3)
+            .joinToString(" • ") { (source, count) ->
+                "${markerLegendLabelForSource(source)} $count"
+            }
+        val summary = "${bucket.size} pins • Live $liveCount • $topSourcesSummary"
+        result += MapRenderItem.Cluster(
+            position = LatLng(lat, lon),
+            count = bucket.size,
+            source = dominantSource,
+            summary = summary,
+            isLive = liveCount > 0
+        )
     }
+
+    return result
 }
 
 private fun clusterMarkerIcon(cluster: MapRenderItem.Cluster): BitmapDescriptor {
@@ -13734,29 +14734,8 @@ private fun markerAircraftIconForPin(pin: MapPin, useSourceOnlyPinColors: Boolea
     return markerAircraftIconForPin(pin, useSourceOnlyPinColors, compact = false)
 }
 
-private fun aircraftAffiliationFromPin(pin: MapPin): AircraftAffiliation {
-    return when (pin.aircraftAffiliation?.trim()?.lowercase(Locale.US)) {
-        "military" -> AircraftAffiliation.MILITARY
-        "government" -> AircraftAffiliation.GOVERNMENT
-        "emergency" -> AircraftAffiliation.EMERGENCY
-        "civilian" -> AircraftAffiliation.CIVILIAN
-        else -> AircraftAffiliation.UNKNOWN
-    }
-}
-
-private fun aircraftAffiliationBackplateColor(affiliation: AircraftAffiliation): Color {
-    return when (affiliation) {
-        AircraftAffiliation.MILITARY -> Color(0xFF8B1D1D)
-        AircraftAffiliation.GOVERNMENT -> Color(0xFF5D4037)
-        AircraftAffiliation.EMERGENCY -> Color(0xFF00695C)
-        AircraftAffiliation.CIVILIAN -> Color(0xFF0D47A1)
-        AircraftAffiliation.UNKNOWN -> Color(0xFF37474F)
-    }
-}
-
 private fun aircraftMarkerAnchorY(pin: MapPin, compact: Boolean): Float {
-    if (compact) return 0.5f
-    return if (pin.aircraftLabel.isNullOrBlank()) 0.54f else 0.72f
+    return 0.5f
 }
 
 private fun markerAircraftIconForPin(
@@ -13766,71 +14745,20 @@ private fun markerAircraftIconForPin(
 ): BitmapDescriptor {
     val aircraftIconType = pin.aircraftIconType?.trim()?.lowercase(Locale.US).orEmpty()
     val isHelicopter = aircraftIconType.contains("heli")
-    val affiliation = aircraftAffiliationFromPin(pin)
-    val affiliationBackplate = aircraftAffiliationBackplateColor(affiliation)
+    val bgColor = markerBackgroundColorForPin(pin, useSourceOnlyPinColors)
     val alpha = if (pin.isLive) 255 else 150
-    val labelText = if (compact) {
-        null
-    } else {
-        normalizeAircraftDisplayLabel(pin.aircraftLabel)
-    }
-    val key = "aircraft|${if (isHelicopter) "heli" else "plane"}|${if (compact) "compact" else "regular"}|${affiliation.name}|${labelText.orEmpty()}|$alpha"
+    val key = "aircraft|${if (isHelicopter) "heli" else "plane"}|${if (compact) "compact" else "regular"}|${bgColor.toArgb()}|$alpha"
     aircraftMarkerIconCache[key]?.let { return it }
 
-    val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        style = android.graphics.Paint.Style.FILL
-        color = android.graphics.Color.argb(alpha, 236, 246, 248)
-        textAlign = android.graphics.Paint.Align.CENTER
-        textSize = 8f
-        typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, android.graphics.Typeface.BOLD)
-    }
-    val labelWidth = labelText?.let { labelPaint.measureText(it) } ?: 0f
-    val iconBoxSize = if (compact) 28f else 34f
-    val topLabelHeight = if (labelText == null) 0f else 9f
-    val width = maxOf(iconBoxSize + 8f, if (labelWidth > 0f) labelWidth + 7f else 0f).toInt().coerceAtLeast(28)
-    val height = (topLabelHeight + iconBoxSize + 6f).toInt().coerceAtLeast(28)
+    val width = if (compact) 28 else 34
+    val height = if (compact) 28 else 34
     val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
-
-    val labelBgPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        style = android.graphics.Paint.Style.FILL
-        color = android.graphics.Color.argb(alpha, 16, 33, 34)
-    }
-    if (labelText != null) {
-        val labelRect = android.graphics.RectF(3f, 2f, width - 3f, topLabelHeight)
-        canvas.drawRoundRect(labelRect, 4f, 4f, labelBgPaint)
-        val labelY = labelRect.centerY() - (labelPaint.descent() + labelPaint.ascent()) / 2f
-        canvas.drawText(labelText, labelRect.centerX(), labelY, labelPaint)
-    }
-
-    val iconTop = if (labelText == null) 2f else topLabelHeight
-    val iconRect = android.graphics.RectF(
-        (width - iconBoxSize) / 2f,
-        iconTop,
-        (width + iconBoxSize) / 2f,
-        iconTop + iconBoxSize
-    )
-    val iconBackplateFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        style = android.graphics.Paint.Style.FILL_AND_STROKE
-        color = android.graphics.Color.argb(
-            alpha,
-            (affiliationBackplate.red * 255f).toInt(),
-            (affiliationBackplate.green * 255f).toInt(),
-            (affiliationBackplate.blue * 255f).toInt()
-        )
-    }
-    val iconBackplateStroke = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        style = android.graphics.Paint.Style.STROKE
-        strokeWidth = if (compact) 1f else 1.2f
-        color = android.graphics.Color.argb(alpha, 7, 13, 16)
-    }
-    canvas.drawRoundRect(iconRect, 8f, 8f, iconBackplateFill)
-    canvas.drawRoundRect(iconRect, 8f, 8f, iconBackplateStroke)
 
     val planePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.FILL_AND_STROKE
         strokeWidth = if (compact) 1.1f else 1.3f
-        color = android.graphics.Color.argb(alpha, 244, 250, 252)
+        color = android.graphics.Color.argb(alpha, bgColor.red.times(255f).toInt(), bgColor.green.times(255f).toInt(), bgColor.blue.times(255f).toInt())
     }
 
     val outlinePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -13839,11 +14767,11 @@ private fun markerAircraftIconForPin(
         color = android.graphics.Color.argb(alpha, 8, 16, 18)
     }
 
-    val cx = iconRect.centerX()
-    val cy = iconRect.centerY()
+    val cx = width / 2f
+    val cy = height / 2f
     if (isHelicopter) {
-        val bodyWidth = if (compact) 7.2f else 8.6f
-        val bodyHeight = if (compact) 10.2f else 12.0f
+        val bodyWidth = if (compact) 7.5f else 9.0f
+        val bodyHeight = if (compact) 10.5f else 12.5f
         val bodyRect = android.graphics.RectF(
             cx - bodyWidth / 2f,
             cy - bodyHeight / 2f,
@@ -13853,7 +14781,7 @@ private fun markerAircraftIconForPin(
         canvas.drawRoundRect(bodyRect, 3.2f, 3.2f, planePaint)
         canvas.drawRoundRect(bodyRect, 3.2f, 3.2f, outlinePaint)
 
-        val tailLength = if (compact) 8.8f else 11.0f
+        val tailLength = if (compact) 9.5f else 12.0f
         val tailWidth = if (compact) 1.5f else 1.8f
         val tailRect = android.graphics.RectF(
             cx - tailWidth / 2f,
@@ -13864,19 +14792,19 @@ private fun markerAircraftIconForPin(
         canvas.drawRoundRect(tailRect, 1.2f, 1.2f, planePaint)
         canvas.drawRoundRect(tailRect, 1.2f, 1.2f, outlinePaint)
 
-        val mastTopY = bodyRect.top - (if (compact) 1.8f else 2.2f)
-        val rotorHalf = if (compact) 9.8f else 11.6f
+        val mastTopY = bodyRect.top - (if (compact) 2.0f else 2.4f)
+        val rotorHalf = if (compact) 10.8f else 13.2f
         canvas.drawLine(cx - rotorHalf, mastTopY, cx + rotorHalf, mastTopY, outlinePaint)
         canvas.drawLine(cx, mastTopY - 1.5f, cx, mastTopY + 1.5f, outlinePaint)
 
-        val skidY = bodyRect.bottom + (if (compact) 2.0f else 2.6f)
-        val skidHalf = if (compact) 6.2f else 7.8f
+        val skidY = bodyRect.bottom + (if (compact) 2.2f else 2.8f)
+        val skidHalf = if (compact) 7.0f else 8.2f
         canvas.drawLine(cx - skidHalf, skidY, cx + skidHalf, skidY, outlinePaint)
     } else {
-        val bodyHalf = if (compact) 6.8f else 8.0f
-        val wingHalf = if (compact) 10.3f else 12.0f
-        val nose = if (compact) 10.8f else 12.6f
-        val tail = if (compact) 7.0f else 8.4f
+        val bodyHalf = if (compact) 7f else 8.5f
+        val wingHalf = if (compact) 11f else 13f
+        val nose = if (compact) 11.5f else 13.5f
+        val tail = if (compact) 7.5f else 9f
         val planePath = android.graphics.Path().apply {
             moveTo(cx, cy - nose)
             lineTo(cx + (if (compact) 2.2f else 2.6f), cy - bodyHalf)
@@ -13895,10 +14823,10 @@ private fun markerAircraftIconForPin(
         canvas.drawPath(planePath, outlinePaint)
 
         val tailPath = android.graphics.Path().apply {
-            moveTo(cx - (if (compact) 1.3f else 1.6f), cy + (if (compact) 6.6f else 7.8f))
-            lineTo(cx - (if (compact) 4.0f else 4.8f), cy + (if (compact) 10.0f else 11.4f))
-            lineTo(cx + (if (compact) 4.0f else 4.8f), cy + (if (compact) 10.0f else 11.4f))
-            lineTo(cx + (if (compact) 1.3f else 1.6f), cy + (if (compact) 6.6f else 7.8f))
+            moveTo(cx - (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
+            lineTo(cx - (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
+            lineTo(cx + (if (compact) 4.2f else 5.0f), cy + (if (compact) 10.6f else 12.0f))
+            lineTo(cx + (if (compact) 1.3f else 1.6f), cy + (if (compact) 7f else 8.2f))
             close()
         }
         canvas.drawPath(tailPath, planePaint)

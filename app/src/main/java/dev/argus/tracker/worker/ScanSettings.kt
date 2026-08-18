@@ -70,7 +70,13 @@ object ScanSettings {
     private const val KEY_MAP_NO_FLY_ZONES_ENABLED = "map_no_fly_zones_enabled"
     private const val KEY_MAP_NO_FLY_RENDER_QUALITY_LEVEL = "map_no_fly_render_quality_level"
     private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = "map_scanner_sweep_animation_enabled"
+    private const val KEY_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET = "map_scanner_sweep_animation_speed_preset"
     private const val KEY_MAP_IDENTITY_FULL_NAMES_ENABLED = "map_identity_full_names_enabled"
+    private const val KEY_MAP_SIGNAL_LINK_LINES_ENABLED = "map_signal_link_lines_enabled"
+    private const val KEY_MAP_SIGNAL_LINK_CAMERA_IN_VIEW_ONLY = "map_signal_link_camera_in_view_only"
+    private const val KEY_MAP_SIGNAL_LINK_ALL_DEVICES_ENABLED = "map_signal_link_all_devices_enabled"
+    private const val KEY_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS = "map_signal_link_all_devices_max_range_meters"
+    private const val KEY_MAP_SIGNAL_LINK_SELECTED_SOURCES = "map_signal_link_selected_sources"
     private const val KEY_STICKY_COMPASS_MAP_ENABLED = "sticky_compass_map_enabled"
     private const val KEY_STICKY_COMPASS_MAP_LIVE_MODE = "sticky_compass_map_live_mode"
     private const val KEY_STICKY_COMPASS_MAP_PIP_ELIGIBLE = "sticky_compass_map_pip_eligible"
@@ -113,7 +119,19 @@ object ScanSettings {
     const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
     const val DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL = 2
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
+    const val MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE = "CONSERVATIVE"
+    const val MAP_SCANNER_SWEEP_SPEED_PRESET_BALANCED = "BALANCED"
+    const val MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH = "SMOOTH"
+    const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET = MAP_SCANNER_SWEEP_SPEED_PRESET_BALANCED
     const val DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED = false
+    const val DEFAULT_MAP_SIGNAL_LINK_LINES_ENABLED = true
+    const val DEFAULT_MAP_SIGNAL_LINK_CAMERA_IN_VIEW_ONLY = true
+    const val DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_ENABLED = false
+    const val DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS = 5000.0
+    val DEFAULT_MAP_SIGNAL_LINK_SELECTED_SOURCES = listOf(
+        SourceCatalog.SOURCE_AIRCRAFT,
+        SourceCatalog.SOURCE_CAMERA
+    )
     const val DEFAULT_STICKY_COMPASS_MAP_ENABLED = false
     const val STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP = "FOLLOW_DEVICE_MAP"
     const val STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY = "FORCE_LIVE_ONLY"
@@ -150,6 +168,22 @@ object ScanSettings {
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
     val ALLOWED_MAP_CLUSTER_RANGE_LEVELS = (1..5).toList()
     val ALLOWED_MAP_NO_FLY_RENDER_QUALITY_LEVELS = (1..3).toList()
+    val ALLOWED_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESETS = listOf(
+        MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE,
+        MAP_SCANNER_SWEEP_SPEED_PRESET_BALANCED,
+        MAP_SCANNER_SWEEP_SPEED_PRESET_SMOOTH
+    )
+    val ALLOWED_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS = listOf(
+        100.0,
+        250.0,
+        500.0,
+        1000.0,
+        2500.0,
+        5000.0,
+        10000.0,
+        25000.0,
+        50000.0
+    )
     val ALLOWED_STICKY_COMPASS_MAP_LIVE_MODES = listOf(
         STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP,
         STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY
@@ -1003,6 +1037,29 @@ object ScanSettings {
             .apply()
     }
 
+    fun getMapScannerSweepAnimationSpeedPreset(context: Context): String {
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getString(
+                KEY_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET,
+                DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
+            )
+            .orEmpty()
+            .trim()
+            .uppercase(Locale.US)
+        return raw.takeIf { it in ALLOWED_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESETS }
+            ?: DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
+    }
+
+    fun setMapScannerSweepAnimationSpeedPreset(context: Context, preset: String) {
+        val safe = preset.trim().uppercase(Locale.US)
+            .takeIf { it in ALLOWED_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESETS }
+            ?: DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putString(KEY_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET, safe)
+            .apply()
+    }
+
     fun isMapIdentityFullNamesEnabled(context: Context): Boolean =
         SecureSettingsStore.prefs(context, PREFS_NAME)
             .getBoolean(KEY_MAP_IDENTITY_FULL_NAMES_ENABLED, DEFAULT_MAP_IDENTITY_FULL_NAMES_ENABLED)
@@ -1011,6 +1068,96 @@ object ScanSettings {
         SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
             .putBoolean(KEY_MAP_IDENTITY_FULL_NAMES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMapSignalLinkLinesEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(KEY_MAP_SIGNAL_LINK_LINES_ENABLED, DEFAULT_MAP_SIGNAL_LINK_LINES_ENABLED)
+
+    fun setMapSignalLinkLinesEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_MAP_SIGNAL_LINK_LINES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isMapSignalLinkCameraInViewOnlyEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(
+                KEY_MAP_SIGNAL_LINK_CAMERA_IN_VIEW_ONLY,
+                DEFAULT_MAP_SIGNAL_LINK_CAMERA_IN_VIEW_ONLY
+            )
+
+    fun setMapSignalLinkCameraInViewOnlyEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_MAP_SIGNAL_LINK_CAMERA_IN_VIEW_ONLY, enabled)
+            .apply()
+    }
+
+    fun isMapSignalLinkAllDevicesEnabled(context: Context): Boolean =
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getBoolean(
+                KEY_MAP_SIGNAL_LINK_ALL_DEVICES_ENABLED,
+                DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_ENABLED
+            )
+
+    fun setMapSignalLinkAllDevicesEnabled(context: Context, enabled: Boolean) {
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putBoolean(KEY_MAP_SIGNAL_LINK_ALL_DEVICES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getMapSignalLinkAllDevicesMaxRangeMeters(context: Context): Double {
+        val raw = SecureSettingsStore.prefs(context, PREFS_NAME)
+            .getFloat(
+                KEY_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS,
+                DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS.toFloat()
+            )
+            .toDouble()
+        return raw.takeIf { it in ALLOWED_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS }
+            ?: DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS
+    }
+
+    fun setMapSignalLinkAllDevicesMaxRangeMeters(context: Context, meters: Double) {
+        val safe = meters.takeIf { it in ALLOWED_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS }
+            ?: DEFAULT_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putFloat(KEY_MAP_SIGNAL_LINK_ALL_DEVICES_MAX_RANGE_METERS, safe.toFloat())
+            .apply()
+    }
+
+    fun getMapSignalLinkSelectedSources(context: Context): List<String> {
+        val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
+        val raw = if (prefs.contains(KEY_MAP_SIGNAL_LINK_SELECTED_SOURCES)) {
+            prefs.getStringSet(KEY_MAP_SIGNAL_LINK_SELECTED_SOURCES, emptySet())
+        } else {
+            DEFAULT_MAP_SIGNAL_LINK_SELECTED_SOURCES.toSet()
+        }
+
+        return raw
+            ?.asSequence()
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.distinct()
+            ?.sorted()
+            ?.toList()
+            .orEmpty()
+    }
+
+    fun setMapSignalLinkSelectedSources(context: Context, sources: List<String>) {
+        val safe = sources
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toSet()
+        SecureSettingsStore.prefs(context, PREFS_NAME)
+            .edit()
+            .putStringSet(KEY_MAP_SIGNAL_LINK_SELECTED_SOURCES, safe)
             .apply()
     }
 
