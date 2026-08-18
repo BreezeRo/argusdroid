@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
 import dev.argus.tracker.data.DefaultAppContainer
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.CoroutineScope
@@ -60,18 +61,50 @@ class RemoteIdForegroundService : Service() {
         if (loopJob?.isActive == true) return
 
         loopJob = serviceScope.launch {
-            val repository = (applicationContext as? ArgusApplication)?.container?.repository
-                ?: DefaultAppContainer(applicationContext).repository
+            val repository = runCatching {
+                (applicationContext as? ArgusApplication)?.container?.repository
+                    ?: DefaultAppContainer(applicationContext).repository
+            }.onFailure { error ->
+                OperationalErrorLogStore.append(
+                    context = applicationContext,
+                    category = "REMOTE_ID",
+                    source = "INIT",
+                    message = "Remote ID foreground service failed to initialize repository: ${error.message ?: "unknown"}",
+                    severity = "ERROR"
+                )
+            }.getOrNull()
+            if (repository == null) {
+                stopSelf()
+                return@launch
+            }
             val remoteIdScanner = RemoteIdScanner(applicationContext)
 
             while (isActive && RemoteIdForegroundServiceController.shouldRun(applicationContext)) {
                 val startedAt = System.currentTimeMillis()
 
                 val feedResults = runCatching { remoteIdScanner.scanOnce() }
+                    .onFailure { error ->
+                        OperationalErrorLogStore.append(
+                            context = applicationContext,
+                            category = "REMOTE_ID",
+                            source = "SCANNER",
+                            message = "Remote ID foreground scan failed: ${error.message ?: "unknown"}",
+                            severity = "WARN"
+                        )
+                    }
                     .getOrDefault(emptyList())
 
                 if (feedResults.isNotEmpty()) {
                     runCatching { repository.insertBatch(feedResults) }
+                        .onFailure { error ->
+                            OperationalErrorLogStore.append(
+                                context = applicationContext,
+                                category = "REMOTE_ID",
+                                source = "REPOSITORY",
+                                message = "Failed to persist Remote ID foreground encounters: ${error.message ?: "unknown"}",
+                                severity = "ERROR"
+                            )
+                        }
                 }
 
                 val durationMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
