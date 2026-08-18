@@ -267,6 +267,7 @@ private const val MAGNETIC_INCREASE_MIN_CURRENT_UT = 55.0
 private const val MAGNETIC_DISTURBANCE_UPPER_BOUND_UT = 65.0
 private const val MAGNETIC_SUSTAINED_HIGH_THRESHOLD_UT = 72.0
 private const val MAGNETIC_RHYTHM_COOLDOWN_MS = 1200L
+private const val MAGNETIC_EVENT_POPUP_COOLDOWN_MS = 20 * 1000L
 private const val MAGNETIC_RHYTHM_MIN_BPM = 72
 private const val MAGNETIC_RHYTHM_MAX_BPM = 220
 private const val MAGNETIC_RHYTHM_PLAY_MS = 2200L
@@ -903,10 +904,22 @@ fun ArgusApp(
     var analyzedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var detectionInitialTabRequest by rememberSaveable { mutableStateOf<Int?>(null) }
     var detectionInitialMagneticPopupRequest by rememberSaveable { mutableStateOf<Long?>(null) }
+    var globalMagneticDetectionPopup by remember { mutableStateOf<MagneticDetectionPopupState?>(null) }
+    var globalLastMagneticPopupEpochMs by remember { mutableStateOf(0L) }
+    var globalLastMagneticNotificationEpochMs by remember { mutableStateOf(0L) }
+    var globalLastMagneticRhythmEpochMs by remember { mutableStateOf(0L) }
+    var globalPreviousLiveMagneticMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
+    var globalMagneticRhythmJob by remember { mutableStateOf<Job?>(null) }
     var pipZoomCommandNonce by remember { mutableStateOf(0L) }
     var pipZoomCommandDelta by remember { mutableStateOf(0f) }
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: HOME_ROUTE
+    val globalMagneticMonitorEnabled = foreignDirectMagneticEnabled &&
+        currentRoute != DETECTION_ROUTE &&
+        (magneticRhythmBeepEnabled || magneticIncreaseNotificationsEnabled)
+    val globalLiveMagneticMagnitudeMicroTesla by rememberRealtimeMagneticMagnitudeMicroTesla(
+        enabled = globalMagneticMonitorEnabled
+    )
     fun navigateTopLevel(route: String) {
         if (topLevelRouteForSelection(currentRoute) == route) return
         if (currentRoute == DEVICE_DETAIL_ROUTE && route != DETECTION_ROUTE) {
@@ -938,6 +951,91 @@ fun ArgusApp(
 
     val requireAllEncounterStream = remember(currentRoute) {
         requiresAllEncountersRoute(currentRoute)
+    }
+
+    LaunchedEffect(
+        currentRoute,
+        foreignDirectMagneticEnabled,
+        magneticRhythmBeepEnabled,
+        magneticIncreaseNotificationsEnabled,
+        magneticEventTriggerThresholdMicroTesla,
+        globalLiveMagneticMagnitudeMicroTesla
+    ) {
+        if (!globalMagneticMonitorEnabled) {
+            globalPreviousLiveMagneticMagnitudeMicroTesla = null
+            globalMagneticRhythmJob?.cancel()
+            globalMagneticRhythmJob = null
+            return@LaunchedEffect
+        }
+
+        val currentMagnitude = globalLiveMagneticMagnitudeMicroTesla ?: return@LaunchedEffect
+        val previousMagnitude = globalPreviousLiveMagneticMagnitudeMicroTesla
+        globalPreviousLiveMagneticMagnitudeMicroTesla = currentMagnitude
+        if (previousMagnitude == null) return@LaunchedEffect
+
+        val deltaMicroTesla = currentMagnitude - previousMagnitude
+        val triggerThresholdMicroTesla = magneticEventTriggerThresholdMicroTesla
+        val crossedDisturbanceBand =
+            previousMagnitude < triggerThresholdMicroTesla &&
+                currentMagnitude >= triggerThresholdMicroTesla
+        val sharpIncrease =
+            deltaMicroTesla >= MAGNETIC_INCREASE_DELTA_THRESHOLD_UT &&
+                currentMagnitude >= minOf(MAGNETIC_INCREASE_MIN_CURRENT_UT, triggerThresholdMicroTesla)
+        val sustainedHighThresholdMicroTesla = maxOf(
+            triggerThresholdMicroTesla + 8.0,
+            MAGNETIC_SUSTAINED_HIGH_THRESHOLD_UT
+        )
+        val sustainedHigh = currentMagnitude >= sustainedHighThresholdMicroTesla
+        val magneticEventDetected = crossedDisturbanceBand || sharpIncrease || sustainedHigh
+        if (!magneticEventDetected) return@LaunchedEffect
+
+        val severity = magneticAlertSeverity(
+            currentMagnitudeMicroTesla = currentMagnitude,
+            deltaMicroTesla = deltaMicroTesla
+        )
+        val now = System.currentTimeMillis()
+
+        if (
+            magneticIncreaseNotificationsEnabled &&
+            hasPostNotificationsPermission(context) &&
+            now - globalLastMagneticNotificationEpochMs >= MAGNETIC_INCREASE_ALERT_COOLDOWN_MS
+        ) {
+            ensureMagneticIncreaseNotificationChannel(context)
+            sendMagneticIncreaseNotification(
+                context = context,
+                previousMagnitudeMicroTesla = previousMagnitude,
+                currentMagnitudeMicroTesla = currentMagnitude,
+                deltaMicroTesla = deltaMicroTesla
+            )
+            globalLastMagneticNotificationEpochMs = now
+        }
+
+        if (now - globalLastMagneticPopupEpochMs >= MAGNETIC_EVENT_POPUP_COOLDOWN_MS) {
+            globalMagneticDetectionPopup = buildMagneticDetectionPopupState(
+                detectionEpochMs = now,
+                previousMagnitudeMicroTesla = previousMagnitude,
+                currentMagnitudeMicroTesla = currentMagnitude,
+                deltaMicroTesla = deltaMicroTesla,
+                triggerThresholdMicroTesla = triggerThresholdMicroTesla,
+                crossedDisturbanceBand = crossedDisturbanceBand,
+                sharpIncrease = sharpIncrease,
+                sustainedHigh = sustainedHigh,
+                severity = severity
+            )
+            globalLastMagneticPopupEpochMs = now
+        }
+
+        if (!magneticRhythmBeepEnabled) return@LaunchedEffect
+        if (now - globalLastMagneticRhythmEpochMs < MAGNETIC_RHYTHM_COOLDOWN_MS) return@LaunchedEffect
+
+        globalMagneticRhythmJob?.cancel()
+        globalMagneticRhythmJob = scope.launch(Dispatchers.Default) {
+            playMagneticRhythm(
+                severity = severity,
+                playMs = MAGNETIC_RHYTHM_PLAY_MS
+            )
+        }
+        globalLastMagneticRhythmEpochMs = now
     }
 
     val recent by if (viewModel != null) {
@@ -1278,7 +1376,7 @@ fun ArgusApp(
         return enabled
             .map { source -> sourceScanIntervals[source] ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS }
             .minOrNull()
-            ?.coerceAtLeast(1L)
+            ?.coerceAtLeast(0L)
             ?: scanIntervalSeconds
     }
 
@@ -2124,6 +2222,21 @@ fun ArgusApp(
                     .fillMaxSize()
                     .padding(if (inPictureInPictureMode) PaddingValues(0.dp) else padding)
             ) {
+            globalMagneticDetectionPopup?.let { popup ->
+                val popupLiveCurrentMagnitudeMicroTesla =
+                    globalLiveMagneticMagnitudeMicroTesla ?: popup.currentMagnitudeMicroTesla
+                MagneticDetectionPopupDialog(
+                    popup = popup,
+                    liveCurrentMagnitudeMicroTesla = popupLiveCurrentMagnitudeMicroTesla,
+                    onDismiss = { globalMagneticDetectionPopup = null },
+                    confirmLabel = "Open Detection",
+                    onConfirm = {
+                        globalMagneticDetectionPopup = null
+                        detectionInitialMagneticPopupRequest = System.currentTimeMillis()
+                        navigateTopLevel(DETECTION_ROUTE)
+                    }
+                )
+            }
             if (!mapPrewarmReady) {
                 MapEnginePrewarmHost(
                     onReady = {
@@ -2324,10 +2437,17 @@ fun ArgusApp(
                     onSourceScanIntervalSelected = { sourceType, seconds ->
                         val previous = sourceScanIntervals[sourceType]
                             ?: ScanSettings.DEFAULT_SOURCE_SCAN_INTERVAL_SECONDS
-                        val updated = seconds.coerceIn(
-                            ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
-                            ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
-                        )
+                        val updated = if (sourceType == SourceCatalog.KEY_MAGNETIC) {
+                            seconds.coerceIn(
+                                ScanSettings.MAGNETIC_SOURCE_SCAN_INTERVAL_REALTIME_SECONDS,
+                                ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
+                            )
+                        } else {
+                            seconds.coerceIn(
+                                ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS,
+                                ScanSettings.MAX_SOURCE_SCAN_INTERVAL_SECONDS
+                            )
+                        }
                         ScanSettings.setSourceScanIntervalSeconds(context, sourceType, updated)
                         sourceScanIntervals = sourceScanIntervals + (sourceType to updated)
                         ScanSettings.appendScanIntervalChangeEvent(
@@ -4043,6 +4163,9 @@ private fun HomePage(
 ) {
     var homePointRadiusExpanded by remember { mutableStateOf(false) }
     var homePointStatusMessage by remember { mutableStateOf<String?>(null) }
+    val homeLiveMagneticMagnitudeMicroTesla by rememberRealtimeMagneticMagnitudeMicroTesla(
+        enabled = sensorGateSettings.directMagneticEnabled
+    )
     val enabledSources = remember(sensorGateSettings) {
         enabledSourceTypes(sensorGateSettings)
     }
@@ -4170,6 +4293,30 @@ private fun HomePage(
                             fontWeight = FontWeight.Medium
                         )
                     }
+                }
+            }
+        }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Text("🧲 Magnetic (Live)", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = homeLiveMagneticMagnitudeMicroTesla?.let { value ->
+                            String.format(Locale.US, "%.1f uT", value)
+                        } ?: "n/a",
+                        color = if (homeLiveMagneticMagnitudeMicroTesla == null) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
@@ -5151,7 +5298,12 @@ private fun AppSettingsPage(
                                 expanded = sourceIntervalExpandedFor == sourceType,
                                 onDismissRequest = { sourceIntervalExpandedFor = null }
                             ) {
-                                ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.forEach { seconds ->
+                                val allowedIntervals = if (sourceType == SourceCatalog.KEY_MAGNETIC) {
+                                    ScanSettings.ALLOWED_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS
+                                } else {
+                                    ScanSettings.ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS.filter { it >= ScanSettings.MIN_SOURCE_SCAN_INTERVAL_SECONDS }
+                                }
+                                allowedIntervals.forEach { seconds ->
                                     DropdownMenuItem(
                                         text = { Text(ScanSettings.formatInterval(seconds)) },
                                         onClick = {
@@ -6702,6 +6854,8 @@ private fun DetectionPage(
     var previousLiveMagneticMagnitudeMicroTesla by remember { mutableStateOf<Double?>(null) }
     var lastRealtimeMagneticNotificationEpochMs by remember { mutableStateOf(0L) }
     var lastRealtimeMagneticRhythmEpochMs by remember { mutableStateOf(0L) }
+    var lastMagneticDetectionPopupEpochMs by remember { mutableStateOf(0L) }
+    var magneticDetectionPopup by remember { mutableStateOf<MagneticDetectionPopupState?>(null) }
     var realtimeMagneticRhythmJob by remember { mutableStateOf<Job?>(null) }
     var magneticThresholdSliderValue by rememberSaveable {
         mutableStateOf(magneticEventTriggerThresholdMicroTesla.toFloat())
@@ -6828,6 +6982,10 @@ private fun DetectionPage(
         val sustainedHigh = currentMagnitude >= sustainedHighThresholdMicroTesla
         val magneticEventDetected = crossedDisturbanceBand || sharpIncrease || sustainedHigh
         if (!magneticEventDetected) return@LaunchedEffect
+        val severity = magneticAlertSeverity(
+            currentMagnitudeMicroTesla = currentMagnitude,
+            deltaMicroTesla = deltaMicroTesla
+        )
 
         val now = System.currentTimeMillis()
 
@@ -6846,13 +7004,24 @@ private fun DetectionPage(
             lastRealtimeMagneticNotificationEpochMs = now
         }
 
+        if (now - lastMagneticDetectionPopupEpochMs >= MAGNETIC_EVENT_POPUP_COOLDOWN_MS) {
+            magneticDetectionPopup = buildMagneticDetectionPopupState(
+                detectionEpochMs = now,
+                previousMagnitudeMicroTesla = previousMagnitude,
+                currentMagnitudeMicroTesla = currentMagnitude,
+                deltaMicroTesla = deltaMicroTesla,
+                triggerThresholdMicroTesla = triggerThresholdMicroTesla,
+                crossedDisturbanceBand = crossedDisturbanceBand,
+                sharpIncrease = sharpIncrease,
+                sustainedHigh = sustainedHigh,
+                severity = severity
+            )
+            lastMagneticDetectionPopupEpochMs = now
+        }
+
         if (!magneticRhythmBeepEnabled) return@LaunchedEffect
         if (now - lastRealtimeMagneticRhythmEpochMs < MAGNETIC_RHYTHM_COOLDOWN_MS) return@LaunchedEffect
 
-        val severity = magneticAlertSeverity(
-            currentMagnitudeMicroTesla = currentMagnitude,
-            deltaMicroTesla = deltaMicroTesla
-        )
         realtimeMagneticRhythmJob?.cancel()
         realtimeMagneticRhythmJob = detectionScope.launch(Dispatchers.Default) {
             playMagneticRhythm(
@@ -7663,6 +7832,27 @@ private fun DetectionPage(
                     TextButton(onClick = { magneticDialogVisible = false }) {
                         Text("Done")
                     }
+                }
+            )
+        }
+        magneticDetectionPopup?.let { popup ->
+            val popupLiveCurrentMagnitudeMicroTesla =
+                liveMagneticMagnitudeMicroTesla ?: popup.currentMagnitudeMicroTesla
+            MagneticDetectionPopupDialog(
+                popup = popup,
+                liveCurrentMagnitudeMicroTesla = popupLiveCurrentMagnitudeMicroTesla,
+                onDismiss = { magneticDetectionPopup = null },
+                confirmLabel = "Open Magnetic Map",
+                onConfirm = {
+                    selectedTab = 3
+                    selectedMapSubTab = 3
+                    magneticMapFocusRequestNonce += 1
+                    magneticDetectionPopup = null
+                },
+                auxiliaryLabel = "Open Magnetic Monitor Controls",
+                onAuxiliary = {
+                    magneticDialogVisible = true
+                    magneticDetectionPopup = null
                 }
             )
         }
@@ -17954,6 +18144,80 @@ private fun magneticAlertSeverity(
     return maxOf(magnitudeComponent, deltaComponent)
 }
 
+private data class MagneticDetectionPopupState(
+    val detectionEpochMs: Long,
+    val previousMagnitudeMicroTesla: Double,
+    val currentMagnitudeMicroTesla: Double,
+    val deltaMicroTesla: Double,
+    val triggerThresholdMicroTesla: Double,
+    val triggerModeLabel: String,
+    val triggerDetail: String,
+    val thresholdContext: String,
+    val signalClass: String,
+    val confidencePercent: Int
+)
+
+private fun buildMagneticDetectionPopupState(
+    detectionEpochMs: Long,
+    previousMagnitudeMicroTesla: Double,
+    currentMagnitudeMicroTesla: Double,
+    deltaMicroTesla: Double,
+    triggerThresholdMicroTesla: Double,
+    crossedDisturbanceBand: Boolean,
+    sharpIncrease: Boolean,
+    sustainedHigh: Boolean,
+    severity: Double
+): MagneticDetectionPopupState {
+    val signalClass = when {
+        currentMagnitudeMicroTesla >= triggerThresholdMicroTesla + 25.0 || deltaMicroTesla >= 20.0 -> "Strong anomaly"
+        currentMagnitudeMicroTesla >= triggerThresholdMicroTesla + 10.0 || deltaMicroTesla >= 12.0 -> "Elevated anomaly"
+        else -> "Threshold crossing"
+    }
+
+    val confidencePercent = (45 + (severity.coerceIn(0.0, 1.0) * 50.0).roundToInt())
+        .coerceIn(40, 95)
+
+    val triggerModeLabel = when {
+        sharpIncrease && sustainedHigh -> "Rapid spike + sustained high"
+        sharpIncrease -> "Rapid spike override"
+        sustainedHigh -> "Sustained high field"
+        crossedDisturbanceBand -> "Threshold crossing"
+        else -> "Anomaly trigger"
+    }
+
+    val triggerDetail = when {
+        sharpIncrease && sustainedHigh ->
+            "Triggered by a sharp increase and high sustained intensity."
+        sharpIncrease ->
+            "Triggered by a rapid increase; this can fire even when absolute threshold is set high."
+        sustainedHigh ->
+            "Triggered by sustained high field intensity over baseline safeguards."
+        crossedDisturbanceBand ->
+            "Triggered by crossing the configured threshold boundary."
+        else ->
+            "Triggered by magnetic anomaly heuristics."
+    }
+
+    val thresholdContext = if (crossedDisturbanceBand) {
+        "Threshold: ${String.format(Locale.US, "%.1f", triggerThresholdMicroTesla)} uT"
+    } else {
+        "Configured threshold: ${String.format(Locale.US, "%.1f", triggerThresholdMicroTesla)} uT (not the direct trigger)"
+    }
+
+    return MagneticDetectionPopupState(
+        detectionEpochMs = detectionEpochMs,
+        previousMagnitudeMicroTesla = previousMagnitudeMicroTesla,
+        currentMagnitudeMicroTesla = currentMagnitudeMicroTesla,
+        deltaMicroTesla = deltaMicroTesla,
+        triggerThresholdMicroTesla = triggerThresholdMicroTesla,
+        triggerModeLabel = triggerModeLabel,
+        triggerDetail = triggerDetail,
+        thresholdContext = thresholdContext,
+        signalClass = signalClass,
+        confidencePercent = confidencePercent
+    )
+}
+
 private suspend fun playMagneticRhythm(
     severity: Double,
     playMs: Long
@@ -17991,6 +18255,67 @@ private fun createMagneticToneGenerator(): ToneGenerator? {
 }
 
 @Composable
+private fun MagneticDetectionPopupDialog(
+    popup: MagneticDetectionPopupState,
+    liveCurrentMagnitudeMicroTesla: Double,
+    onDismiss: () -> Unit,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    auxiliaryLabel: String? = null,
+    onAuxiliary: (() -> Unit)? = null
+) {
+    val liveDeltaMicroTesla = liveCurrentMagnitudeMicroTesla - popup.previousMagnitudeMicroTesla
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Potential Device Detected") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "A magnetic anomaly event was detected.",
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(text = "Signal class: ${popup.signalClass}")
+                Text(text = "Trigger mode: ${popup.triggerModeLabel}", fontWeight = FontWeight.Medium)
+                Text(
+                    text = popup.triggerDetail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(text = "Confidence estimate: ${popup.confidencePercent}%")
+                Text(
+                    text = "Current: ${String.format(Locale.US, "%.1f", liveCurrentMagnitudeMicroTesla)} uT • Delta: ${String.format(Locale.US, "%+.1f", liveDeltaMicroTesla)} uT"
+                )
+                Text(
+                    text = "Event snapshot: ${String.format(Locale.US, "%.1f", popup.currentMagnitudeMicroTesla)} uT • ${String.format(Locale.US, "%+.1f", popup.deltaMicroTesla)} uT",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "${popup.thresholdContext} • Detected: ${formatEpoch(popup.detectionEpochMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!auxiliaryLabel.isNullOrBlank() && onAuxiliary != null) {
+                    TextButton(onClick = onAuxiliary) {
+                        Text(auxiliaryLabel)
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Dismiss")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(confirmLabel)
+            }
+        }
+    )
+}
+
+@Composable
 private fun rememberRealtimeMagneticMagnitudeMicroTesla(
     enabled: Boolean
 ): androidx.compose.runtime.State<Double?> {
@@ -18010,7 +18335,7 @@ private fun rememberRealtimeMagneticMagnitudeMicroTesla(
             return@DisposableEffect onDispose { }
         }
 
-        val sensorDelay = SensorManager.SENSOR_DELAY_NORMAL
+        val sensorDelay = SensorManager.SENSOR_DELAY_FASTEST
 
         var lastEmitElapsedMs = 0L
         val listener = object : SensorEventListener {
@@ -18024,9 +18349,9 @@ private fun rememberRealtimeMagneticMagnitudeMicroTesla(
                 val magnitude = sqrt(x * x + y * y + z * z)
                 if (!magnitude.isFinite()) return
 
-                // Sample UI updates at a low cadence to reduce battery and recomposition churn.
+                // Keep high-rate sensing but throttle UI updates to a manageable cadence.
                 val nowElapsedMs = SystemClock.elapsedRealtime()
-                if (nowElapsedMs - lastEmitElapsedMs < 500L) return
+                if (nowElapsedMs - lastEmitElapsedMs < 150L) return
                 lastEmitElapsedMs = nowElapsedMs
                 magnitudeState.value = magnitude
             }
