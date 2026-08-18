@@ -31,6 +31,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
@@ -5634,137 +5635,183 @@ private fun AppSettingsPage(
                         }
 
                         Text("Lock methods", fontWeight = FontWeight.SemiBold)
-                        Row(
+                        val activeMethodBorder = BorderStroke(2.dp, Color(0xFF2E7D32))
+                        val inactiveMethodBorder = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+
+                        Card(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            border = if (biometricMethodActive) activeMethodBorder else inactiveMethodBorder
                         ) {
-                            Text("Biometric / device credential")
-                            Text(
-                                when {
-                                    !fullEncryptionBiometricAvailable -> "Unavailable"
-                                    biometricMethodActive -> "Enabled"
-                                    else -> "Disabled"
-                                },
-                                color = if (biometricMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        Button(
-                            enabled = !fullEncryptionActionInProgress && fullEncryptionBiometricAvailable,
-                            onClick = {
-                                val activity = hostActivity ?: run {
-                                    fullEncryptionStatusMessage = "Unable to open biometric prompt from current context."
-                                    return@Button
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Biometric / device credential")
+                                    Text(
+                                        when {
+                                            !fullEncryptionBiometricAvailable -> "Unavailable"
+                                            biometricMethodActive -> "Active"
+                                            else -> "Inactive"
+                                        },
+                                        color = if (biometricMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                 }
-                                scope.launch {
-                                    fullEncryptionActionInProgress = true
-                                    fullEncryptionStatusMessage = null
-                                    val authenticated = requestSecureLaunchAuthentication(activity)
-                                    if (!authenticated) {
-                                        fullEncryptionStatusMessage = "Biometric/device credential authentication was canceled."
-                                    } else {
-                                        fullEncryptionStatusMessage = runCatching {
-                                            onEnableFullEncryptionBiometric()
-                                        }.getOrElse { error ->
-                                            "Enable biometric launch lock failed: ${error.message ?: "unknown error"}"
+                                Button(
+                                    enabled = !fullEncryptionActionInProgress && fullEncryptionBiometricAvailable,
+                                    onClick = {
+                                        if (biometricMethodActive) {
+                                            scope.launch {
+                                                fullEncryptionActionInProgress = true
+                                                fullEncryptionStatusMessage = runCatching {
+                                                    onDisableFullEncryptionLaunchLock()
+                                                }.getOrElse { error ->
+                                                    "Disable biometric launch lock failed: ${error.message ?: "unknown error"}"
+                                                }
+                                                fullEncryptionActionInProgress = false
+                                            }
+                                            return@Button
+                                        }
+
+                                        val activity = hostActivity ?: run {
+                                            fullEncryptionStatusMessage = "Unable to open biometric prompt from current context."
+                                            return@Button
+                                        }
+                                        scope.launch {
+                                            fullEncryptionActionInProgress = true
+                                            fullEncryptionStatusMessage = null
+                                            val authenticated = requestSecureLaunchAuthentication(activity)
+                                            if (!authenticated) {
+                                                fullEncryptionStatusMessage = "Biometric/device credential authentication was canceled."
+                                            } else {
+                                                fullEncryptionStatusMessage = runCatching {
+                                                    onEnableFullEncryptionBiometric()
+                                                }.getOrElse { error ->
+                                                    "Enable biometric launch lock failed: ${error.message ?: "unknown error"}"
+                                                }
+                                            }
+                                            fullEncryptionActionInProgress = false
                                         }
                                     }
-                                    fullEncryptionActionInProgress = false
+                                ) {
+                                    Text(if (biometricMethodActive) "Disable Biometric Lock" else "Enable Biometric Lock")
                                 }
                             }
-                        ) {
-                            Text("Enable Biometric Lock")
                         }
 
-                        Row(
+                        Card(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            border = if (pinMethodActive) activeMethodBorder else inactiveMethodBorder
                         ) {
-                            Text("PIN")
-                            Text(
-                                if (pinMethodActive) "Enabled" else "Disabled",
-                                color = if (pinMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        OutlinedTextField(
-                            value = fullEncryptionPin,
-                            onValueChange = { fullEncryptionPin = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("PIN (min 6)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = fullEncryptionPinConfirm,
-                            onValueChange = { fullEncryptionPinConfirm = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("Confirm PIN") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Button(
-                            enabled = !fullEncryptionActionInProgress && hasStrongUnlockPin && hasMatchingUnlockPin,
-                            onClick = {
-                                scope.launch {
-                                    fullEncryptionActionInProgress = true
-                                    fullEncryptionStatusMessage = runCatching {
-                                        onEnableFullEncryptionPin(normalizedUnlockPin)
-                                    }.getOrElse { error ->
-                                        "Enable PIN launch lock failed: ${error.message ?: "unknown error"}"
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("PIN")
+                                    Text(
+                                        if (pinMethodActive) "Active" else "Inactive",
+                                        color = if (pinMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                OutlinedTextField(
+                                    value = fullEncryptionPin,
+                                    onValueChange = { fullEncryptionPin = it },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    label = { Text("PIN (min 6)") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = fullEncryptionPinConfirm,
+                                    onValueChange = { fullEncryptionPinConfirm = it },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    label = { Text("Confirm PIN") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Button(
+                                    enabled = !fullEncryptionActionInProgress && hasStrongUnlockPin && hasMatchingUnlockPin,
+                                    onClick = {
+                                        scope.launch {
+                                            fullEncryptionActionInProgress = true
+                                            fullEncryptionStatusMessage = runCatching {
+                                                onEnableFullEncryptionPin(normalizedUnlockPin)
+                                            }.getOrElse { error ->
+                                                "Enable PIN launch lock failed: ${error.message ?: "unknown error"}"
+                                            }
+                                            fullEncryptionActionInProgress = false
+                                        }
                                     }
-                                    fullEncryptionActionInProgress = false
+                                ) {
+                                    Text(if (pinMethodActive) "Update PIN Lock" else "Enable PIN Lock")
                                 }
                             }
-                        ) {
-                            Text("Enable PIN Lock")
                         }
 
-                        Row(
+                        Card(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            border = if (passwordMethodActive) activeMethodBorder else inactiveMethodBorder
                         ) {
-                            Text("Password")
-                            Text(
-                                if (passwordMethodActive) "Enabled" else "Disabled",
-                                color = if (passwordMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        OutlinedTextField(
-                            value = fullEncryptionPassword,
-                            onValueChange = { fullEncryptionPassword = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("Password (min 8)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = fullEncryptionPasswordConfirm,
-                            onValueChange = { fullEncryptionPasswordConfirm = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("Confirm password") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Button(
-                            enabled = !fullEncryptionActionInProgress && hasStrongUnlockPassword && hasMatchingUnlockPassword,
-                            onClick = {
-                                scope.launch {
-                                    fullEncryptionActionInProgress = true
-                                    fullEncryptionStatusMessage = runCatching {
-                                        onEnableFullEncryptionPassword(normalizedUnlockPassword)
-                                    }.getOrElse { error ->
-                                        "Enable password launch lock failed: ${error.message ?: "unknown error"}"
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text("Password")
+                                    Text(
+                                        if (passwordMethodActive) "Active" else "Inactive",
+                                        color = if (passwordMethodActive) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                OutlinedTextField(
+                                    value = fullEncryptionPassword,
+                                    onValueChange = { fullEncryptionPassword = it },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    label = { Text("Password (min 8)") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = fullEncryptionPasswordConfirm,
+                                    onValueChange = { fullEncryptionPasswordConfirm = it },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    label = { Text("Confirm password") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Button(
+                                    enabled = !fullEncryptionActionInProgress && hasStrongUnlockPassword && hasMatchingUnlockPassword,
+                                    onClick = {
+                                        scope.launch {
+                                            fullEncryptionActionInProgress = true
+                                            fullEncryptionStatusMessage = runCatching {
+                                                onEnableFullEncryptionPassword(normalizedUnlockPassword)
+                                            }.getOrElse { error ->
+                                                "Enable password launch lock failed: ${error.message ?: "unknown error"}"
+                                            }
+                                            fullEncryptionActionInProgress = false
+                                        }
                                     }
-                                    fullEncryptionActionInProgress = false
+                                ) {
+                                    Text(if (passwordMethodActive) "Update Password Lock" else "Enable Password Lock")
                                 }
                             }
-                        ) {
-                            Text("Enable Password Lock")
                         }
 
                         Row(
