@@ -267,6 +267,7 @@ private const val MAP_COVERAGE_EMPTY_HOLD_MS = 12_000L
 private const val MAP_COVERAGE_IMMEDIATE_RESIZE_DELTA_METERS = 300.0
 private const val MAP_COVERAGE_RECENT_WINDOW_MS = 120_000L
 private const val MAP_AIRCRAFT_COVERAGE_RECENT_WINDOW_MS = 600_000L
+private const val CHAIN_SHARED_SECRET_MIN_LENGTH = 12
 private const val MAP_COVERAGE_RADIUS_PERCENTILE = 0.85
 private const val MAP_PIN_LIMIT_MAX = 10_000
 private const val DEVICE_MAP_PIN_CACHE_TTL_MS = 10L * 60L * 1000L
@@ -1017,6 +1018,21 @@ fun ArgusApp(
     LaunchedEffect(encryptionGateSatisfied) {
         if (!encryptionGateSatisfied) return@LaunchedEffect
         app.onSecureDataUnlocked()
+    }
+
+    LaunchedEffect(fullEncryptionLastWipeEpochMs, viewModel) {
+        val wipeEpochMs = fullEncryptionLastWipeEpochMs ?: return@LaunchedEffect
+        if (wipeEpochMs <= 0L) return@LaunchedEffect
+
+        // After protective wipe, force-refresh derived counters so stale in-memory 24h summaries disappear.
+        lastScanDurationMs = ScanSettings.getLastScanDurationMs(context)
+        sourceScanTimings = ScanSettings.getSourceScanTimings(context)
+        sourceLastScanEpochs = ScanSettings.getAllSourceLastScanEpochMs(context)
+        sourceLastRawObservationEpochs = ScanSettings.getAllSourceLastRawObservationEpochMs(context)
+        scanIntervalChangeEvents = ScanSettings.getScanIntervalChangeEvents(context, 10)
+        alertLogs = AlertLogStore.read(context)
+        errorLogs = OperationalErrorLogStore.read(context)
+        viewModel?.refreshSummary()
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -8615,7 +8631,8 @@ private fun DetectionMeshNetworkPage(
 
     val connectedCount = chainMeshSnapshot.peers.count { it.state == ChainPeerState.CONNECTED }
     val unconnectedCount = chainMeshSnapshot.peers.count { it.state != ChainPeerState.CONNECTED }
-    val meshReady = chainLinkEnabled && chainSharedSecret.isNotBlank()
+    val hasStrongSharedSecret = chainSharedSecret.trim().length >= CHAIN_SHARED_SECRET_MIN_LENGTH
+    val meshReady = chainLinkEnabled && hasStrongSharedSecret
     val wipeGateLabel = if (meshWipeGateState.enabled) "Active" else "Inactive"
     val mapStyleOptions = rememberMapStyleOptionsForTheme()
     val meshMapCameraPositionState = rememberCameraPositionState {
@@ -8736,12 +8753,14 @@ private fun DetectionMeshNetworkPage(
                     ) {
                         Text("Status", fontWeight = FontWeight.Bold)
                         Text("Chain Link: ${if (chainLinkEnabled) "On" else "Off"}")
-                        Text("Passphrase: ${if (chainSharedSecret.isNotBlank()) "Set" else "Missing"}")
+                        Text(
+                            "Passphrase: ${if (chainSharedSecret.isBlank()) "Missing" else if (hasStrongSharedSecret) "Strong" else "Weak"}"
+                        )
                         Text("Peers: $connectedCount connected • $unconnectedCount not connected")
                         Text("Wipe Gate: $wipeGateLabel")
                         if (!meshReady) {
                             Text(
-                                "Enable Chain Link and set a shared passphrase to sync.",
+                                "Enable Chain Link and set a strong shared passphrase (min $CHAIN_SHARED_SECRET_MIN_LENGTH chars) to sync securely.",
                                 color = Color(0xFFE65100)
                             )
                         }
@@ -8784,6 +8803,13 @@ private fun DetectionMeshNetworkPage(
                             enabled = chainLinkEnabled
                         )
                         Text("Use the same passphrase on every linked device.")
+                        if (chainLinkEnabled && chainSharedSecret.isNotBlank() && !hasStrongSharedSecret) {
+                            Text(
+                                "Passphrase is too short for secure mesh operations. Use at least $CHAIN_SHARED_SECRET_MIN_LENGTH characters.",
+                                color = Color(0xFFB3261E),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,

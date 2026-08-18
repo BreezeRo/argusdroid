@@ -28,8 +28,13 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Collections
+import java.util.Base64
 import javax.crypto.Mac
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.abs
 import org.json.JSONObject
@@ -223,9 +228,10 @@ class LocalMeshChainLinkCoordinator(
         val now = System.currentTimeMillis()
         val canUsePersistent = ScanSettings.isChainPersistentChannelEnabled(context)
         val sharedSecret = ScanSettings.getChainSharedSecret(context)
+        val sharedSecretStrong = isStrongChainSharedSecret(sharedSecret)
 
         peers.forEach { peer ->
-            val heartbeatOk = if (canUsePersistent && peer.persistentChannelEnabled && sharedSecret.isNotBlank()) {
+            val heartbeatOk = if (canUsePersistent && peer.persistentChannelEnabled && sharedSecretStrong) {
                 sendHeartbeat(peer, sharedSecret)
             } else {
                 false
@@ -323,7 +329,7 @@ class LocalMeshChainLinkCoordinator(
         }
 
         val sharedSecret = ScanSettings.getChainSharedSecret(context)
-        if (sharedSecret.isBlank()) {
+        if (!isStrongChainSharedSecret(sharedSecret)) {
             return ChainSyncStats(
                 enabled = true,
                 authConfigured = false,
@@ -450,7 +456,7 @@ class LocalMeshChainLinkCoordinator(
         }
 
         val sharedSecret = ScanSettings.getChainSharedSecret(context)
-        if (sharedSecret.isBlank()) {
+        if (!isStrongChainSharedSecret(sharedSecret)) {
             runCatching {
                 AppBackupManager.exportSnapshot(
                     context = context,
@@ -808,13 +814,10 @@ class LocalMeshChainLinkCoordinator(
         val responseRaw = postJson(
             url = "http://${peer.host}:$CHAIN_PORT$CHAIN_SYNC_PATH",
             body = request,
-            auth = ChainAuthHeaders.sign(
-                sharedSecret = sharedSecret,
-                nodeId = nodeId,
-                method = "POST",
-                path = CHAIN_SYNC_PATH,
-                body = request
-            )
+            sharedSecret = sharedSecret,
+            nodeId = nodeId,
+            method = "POST",
+            path = CHAIN_SYNC_PATH
         ) ?: return@withContext null
 
         val response = ChainLinkJson.decodeSyncResponse(responseRaw) ?: return@withContext null
@@ -851,13 +854,10 @@ class LocalMeshChainLinkCoordinator(
         val response = postJson(
             url = "http://${peer.host}:$CHAIN_PORT$CHAIN_HEARTBEAT_PATH",
             body = body,
-            auth = ChainAuthHeaders.sign(
-                sharedSecret = sharedSecret,
-                nodeId = nodeId,
-                method = "POST",
-                path = CHAIN_HEARTBEAT_PATH,
-                body = body
-            )
+            sharedSecret = sharedSecret,
+            nodeId = nodeId,
+            method = "POST",
+            path = CHAIN_HEARTBEAT_PATH
         ) ?: return@withContext false
 
         runCatching { JSONObject(response).optBoolean("ok", false) }.getOrDefault(false)
@@ -882,13 +882,10 @@ class LocalMeshChainLinkCoordinator(
         val response = postJson(
             url = "http://${peer.host}:$CHAIN_PORT$CHAIN_WIPE_PATH",
             body = body,
-            auth = ChainAuthHeaders.sign(
-                sharedSecret = sharedSecret,
-                nodeId = nodeId,
-                method = "POST",
-                path = CHAIN_WIPE_PATH,
-                body = body
-            )
+            sharedSecret = sharedSecret,
+            nodeId = nodeId,
+            method = "POST",
+            path = CHAIN_WIPE_PATH
         ) ?: return@withContext false
 
         runCatching { JSONObject(response).optBoolean("ok", false) }.getOrDefault(false)
@@ -910,13 +907,10 @@ class LocalMeshChainLinkCoordinator(
         val response = postJson(
             url = "http://${peer.host}:$CHAIN_PORT$CHAIN_WIPE_RELEASE_PATH",
             body = body,
-            auth = ChainAuthHeaders.sign(
-                sharedSecret = sharedSecret,
-                nodeId = nodeId,
-                method = "POST",
-                path = CHAIN_WIPE_RELEASE_PATH,
-                body = body
-            )
+            sharedSecret = sharedSecret,
+            nodeId = nodeId,
+            method = "POST",
+            path = CHAIN_WIPE_RELEASE_PATH
         ) ?: return@withContext false
 
         runCatching { JSONObject(response).optBoolean("ok", false) }.getOrDefault(false)
@@ -961,19 +955,36 @@ class LocalMeshChainLinkCoordinator(
         }
     }
 
-    private fun postJson(url: String, body: String, auth: ChainAuthHeaders): String? {
+    private fun postJson(
+        url: String,
+        body: String,
+        sharedSecret: String,
+        nodeId: String,
+        method: String,
+        path: String
+    ): String? {
         val connection = (URL(url).openConnection() as? HttpURLConnection) ?: return null
+        val encryptedPayload = encryptTransportPayload(sharedSecret = sharedSecret, plaintext = body)
+        val auth = ChainAuthHeaders.sign(
+            sharedSecret = sharedSecret,
+            nodeId = nodeId,
+            method = method,
+            path = path,
+            body = encryptedPayload.ciphertextBase64
+        )
         return runCatching {
             connection.connectTimeout = CHAIN_HTTP_TIMEOUT_MS
             connection.readTimeout = CHAIN_HTTP_TIMEOUT_MS
             connection.requestMethod = "POST"
             connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Content-Type", "text/plain")
             connection.setRequestProperty(HEADER_AUTH_NODE_ID, auth.nodeId)
             connection.setRequestProperty(HEADER_AUTH_TIMESTAMP_MS, auth.timestampMs.toString())
             connection.setRequestProperty(HEADER_AUTH_SIGNATURE, auth.signature)
+            connection.setRequestProperty(HEADER_TRANSPORT_ENCRYPTION, CHAIN_TRANSPORT_ENCRYPTION_SCHEME)
+            connection.setRequestProperty(HEADER_TRANSPORT_ENCRYPTION_IV, encryptedPayload.ivBase64)
             connection.outputStream.bufferedWriter().use { writer ->
-                writer.write(body)
+                writer.write(encryptedPayload.ciphertextBase64)
                 writer.flush()
             }
 
@@ -1186,7 +1197,7 @@ private class ChainLinkServer(
                     }
 
                     val sharedSecret = authSecretProvider().trim()
-                    if (sharedSecret.isBlank()) {
+                    if (!isStrongChainSharedSecret(sharedSecret)) {
                         writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
                         return@runCatching
                     }
@@ -1208,7 +1219,12 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
-                    val request = ChainLinkJson.decodeSyncRequest(body)
+                    val decryptedBody = decryptBodyFromHeaders(sharedSecret, headers, body) ?: run {
+                        writeHttpResponse(writer, statusCode = 400, body = "encryption required")
+                        return@runCatching
+                    }
+
+                    val request = ChainLinkJson.decodeSyncRequest(decryptedBody)
                     if (request == null) {
                         writeHttpResponse(writer, statusCode = 400, body = "invalid payload")
                         return@runCatching
@@ -1249,7 +1265,7 @@ private class ChainLinkServer(
                     }
 
                     val sharedSecret = authSecretProvider().trim()
-                    if (sharedSecret.isBlank()) {
+                    if (!isStrongChainSharedSecret(sharedSecret)) {
                         writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
                         return@runCatching
                     }
@@ -1271,7 +1287,12 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
-                    val heartbeatObj = runCatching { JSONObject(body) }.getOrNull()
+                    val decryptedBody = decryptBodyFromHeaders(sharedSecret, headers, body) ?: run {
+                        writeHttpResponse(writer, statusCode = 400, body = "encryption required")
+                        return@runCatching
+                    }
+
+                    val heartbeatObj = runCatching { JSONObject(decryptedBody) }.getOrNull()
                     val requesterDeviceName = heartbeatObj
                         ?.optString("deviceName", null)
                         ?.trim()
@@ -1307,7 +1328,7 @@ private class ChainLinkServer(
                     }
 
                     val sharedSecret = authSecretProvider().trim()
-                    if (sharedSecret.isBlank()) {
+                    if (!isStrongChainSharedSecret(sharedSecret)) {
                         writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
                         return@runCatching
                     }
@@ -1329,7 +1350,12 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
-                    val requestObj = runCatching { JSONObject(body) }.getOrNull()
+                    val decryptedBody = decryptBodyFromHeaders(sharedSecret, headers, body) ?: run {
+                        writeHttpResponse(writer, statusCode = 400, body = "encryption required")
+                        return@runCatching
+                    }
+
+                    val requestObj = runCatching { JSONObject(decryptedBody) }.getOrNull()
                     val requesterNodeId = requestObj?.optString("requesterNodeId", "")?.trim().orEmpty()
                     val requesterDeviceName = requestObj?.optString("requesterDeviceName", null)?.trim()?.ifBlank { null }
                     val sessionId = requestObj?.optString("sessionId", "")?.trim().orEmpty()
@@ -1406,7 +1432,7 @@ private class ChainLinkServer(
                     }
 
                     val sharedSecret = authSecretProvider().trim()
-                    if (sharedSecret.isBlank()) {
+                    if (!isStrongChainSharedSecret(sharedSecret)) {
                         writeHttpResponse(writer, statusCode = 403, body = "missing auth configuration")
                         return@runCatching
                     }
@@ -1428,7 +1454,12 @@ private class ChainLinkServer(
                         return@runCatching
                     }
 
-                    val requestObj = runCatching { JSONObject(body) }.getOrNull()
+                    val decryptedBody = decryptBodyFromHeaders(sharedSecret, headers, body) ?: run {
+                        writeHttpResponse(writer, statusCode = 400, body = "encryption required")
+                        return@runCatching
+                    }
+
+                    val requestObj = runCatching { JSONObject(decryptedBody) }.getOrNull()
                     val requesterNodeId = requestObj?.optString("requesterNodeId", "")?.trim().orEmpty()
                     val requesterDeviceName = requestObj?.optString("requesterDeviceName", null)?.trim()?.ifBlank { null }
                     val sessionId = requestObj?.optString("sessionId", "")?.trim().orEmpty()
@@ -1529,6 +1560,63 @@ private class ChainLinkServer(
         writer.write(body)
         writer.flush()
     }
+
+    private fun decryptBodyFromHeaders(
+        sharedSecret: String,
+        headers: Map<String, String>,
+        body: String
+    ): String? {
+        val scheme = headers[HEADER_TRANSPORT_ENCRYPTION.lowercase()]?.trim().orEmpty()
+        val ivBase64 = headers[HEADER_TRANSPORT_ENCRYPTION_IV.lowercase()]?.trim().orEmpty()
+        if (scheme != CHAIN_TRANSPORT_ENCRYPTION_SCHEME || ivBase64.isBlank()) return null
+        return decryptTransportPayload(
+            sharedSecret = sharedSecret,
+            ivBase64 = ivBase64,
+            ciphertextBase64 = body
+        )
+    }
+}
+
+private data class EncryptedTransportPayload(
+    val ivBase64: String,
+    val ciphertextBase64: String
+)
+
+private fun isStrongChainSharedSecret(secret: String): Boolean =
+    secret.trim().length >= CHAIN_SHARED_SECRET_MIN_LENGTH
+
+private fun encryptTransportPayload(sharedSecret: String, plaintext: String): EncryptedTransportPayload {
+    val keyBytes = MessageDigest.getInstance("SHA-256")
+        .digest(sharedSecret.toByteArray(Charsets.UTF_8))
+    val iv = ByteArray(CHAIN_TRANSPORT_GCM_IV_BYTES).also { SecureRandom().nextBytes(it) }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(
+        Cipher.ENCRYPT_MODE,
+        SecretKeySpec(keyBytes, "AES"),
+        GCMParameterSpec(CHAIN_TRANSPORT_GCM_TAG_BITS, iv)
+    )
+    val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+    return EncryptedTransportPayload(
+        ivBase64 = Base64.getEncoder().encodeToString(iv),
+        ciphertextBase64 = Base64.getEncoder().encodeToString(ciphertext)
+    )
+}
+
+private fun decryptTransportPayload(sharedSecret: String, ivBase64: String, ciphertextBase64: String): String? {
+    val keyBytes = MessageDigest.getInstance("SHA-256")
+        .digest(sharedSecret.toByteArray(Charsets.UTF_8))
+    val iv = runCatching { Base64.getDecoder().decode(ivBase64) }.getOrNull() ?: return null
+    val ciphertext = runCatching { Base64.getDecoder().decode(ciphertextBase64) }.getOrNull() ?: return null
+    val plaintextBytes = runCatching {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(keyBytes, "AES"),
+            GCMParameterSpec(CHAIN_TRANSPORT_GCM_TAG_BITS, iv)
+        )
+        cipher.doFinal(ciphertext)
+    }.getOrNull() ?: return null
+    return plaintextBytes.toString(Charsets.UTF_8)
 }
 
 private fun hasPostNotificationsPermission(context: Context): Boolean {
@@ -1643,7 +1731,13 @@ private const val CHAIN_WIPE_RELEASE_PATH = "/argus/v1/wipe-release"
 private const val HEADER_AUTH_NODE_ID = "X-Argus-Auth-Node"
 private const val HEADER_AUTH_TIMESTAMP_MS = "X-Argus-Auth-Timestamp-Ms"
 private const val HEADER_AUTH_SIGNATURE = "X-Argus-Auth-Signature"
+private const val HEADER_TRANSPORT_ENCRYPTION = "X-Argus-Enc"
+private const val HEADER_TRANSPORT_ENCRYPTION_IV = "X-Argus-Enc-Iv"
+private const val CHAIN_TRANSPORT_ENCRYPTION_SCHEME = "aes-256-gcm-v1"
+private const val CHAIN_TRANSPORT_GCM_IV_BYTES = 12
+private const val CHAIN_TRANSPORT_GCM_TAG_BITS = 128
 private const val CHAIN_MAX_PEERS = 24
+private const val CHAIN_SHARED_SECRET_MIN_LENGTH = 12
 private const val CHAIN_MAX_DATASET = 5000
 private const val CHAIN_HTTP_TIMEOUT_MS = 900
 private const val CHAIN_DISCOVERY_CONCURRENCY = 24
