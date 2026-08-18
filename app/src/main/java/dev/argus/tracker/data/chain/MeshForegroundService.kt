@@ -11,6 +11,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.argus.tracker.ArgusApplication
+import dev.argus.tracker.data.AppEncryptionManager
+import dev.argus.tracker.data.OperationalErrorLogStore
 import dev.argus.tracker.data.SecureSettingsStore
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.channels.awaitClose
@@ -35,10 +37,24 @@ class MeshForegroundService : Service() {
 
         startAsForeground()
         MeshForegroundServiceController.setActive(this, true)
-        (applicationContext as? ArgusApplication)
-            ?.container
-            ?.chainLinkCoordinator
-            ?.ensureServerRunning()
+        runCatching {
+            (applicationContext as? ArgusApplication)
+                ?.container
+                ?.chainLinkCoordinator
+                ?.ensureServerRunning()
+        }.onFailure { error ->
+            OperationalErrorLogStore.append(
+                context = this,
+                category = "MESH_FOREGROUND",
+                source = "service_start",
+                message = "Mesh foreground startup deferred: ${error.message ?: "unknown error"}",
+                severity = "WARN"
+            )
+            MeshForegroundServiceController.setActive(this, false)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         return START_STICKY
     }
@@ -47,10 +63,15 @@ class MeshForegroundService : Service() {
         super.onDestroy()
         MeshForegroundServiceController.setActive(this, false)
         if (!MeshForegroundServiceController.shouldRun(this)) {
-            (applicationContext as? ArgusApplication)
-                ?.container
-                ?.chainLinkCoordinator
-                ?.stopServer()
+            if (AppEncryptionManager.requiresLaunchUnlock(this) && !AppEncryptionManager.isSessionUnlocked()) {
+                return
+            }
+            runCatching {
+                (applicationContext as? ArgusApplication)
+                    ?.container
+                    ?.chainLinkCoordinator
+                    ?.stopServer()
+            }
         }
     }
 
@@ -106,6 +127,7 @@ object MeshForegroundServiceController {
     private const val KEY_MESH_FOREGROUND_ACTIVE = "mesh_foreground_active"
 
     fun shouldRun(context: Context): Boolean =
+        !(AppEncryptionManager.requiresLaunchUnlock(context) && !AppEncryptionManager.isSessionUnlocked()) &&
         ScanSettings.isChainLinkEnabled(context) &&
             ScanSettings.isChainPersistentChannelEnabled(context)
 
