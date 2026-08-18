@@ -19,6 +19,9 @@ Argusdroid is a local-first Android RF and telemetry intelligence system. It ing
 	- Optional startup gate can require biometric/device credential, PIN, or password before secure startup tasks run.
 	- Auto-lock timeout invalidates in-memory session key after app background dwell exceeds policy.
 	- Manual session lock clears active in-memory key without changing persisted policy.
+	- While startup/launch-lock gates are active, runtime content is fully obscured and interaction-blocked until unlock completes.
+- Screen privacy hardening:
+	- Main activity applies `FLAG_SECURE` to prevent recents thumbnails, screenshots, and screen recordings from exposing app content.
 - Protective wipe policy:
 	- Optional wipe-on-failed-credential mode clears local encrypted data after 5 failed passcode attempts.
 	- Lockout escalation is enforced before threshold (`15s`, `60s`, `300s`, `900s`).
@@ -94,8 +97,15 @@ Cellular encounter payloads now include expanded modem/service telemetry when av
 - Foreground live updates can scan while the map is open, with optional moving-only and since-snapshot filters where supported.
 - Pin metadata search, source/type filters, identity labels, precise-dot rendering, and configurable pin limits support dense map review.
 - Optional marker clustering with adjustable range, coverage-radius and sweep overlays, and map diagnostics help keep high-volume views usable.
+- Scanner sweep animation controls include `Conservative`, `Balanced`, and `Smooth` speed presets.
+- Signal Link Lines panel:
+	- Draw nearest target link per selected source type, or draw all visible links for checked source types.
+	- Source-matched animated polylines with optional camera in-view gating.
+	- Optional all-lines max-range filter to limit link rendering distance.
+	- Default configuration enables nearest-link mode with Aircraft + Camera selected and camera in-view gating enabled.
 - Aircraft map includes heading-aware markers and large-radius filtering.
 - Sticky compass mini-map supports Picture-in-Picture handoff from map contexts, including PiP zoom and return actions.
+- Camera map behavior is cache-aware for fixed infrastructure: cached camera pins can render immediately, but stale cached cameras are dropped after fresh camera-source scans no longer report them.
 - No-fly zone overlays:
 	- Local ingest: ingest/no_fly_zones.geojson.
 	- Public fallback: FAA ArcGIS UAS Facility Map and National Security UAS restrictions.
@@ -154,6 +164,7 @@ Disabled source gates prevent that source from participating in both scheduled a
 
 - Scanner noise controls support aggregate-only sweeps and one-off randomized ID suppression.
 - Operational logs and source timing diagnostics are first-class in settings and logs surfaces.
+- Worker and foreground ingest loops append structured operational error logs on dependency initialization, scanner, repository, chain-sync, and scheduler failures.
 - Summary metrics include all source types across the 24h reporting window.
 - Live-mode-only mode now applies a cold-start reset path that clears local encounters/devices/logs before secure startup continuation.
 
