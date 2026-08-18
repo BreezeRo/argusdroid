@@ -1,6 +1,7 @@
 package dev.argus.tracker.data
 
 import dev.argus.tracker.data.db.EncounterEntity
+import dev.argus.tracker.data.db.DeviceLatestStateEntity
 import dev.argus.tracker.domain.Encounter
 import dev.argus.tracker.domain.EncounterProvenance
 import dev.argus.tracker.domain.EncounterSource
@@ -30,6 +31,45 @@ fun Encounter.toEntity(): EncounterEntity = EncounterEntity(
 
 fun EncounterEntity.toDomain(): Encounter = Encounter(
     id = id,
+    timestampEpochMs = timestampEpochMs,
+    source = runCatching { EncounterSource.valueOf(source) }.getOrDefault(EncounterSource.UNKNOWN_RF),
+    primaryId = primaryId,
+    secondaryId = secondaryId,
+    rssiDbm = rssiDbm,
+    frequencyMhz = frequencyMhz,
+    lat = lat,
+    lon = lon,
+    rawPayloadJson = rawPayloadJson,
+    encounterFingerprint = encounterFingerprint,
+    provenance = runCatching { EncounterProvenance.valueOf(provenance) }
+        .getOrDefault(EncounterProvenance.LOCAL),
+    provenanceNodeId = provenanceNodeId,
+    provenanceOriginNodeId = provenanceOriginNodeId,
+    provenancePathNodeIds = provenancePathNodeIds,
+    provenanceReceivedAtEpochMs = provenanceReceivedAtEpochMs,
+    provenanceHopCount = provenanceHopCount
+)
+
+fun Encounter.toLatestStateEntity(): DeviceLatestStateEntity = DeviceLatestStateEntity(
+    source = source.name,
+    primaryId = primaryId,
+    timestampEpochMs = timestampEpochMs,
+    secondaryId = secondaryId,
+    rssiDbm = rssiDbm,
+    frequencyMhz = frequencyMhz,
+    lat = lat,
+    lon = lon,
+    rawPayloadJson = rawPayloadJson,
+    encounterFingerprint = encounterFingerprint ?: computeEncounterFingerprint(this),
+    provenance = provenance.name,
+    provenanceNodeId = provenanceNodeId,
+    provenanceOriginNodeId = provenanceOriginNodeId,
+    provenancePathNodeIds = provenancePathNodeIds,
+    provenanceReceivedAtEpochMs = provenanceReceivedAtEpochMs,
+    provenanceHopCount = provenanceHopCount
+)
+
+fun DeviceLatestStateEntity.toDomain(): Encounter = Encounter(
     timestampEpochMs = timestampEpochMs,
     source = runCatching { EncounterSource.valueOf(source) }.getOrDefault(EncounterSource.UNKNOWN_RF),
     primaryId = primaryId,

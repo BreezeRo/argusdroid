@@ -138,6 +138,7 @@ class DefaultAppContainer(
             .openHelperFactory(createSqlCipherFactory(passphrase))
             .addMigrations(ArgusDatabase.MIGRATION_1_2)
             .addMigrations(ArgusDatabase.MIGRATION_2_3)
+            .addMigrations(ArgusDatabase.MIGRATION_3_4)
             .build()
 
         // Force open at construction time so we can recover instead of crashing later on main.
@@ -163,7 +164,10 @@ class DefaultAppContainer(
     }
 
     override val repository: EncounterRepository by lazy {
-        RoomEncounterRepository(db.encounterDao())
+        RoomEncounterRepository(
+            dao = db.encounterDao(),
+            deviceLatestStateDao = db.deviceLatestStateDao()
+        )
     }
 
     override val chainLinkCoordinator: ChainLinkCoordinator by lazy {
