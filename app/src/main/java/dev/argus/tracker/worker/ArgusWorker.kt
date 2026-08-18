@@ -69,6 +69,19 @@ class ArgusWorker(
                 )
             }
         runCatching {
+            MagneticBackgroundAlertEngine.maybeAlertFromBatch(
+                context = applicationContext
+            )
+        }.onFailure { error ->
+            OperationalErrorLogStore.append(
+                context = applicationContext,
+                category = "ALERT_MONITOR",
+                source = "MAGNETIC",
+                message = "Background magnetic alert monitor failed: ${error.message ?: "unknown"}",
+                severity = "WARN"
+            )
+        }
+        runCatching {
             FlockAlertMonitor.evaluateAndNotify(
                 context = applicationContext,
                 repository = repository

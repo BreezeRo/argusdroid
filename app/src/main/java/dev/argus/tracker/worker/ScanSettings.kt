@@ -144,6 +144,7 @@ object ScanSettings {
     const val DEFAULT_AIRCRAFT_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_CAMERA_SOURCE_SCAN_INTERVAL_SECONDS = 900L
     const val DEFAULT_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS = 5L
+    const val MAGNETIC_SOURCE_SCAN_INTERVAL_REALTIME_SECONDS = 0L
     const val DEFAULT_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 120.0
     const val MIN_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 40.0
     const val MAX_MAGNETIC_EVENT_TRIGGER_THRESHOLD_UT = 2500.0
@@ -162,7 +163,7 @@ object ScanSettings {
     const val MIN_SOURCE_SCAN_INTERVAL_SECONDS = 1L
     const val MAX_SOURCE_SCAN_INTERVAL_SECONDS = 3600L
     private val SHARED_ALLOWED_CADENCE_SECONDS: List<Long> =
-        (1L..60L).toList() + listOf(120L, 300L, 600L, 900L, 1800L, 3600L)
+        listOf(0L) + (1L..60L).toList() + listOf(120L, 300L, 600L, 900L, 1800L, 3600L)
     val ALLOWED_INTERVALS_SECONDS = SHARED_ALLOWED_CADENCE_SECONDS
     val ALLOWED_CHAIN_AUTO_SYNC_INTERVAL_SECONDS = listOf(15L, 30L, 60L, 120L, 300L, 600L)
     val ALLOWED_CHAIN_HEARTBEAT_INTERVAL_SECONDS = listOf(10L, 15L, 20L, 30L, 60L)
@@ -201,6 +202,7 @@ object ScanSettings {
     )
     val SOURCE_TYPES = SourceCatalog.SCAN_SOURCE_KEYS
     val ALLOWED_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
+    val ALLOWED_MAGNETIC_SOURCE_SCAN_INTERVAL_SECONDS: List<Long> = SHARED_ALLOWED_CADENCE_SECONDS
 
     @Volatile
     private var stickyCompassMapPipEligibleCache: Boolean? = null
@@ -1430,14 +1432,22 @@ object ScanSettings {
         val prefs = SecureSettingsStore.prefs(context, PREFS_NAME)
         val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
         val value = prefs.getLong(key, defaultSourceScanIntervalSeconds(canonicalType))
-        return value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        return if (canonicalType == SourceCatalog.KEY_MAGNETIC) {
+            value.coerceIn(MAGNETIC_SOURCE_SCAN_INTERVAL_REALTIME_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        } else {
+            value.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        }
     }
 
     fun setSourceScanIntervalSeconds(context: Context, sourceType: String, seconds: Long) {
         val normalizedType = sourceType.trim().lowercase()
         val canonicalType = canonicalSourceIntervalType(normalizedType)
         if (canonicalType !in SOURCE_TYPES) return
-        val safeValue = seconds.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        val safeValue = if (canonicalType == SourceCatalog.KEY_MAGNETIC) {
+            seconds.coerceIn(MAGNETIC_SOURCE_SCAN_INTERVAL_REALTIME_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        } else {
+            seconds.coerceIn(MIN_SOURCE_SCAN_INTERVAL_SECONDS, MAX_SOURCE_SCAN_INTERVAL_SECONDS)
+        }
         val key = sourceTimingKey(canonicalType, KEY_SOURCE_SCAN_INTERVAL_SECONDS_SUFFIX)
         SecureSettingsStore.prefs(context, PREFS_NAME)
             .edit()
@@ -1610,6 +1620,7 @@ object ScanSettings {
     }
 
     fun formatInterval(seconds: Long): String = when {
+        seconds <= 0L -> "Realtime"
         seconds < 60L -> "$seconds sec"
         seconds % 60L == 0L -> "${seconds / 60L} min"
         else -> "${seconds}s"
