@@ -68,12 +68,52 @@ class CellularScanner(
         telephonyManager: TelephonyManager,
         location: DetectionLocation?
     ): Encounter? {
+        val serviceState = runCatching { telephonyManager.serviceState }.getOrNull()
         val payload = JSONObject()
             .put("registered", isRegistered)
             .put("timestampMillis", timestampMillis)
             .put("networkOperator", telephonyManager.networkOperator)
             .put("networkOperatorName", telephonyManager.networkOperatorName)
             .put("dataNetworkType", telephonyManager.dataNetworkType)
+            .put("voiceNetworkType", telephonyManager.voiceNetworkType)
+            .put("dataState", telephonyManager.dataState)
+            .put("networkCountryIso", telephonyManager.networkCountryIso)
+            .put("simOperator", telephonyManager.simOperator)
+            .put("simOperatorName", telephonyManager.simOperatorName)
+            .put("simCountryIso", telephonyManager.simCountryIso)
+            .put("phoneType", telephonyManager.phoneType)
+            .put("isDataRoamingEnabled", runCatching { telephonyManager.isDataRoamingEnabled }.getOrDefault(false))
+
+        serviceState?.let { state: android.telephony.ServiceState ->
+            val emergencyOnly = try {
+                state.javaClass.getMethod("isEmergencyOnly").invoke(state) as Boolean
+            } catch (_: Throwable) {
+                false
+            }
+            val roaming = try {
+                state.javaClass.getMethod("getRoaming").invoke(state) as Boolean
+            } catch (_: Throwable) {
+                false
+            }
+            payload
+                .put("serviceState", state.state)
+                .put("isEmergencyOnly", emergencyOnly)
+                .put("isRoaming", roaming)
+
+            val nrState = runCatching {
+                state.javaClass.getMethod("getNrState").invoke(state) as Int
+            }.getOrNull()
+            if (nrState != null) {
+                payload.put("nrState", nrState)
+            }
+        }
+
+        val connectionStatus = runCatching {
+            this.javaClass.getMethod("getCellConnectionStatus").invoke(this) as Int
+        }.getOrNull()
+        if (connectionStatus != null) {
+            payload.put("cellConnectionStatus", connectionStatus)
+        }
 
         return when (this) {
             is CellInfoLte -> {
@@ -90,6 +130,11 @@ class CellularScanner(
                     .put("ta", cellSignalStrength.timingAdvance)
                     .put("asu", cellSignalStrength.asuLevel)
                     .put("level", cellSignalStrength.level)
+
+                runCatching { payload.put("rsrp", cellSignalStrength.rsrp) }
+                runCatching { payload.put("rsrq", cellSignalStrength.rsrq) }
+                runCatching { payload.put("rssnr", cellSignalStrength.rssnr) }
+                runCatching { payload.put("cqi", cellSignalStrength.cqi) }
 
                 Encounter(
                     timestampEpochMs = now,
@@ -161,6 +206,20 @@ class CellularScanner(
                     .put("csiRsrp", if (csiRsrp == Int.MAX_VALUE) JSONObject.NULL else csiRsrp)
                     .put("ssRsrp", if (ssRsrp == Int.MAX_VALUE) JSONObject.NULL else ssRsrp)
 
+                val ssRsrq = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getSsRsrq").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                val ssSinr = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getSsSinr").invoke(cellSignalStrength) as Int
+                }.getOrElse {
+                    Int.MAX_VALUE
+                }
+                payload
+                    .put("ssRsrq", if (ssRsrq == Int.MAX_VALUE) JSONObject.NULL else ssRsrq)
+                    .put("ssSinr", if (ssSinr == Int.MAX_VALUE) JSONObject.NULL else ssSinr)
+
                 Encounter(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
@@ -186,6 +245,13 @@ class CellularScanner(
                     .put("mnc", id.mncString)
                     .put("asu", cellSignalStrength.asuLevel)
                     .put("level", cellSignalStrength.level)
+
+                val ecNo = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getEcNo").invoke(cellSignalStrength) as Int
+                }.getOrNull()
+                if (ecNo != null) {
+                    payload.put("ecNo", ecNo)
+                }
 
                 Encounter(
                     timestampEpochMs = now,
@@ -213,6 +279,13 @@ class CellularScanner(
                     .put("asu", cellSignalStrength.asuLevel)
                     .put("level", cellSignalStrength.level)
 
+                val bitErrorRate = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getBitErrorRate").invoke(cellSignalStrength) as Int
+                }.getOrNull()
+                if (bitErrorRate != null) {
+                    payload.put("bitErrorRate", bitErrorRate)
+                }
+
                 Encounter(
                     timestampEpochMs = now,
                     source = EncounterSource.CELL,
@@ -235,6 +308,13 @@ class CellularScanner(
                     .put("systemId", id.systemId)
                     .put("asu", cellSignalStrength.asuLevel)
                     .put("level", cellSignalStrength.level)
+
+                val evdoSnr = runCatching {
+                    cellSignalStrength.javaClass.getMethod("getEvdoSnr").invoke(cellSignalStrength) as Int
+                }.getOrNull()
+                if (evdoSnr != null) {
+                    payload.put("evdoSnr", evdoSnr)
+                }
 
                 Encounter(
                     timestampEpochMs = now,

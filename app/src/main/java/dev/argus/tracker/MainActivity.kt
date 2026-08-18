@@ -1,13 +1,18 @@
 package dev.argus.tracker
 
 import android.Manifest
+import android.app.PendingIntent
+import android.app.RemoteAction
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Icon
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.util.Rational
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,17 +21,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import dev.argus.tracker.domain.SourceCatalog
 import dev.argus.tracker.sensing.LocationSnapshotProvider
 import dev.argus.tracker.sensing.NfcScanner
 import dev.argus.tracker.sensing.NfcTagIngestStore
 import dev.argus.tracker.ui.ArgusApp
+import dev.argus.tracker.ui.releaseMapUiMemory
 import dev.argus.tracker.worker.ScanSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+    companion object {
+        private const val ACTION_PIP_ZOOM_IN = "dev.argus.tracker.action.PIP_ZOOM_IN"
+        private const val ACTION_PIP_ZOOM_OUT = "dev.argus.tracker.action.PIP_ZOOM_OUT"
+        private const val ACTION_PIP_OPEN_APP = "dev.argus.tracker.action.PIP_OPEN_APP"
+    }
+
     private var currentIntent by mutableStateOf<Intent?>(null)
+    private var inPictureInPictureModeState by mutableStateOf(false)
     private var nfcAdapter: NfcAdapter? = null
 
     private val nfcReaderCallback = NfcAdapter.ReaderCallback { tag ->
@@ -45,7 +59,10 @@ class MainActivity : ComponentActivity() {
         requestRequiredPermissionsIfNeeded()
         enableEdgeToEdge()
         setContent {
-            ArgusApp(notificationIntent = currentIntent)
+            ArgusApp(
+                notificationIntent = currentIntent,
+                inPictureInPictureMode = inPictureInPictureModeState
+            )
         }
     }
 
@@ -61,9 +78,37 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        handlePipActionIntent(intent)
         setIntent(intent)
         ingestNfcIntent(intent)
         currentIntent = intent
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        maybeEnterStickyCompassPip()
+    }
+
+    override fun onPictureInPictureRequested(): Boolean {
+        return maybeEnterStickyCompassPip() || super.onPictureInPictureRequested()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPictureInPictureModeState = isInPictureInPictureMode
+    }
+
+    override fun onLowMemory() {
+        releaseMapUiMemory(context = applicationContext, level = ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+        super.onLowMemory()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        releaseMapUiMemory(context = applicationContext, level = level)
+        super.onTrimMemory(level)
     }
 
     private fun ingestNfcIntent(intent: Intent?) {
@@ -157,6 +202,84 @@ class MainActivity : ComponentActivity() {
         if (missing.isNotEmpty()) {
             permissionLauncher.launch(missing.toTypedArray())
         }
+    }
+
+    private fun maybeEnterStickyCompassPip(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        if (isInPictureInPictureMode) return false
+        if (!ScanSettings.isStickyCompassMapEnabled(this)) return false
+        if (!ScanSettings.isStickyCompassMapPipEligible(this)) return false
+
+        val zoomInIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_PIP_ZOOM_IN
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val zoomOutIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_PIP_ZOOM_OUT
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_PIP_OPEN_APP
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+
+        val zoomInPendingIntent = PendingIntent.getActivity(
+            this,
+            1001,
+            zoomInIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val zoomOutPendingIntent = PendingIntent.getActivity(
+            this,
+            1002,
+            zoomOutIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val openAppPendingIntent = PendingIntent.getActivity(
+            this,
+            1003,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val actions = listOf(
+            RemoteAction(
+                Icon.createWithResource(this, android.R.drawable.ic_menu_add),
+                "Zoom In",
+                "Zoom in map",
+                zoomInPendingIntent
+            ),
+            RemoteAction(
+                Icon.createWithResource(this, android.R.drawable.ic_menu_revert),
+                "Zoom Out",
+                "Zoom out map",
+                zoomOutPendingIntent
+            ),
+            RemoteAction(
+                Icon.createWithResource(this, android.R.drawable.ic_menu_view),
+                "Open App",
+                "Return to full app",
+                openAppPendingIntent
+            )
+        )
+
+        val params = android.app.PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(9, 16))
+            .setActions(actions)
+            .build()
+        return runCatching { enterPictureInPictureMode(params) }
+            .getOrDefault(false)
+    }
+
+    private fun handlePipActionIntent(intent: Intent) {
+        if (intent.action != ACTION_PIP_OPEN_APP) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!isInPictureInPictureMode) return
+
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        runCatching { startActivity(launchIntent) }
     }
 
     private fun requiredRuntimePermissions(): List<String> {
