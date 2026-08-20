@@ -4135,6 +4135,7 @@ private fun HomePage(
     startMessage: String?,
     startMessageIsError: Boolean
 ) {
+    val context = LocalContext.current
     var homePointRadiusExpanded by remember { mutableStateOf(false) }
     var homePointStatusMessage by remember { mutableStateOf<String?>(null) }
     val homeLiveMagneticMagnitudeMicroTesla by rememberRealtimeMagneticMagnitudeMicroTesla(
@@ -21483,6 +21484,7 @@ private fun isMapPinWithinSelectedRange(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun MapTimeRangeSelector(
     selectedPreset: MapTimeRangePreset,
     onPresetChanged: (MapTimeRangePreset) -> Unit,
