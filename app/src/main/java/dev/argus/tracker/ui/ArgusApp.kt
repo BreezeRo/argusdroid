@@ -9054,7 +9054,7 @@ private fun DetectionLogsPage(
                             Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
                             Text("Message", modifier = Modifier.width(380.dp), fontWeight = FontWeight.Bold)
                         }
-                        filteredLogs.forEach { entry ->
+                        filteredLogs.forEachIndexed { index, entry ->
                             val rowTypeLabel = when (entry.type) {
                                 AlertLogType.APPROACH -> "Approach"
                                 AlertLogType.TRACKER -> "Tracker"
@@ -9063,9 +9063,15 @@ private fun DetectionLogsPage(
                                 AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
                                 AlertLogType.NFC -> "NFC"
                             }
+                            val rowBackgroundColor = if (index % 2 == 0) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                            } else {
+                                Color.Transparent
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .background(rowBackgroundColor)
                                     .clickable {
                                         when {
                                             entry.type == AlertLogType.APPROACH -> onOpenApproachMap(entry.source, entry.primaryId)
@@ -9309,10 +9315,16 @@ private fun ErrorLogsPage(
                             Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
                             Text("Message", modifier = Modifier.width(420.dp), fontWeight = FontWeight.Bold)
                         }
-                        filteredLogs.forEach { entry ->
+                        filteredLogs.forEachIndexed { index, entry ->
+                            val rowBackgroundColor = if (index % 2 == 0) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                            } else {
+                                Color.Transparent
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .background(rowBackgroundColor)
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
@@ -18867,10 +18879,16 @@ private fun DevicesPage(
                             Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
                             Text("Last Seen", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
-                        pagedDevices.forEach { device ->
+                        pagedDevices.forEachIndexed { index, device ->
+                            val rowBackgroundColor = if (index % 2 == 0) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                            } else {
+                                Color.Transparent
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .background(rowBackgroundColor)
                                     .clickable { onDeviceClick(device) }
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -19513,14 +19531,20 @@ private fun EncountersPage(
                             Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
                             Text("Timestamp", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
-                        pagedEncounters.forEach { encounter ->
+                        pagedEncounters.forEachIndexed { index, encounter ->
                             val connectionSecurity = analyzeConnectionSecurity(
                                 source = encounter.source.name,
                                 encounters = listOf(encounter)
                             )
+                            val rowBackgroundColor = if (index % 2 == 0) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                            } else {
+                                Color.Transparent
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .background(rowBackgroundColor)
                                     .clickable { onEncounterClick(encounter) }
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
