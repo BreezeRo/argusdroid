@@ -19118,6 +19118,17 @@ private fun EncountersPage(
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             pagedEncounters.forEach { encounter ->
+                val connectionSecurity = remember(
+                    encounter.source,
+                    encounter.primaryId,
+                    encounter.secondaryId,
+                    encounter.rawPayloadJson
+                ) {
+                    analyzeConnectionSecurity(
+                        source = encounter.source.name,
+                        encounters = listOf(encounter)
+                    )
+                }
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -19141,6 +19152,13 @@ private fun EncountersPage(
                                 text = "Marked as My Device",
                                 color = Color(0xFF2E7D32),
                                 fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        if (connectionSecurity?.isInsecure == true) {
+                            Text(
+                                text = "Insecure connectivity risk: ${connectionSecurity.summary}. Avoid connecting.",
+                                color = Color(0xFFB3261E),
+                                fontWeight = FontWeight.Bold
                             )
                         }
                         if (
@@ -19990,13 +20008,28 @@ private fun DeviceDetailPage(
             }
         )
 
-        if (!item.lastRawPayloadJson.isNullOrBlank() && deviceEncounter != null) {
+        val hasSourceSpecificDetails = !item.lastRawPayloadJson.isNullOrBlank() && deviceEncounter != null
+        if (hasSourceSpecificDetails) {
             SourceSpecificDetailsSection(
                 encounter = deviceEncounter,
                 currentLocation = currentLocation,
                 relatedEncounters = deviceEncounters
             )
         }
+
+        if (hasSourceSpecificDetails) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
+            )
+        }
+        Text(
+            text = "Argus Details",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
 
         if (item.gpsSpoofSuspected) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -20184,6 +20217,17 @@ private fun EncounterDetailPage(
             Text("Encounter not found in current encounter window.")
             return
         }
+        val connectionSecurity = remember(
+            encounter.source,
+            encounter.primaryId,
+            encounter.secondaryId,
+            encounter.rawPayloadJson
+        ) {
+            analyzeConnectionSecurity(
+                source = encounter.source.name,
+                encounters = listOf(encounter)
+            )
+        }
         ResponsiveDetailColumns(
             left = {
                 DetailRow("Source", encounter.source.name)
@@ -20228,6 +20272,24 @@ private fun EncounterDetailPage(
                 )
                 if (encounter.rawPayloadJson.isNotBlank()) {
                     SourceSpecificDetailsSection(encounter = encounter, currentLocation = currentLocation)
+                }
+                if (connectionSecurity != null) {
+                    DetailRow(
+                        "Connectivity Security",
+                        if (connectionSecurity.isInsecure) {
+                            "INSECURE - Avoid connecting"
+                        } else {
+                            "No immediate risk"
+                        }
+                    )
+                    DetailRow(
+                        "Connectivity Risk Confidence",
+                        String.format(Locale.US, "%.0f%%", connectionSecurity.confidence * 100.0)
+                    )
+                    DetailRow("Connectivity Assessment", connectionSecurity.summary)
+                    if (connectionSecurity.indicators.isNotEmpty()) {
+                        DetailRow("Connectivity Indicators", connectionSecurity.indicators.joinToString(" | "))
+                    }
                 }
                 DetailRow("Payload", encounter.rawPayloadJson)
             }
