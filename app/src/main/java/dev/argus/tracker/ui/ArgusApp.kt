@@ -2923,7 +2923,7 @@ fun ArgusApp(
                         ScanSettings.setTrackerNotificationsEnabled(context, true)
                         ScanSettings.setFlockNotificationsEnabled(context, true)
                         ScanSettings.setCameraInViewNotificationsEnabled(context, true)
-                        ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, true)
+                        ScanSettings.setNoFlyPassThroughNotificationsEnabled(context, false)
                         ScanSettings.setNfcNotificationsEnabled(context, true)
                         ScanSettings.setStingrayNotificationsEnabled(context, true)
                         ScanSettings.setMagneticIncreaseNotificationsEnabled(context, true)
@@ -2971,7 +2971,7 @@ fun ArgusApp(
                         trackerNotificationsEnabled = true
                         flockNotificationsEnabled = true
                         cameraInViewNotificationsEnabled = true
-                        noFlyPassThroughNotificationsEnabled = true
+                        noFlyPassThroughNotificationsEnabled = false
                         nfcNotificationsEnabled = true
                         stingrayNotificationsEnabled = true
                         magneticIncreaseNotificationsEnabled = true
