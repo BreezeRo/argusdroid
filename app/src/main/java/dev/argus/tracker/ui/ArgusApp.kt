@@ -352,6 +352,54 @@ private const val EXTRA_NO_FLY_LAT = "extra_no_fly_lat"
 private const val EXTRA_NO_FLY_LON = "extra_no_fly_lon"
 private const val EXTRA_NO_FLY_ZONE_IDS = "extra_no_fly_zone_ids"
 private const val EXTRA_MAGNETIC_OPEN_POPUP = "extra_magnetic_open_popup"
+private val LOCAL_DEVICE_CLASSIFIER_EXACT_SIGNATURES = listOf(
+    DeviceClassifierExactSignature(
+        category = "Router / Access Point",
+        exactTokens = setOf("fritzbox", "unifi ap", "tp-link router", "netgear nighthawk", "eero"),
+        sourceHints = setOf("WIFI")
+    ),
+    DeviceClassifierExactSignature(
+        category = "Smart TV / Streaming",
+        exactTokens = setOf("chromecast", "apple tv", "roku", "bravia", "fire tv"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC")
+    ),
+    DeviceClassifierExactSignature(
+        category = "Washer / Dishwasher Appliance",
+        exactTokens = setOf("dishwasher", "washing machine", "washer", "dryer", "lg thinq"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE")
+    ),
+    DeviceClassifierExactSignature(
+        category = "Security Camera",
+        exactTokens = setOf("nest cam", "ring camera", "arlo", "wyze cam", "reolink"),
+        sourceHints = setOf("WIFI", "CAMERA", "BLUETOOTH_LE")
+    )
+)
+private val LOCAL_DEVICE_CLASSIFIER_VENDOR_SIGNATURES = listOf(
+    DeviceClassifierVendorSignature(
+        category = "Router / Access Point",
+        vendorKeywords = setOf("ubiquiti", "tp-link", "netgear", "linksys", "asus", "fritz", "eero", "arris", "technicolor"),
+        ouiPrefixes = setOf("24A43C", "F09FC2", "3C37E4", "2C30F2", "6C5AB5"),
+        sourceHints = setOf("WIFI")
+    ),
+    DeviceClassifierVendorSignature(
+        category = "Smart TV / Streaming",
+        vendorKeywords = setOf("samsung", "lg", "sony", "tcl", "hisense", "roku", "amazon", "apple"),
+        ouiPrefixes = setOf("FCF136", "E8ABFA", "7C6456", "B8D9CE"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC")
+    ),
+    DeviceClassifierVendorSignature(
+        category = "Washer / Dishwasher Appliance",
+        vendorKeywords = setOf("whirlpool", "bosch", "miele", "electrolux", "ge appliances", "lg", "samsung"),
+        ouiPrefixes = emptySet(),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE")
+    ),
+    DeviceClassifierVendorSignature(
+        category = "Printer / Scanner",
+        vendorKeywords = setOf("hp", "epson", "brother", "canon", "xerox"),
+        ouiPrefixes = setOf("3CD92B", "00155D", "9C5C8E"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE")
+    )
+)
 private val LOCAL_DEVICE_CLASSIFIER_SIGNATURES = listOf(
     DeviceClassifierSignature(
         category = "Router / Access Point",
@@ -565,12 +613,35 @@ private data class DeviceClassifierSignature(
     val confidenceWeight: Double = 1.0
 )
 
+private data class DeviceClassifierExactSignature(
+    val category: String,
+    val exactTokens: Set<String>,
+    val sourceHints: Set<String> = emptySet()
+)
+
+private data class DeviceClassifierVendorSignature(
+    val category: String,
+    val vendorKeywords: Set<String>,
+    val ouiPrefixes: Set<String>,
+    val sourceHints: Set<String> = emptySet()
+)
+
+private enum class DeviceClassificationEvidence {
+    EXACT,
+    VENDOR,
+    HEURISTIC
+}
+
 private data class DeviceClassificationResult(
     val category: String,
     val confidence: Double,
-    val matchedSignals: List<String>
+    val matchedSignals: List<String>,
+    val evidence: DeviceClassificationEvidence
 ) {
-    fun summaryLabel(): String = "Likely $category (${(confidence * 100.0).roundToInt()}%)"
+    fun summaryLabel(): String {
+        val prefix = if (evidence == DeviceClassificationEvidence.EXACT) "Identified" else "Likely"
+        return "$prefix $category (${(confidence * 100.0).roundToInt()}%)"
+    }
 }
 
 private data class DeviceItem(
@@ -17711,8 +17782,57 @@ private fun classifyDeviceFromMetadata(
     seenCount: Int
 ): DeviceClassificationResult? {
     val normalizedSource = source.trim().uppercase(Locale.US)
-    val corpus = buildDeviceClassifierCorpus(primaryId, secondaryId, rawPayloadJson)
+    val classifierMetadata = buildDeviceClassifierMetadata(primaryId, secondaryId, rawPayloadJson)
+    val corpus = classifierMetadata.corpus
     if (corpus.isBlank()) return null
+
+    // Stage 1: exact model/type or explicit identity match.
+    val exactMatch = LOCAL_DEVICE_CLASSIFIER_EXACT_SIGNATURES.firstOrNull { signature ->
+        (signature.sourceHints.isEmpty() || normalizedSource in signature.sourceHints) &&
+            signature.exactTokens.any { token -> token in classifierMetadata.exactTokenSet }
+    }
+    if (exactMatch != null) {
+        val matched = exactMatch.exactTokens.filter { token -> token in classifierMetadata.exactTokenSet }.take(4)
+        return DeviceClassificationResult(
+            category = exactMatch.category,
+            confidence = 0.96,
+            matchedSignals = matched,
+            evidence = DeviceClassificationEvidence.EXACT
+        )
+    }
+
+    // Stage 2: vendor/OUI resolution before heuristic matching.
+    var bestVendorSignature: DeviceClassifierVendorSignature? = null
+    var bestVendorScore = 0.0
+    var bestVendorSignals: List<String> = emptyList()
+    LOCAL_DEVICE_CLASSIFIER_VENDOR_SIGNATURES.forEach { signature ->
+        if (signature.sourceHints.isNotEmpty() && normalizedSource !in signature.sourceHints) return@forEach
+        val vendorHits = signature.vendorKeywords.filter { keyword -> corpus.contains(keyword) }
+        val ouiHit = classifierMetadata.ouiPrefix?.takeIf { it in signature.ouiPrefixes }
+        if (vendorHits.isEmpty() && ouiHit == null) return@forEach
+
+        var score = vendorHits.size * 1.15
+        if (ouiHit != null) score += 1.75
+        if (seenCount >= 5) score += 0.1
+
+        if (score > bestVendorScore) {
+            bestVendorScore = score
+            bestVendorSignature = signature
+            bestVendorSignals = buildList {
+                addAll(vendorHits)
+                ouiHit?.let { add("OUI:$it") }
+            }
+        }
+    }
+    if (bestVendorSignature != null && bestVendorScore >= 1.05) {
+        val vendorConfidence = (0.66 + (bestVendorScore / 8.0)).coerceIn(0.66, 0.93)
+        return DeviceClassificationResult(
+            category = bestVendorSignature!!.category,
+            confidence = vendorConfidence,
+            matchedSignals = bestVendorSignals.distinct().take(4),
+            evidence = DeviceClassificationEvidence.VENDOR
+        )
+    }
 
     var bestSignature: DeviceClassifierSignature? = null
     var bestScore = 0.0
@@ -17747,19 +17867,26 @@ private fun classifyDeviceFromMetadata(
     val signature = bestSignature ?: return null
     if (bestScore < 1.05) return null
 
-    val confidence = (0.36 + (bestScore / 6.0)).coerceIn(0.36, 0.95)
+    val confidence = (0.36 + (bestScore / 7.0)).coerceIn(0.36, 0.74)
     return DeviceClassificationResult(
         category = signature.category,
         confidence = confidence,
-        matchedSignals = bestHits.distinct().take(4)
+        matchedSignals = bestHits.distinct().take(4),
+        evidence = DeviceClassificationEvidence.HEURISTIC
     )
 }
 
-private fun buildDeviceClassifierCorpus(
+private data class DeviceClassifierMetadata(
+    val corpus: String,
+    val exactTokenSet: Set<String>,
+    val ouiPrefix: String?
+)
+
+private fun buildDeviceClassifierMetadata(
     primaryId: String,
     secondaryId: String?,
     rawPayloadJson: String?
-): String {
+): DeviceClassifierMetadata {
     val parts = mutableListOf<String>()
     parts += primaryId
     secondaryId?.let(parts::add)
@@ -17777,10 +17904,46 @@ private fun buildDeviceClassifierCorpus(
         payload?.optStringOrNull(key)?.let(parts::add)
     }
 
-    return parts
+    val normalizedParts = parts
         .asSequence()
-        .map { it.lowercase(Locale.US) }
-        .joinToString(separator = " ")
+        .map { normalizeClassifierToken(it) }
+        .filter { it.isNotBlank() }
+        .toList()
+
+    val exactTokenSet = buildSet {
+        normalizedParts.forEach { value ->
+            add(value)
+            value.split(' ')
+                .map { it.trim() }
+                .filter { it.length >= 3 }
+                .forEach { add(it) }
+        }
+    }
+
+    return DeviceClassifierMetadata(
+        corpus = normalizedParts.joinToString(separator = " "),
+        exactTokenSet = exactTokenSet,
+        ouiPrefix = extractOuiPrefix(primaryId)
+    )
+}
+
+private fun normalizeClassifierToken(value: String): String {
+    return value
+        .lowercase(Locale.US)
+        .replace("\"", " ")
+        .replace(Regex("[^a-z0-9]+"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private fun extractOuiPrefix(primaryId: String): String? {
+    val compact = primaryId
+        .uppercase(Locale.US)
+        .replace("-", "")
+        .replace(":", "")
+        .trim()
+    if (compact.length < 6) return null
+    return compact.take(6).takeIf { it.all { ch -> ch.isDigit() || ch in 'A'..'F' } }
 }
 
 private fun standardDeviation(values: List<Double>): Double {
