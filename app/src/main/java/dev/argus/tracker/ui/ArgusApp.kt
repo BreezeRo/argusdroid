@@ -19447,21 +19447,39 @@ private fun EncountersPage(
                 Text("Refreshing encounter list...")
             }
         }
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            AssistChip(onClick = { }, label = { Text("Total $filteredEncounterCount") })
-            filteredSourceCounts
-                .toList()
-                .sortedByDescending { it.second }
-                .forEach { (source, count) ->
-                    AssistChip(
-                        onClick = { },
-                        label = { Text("${formatSourceTypeLabel(source)} $count") }
-                    )
+        val encounterTypeCountScroll = rememberScrollState()
+        LaunchedEffect(filteredSourceCounts, filteredEncounterCount) {
+            if (filteredSourceCounts.size < 2) return@LaunchedEffect
+            while (true) {
+                if (encounterTypeCountScroll.maxValue <= 0) {
+                    delay(1500.milliseconds)
+                    continue
                 }
+                delay(1200.milliseconds)
+                encounterTypeCountScroll.animateScrollTo(encounterTypeCountScroll.maxValue)
+                delay(1200.milliseconds)
+                encounterTypeCountScroll.animateScrollTo(0)
+            }
+        }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(encounterTypeCountScroll)
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AssistChip(onClick = { sourceFilter = null }, label = { Text("Total $filteredEncounterCount") })
+                filteredSourceCounts
+                    .toList()
+                    .sortedByDescending { it.second }
+                    .forEach { (source, count) ->
+                        AssistChip(
+                            onClick = { sourceFilter = source },
+                            label = { Text("${formatSourceTypeLabel(source)} $count") }
+                        )
+                    }
+            }
         }
         Text("Showing ${pagedEncounters.size} of ${filteredEncounterCount} (filtered ${filteredEncounterCount})")
         Text(
