@@ -11315,11 +11315,6 @@ private fun DetectionMapPage(
                                 enabled = currentLocation != null,
                                 label = { Text("Locate", style = MaterialTheme.typography.labelSmall) }
                             )
-                            FilterChip(
-                                selected = effectivePreciseDotsEnabled,
-                                onClick = { preciseDotsEnabled = !preciseDotsEnabled },
-                                label = { Text("Dots", style = MaterialTheme.typography.labelSmall) }
-                            )
                         }
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -11471,6 +11466,17 @@ private fun DetectionMapPage(
                                             checked = identityShowFullNamesEnabled,
                                             onCheckedChange = onIdentityShowFullNamesEnabledChange,
                                             enabled = identityModeEnabled
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                    ) {
+                                        Text("Precise dots")
+                                        Switch(
+                                            checked = preciseDotsEnabled,
+                                            onCheckedChange = { preciseDotsEnabled = it }
                                         )
                                     }
                                     Row(
@@ -11677,6 +11683,17 @@ private fun DetectionMapPage(
                                             checked = identityShowFullNamesEnabled,
                                             onCheckedChange = onIdentityShowFullNamesEnabledChange,
                                             enabled = identityModeEnabled
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                    ) {
+                                        Text("Precise dots")
+                                        Switch(
+                                            checked = preciseDotsEnabled,
+                                            onCheckedChange = { preciseDotsEnabled = it }
                                         )
                                     }
                                     Row(
