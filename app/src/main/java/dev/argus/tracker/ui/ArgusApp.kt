@@ -440,8 +440,8 @@ private data class CellThreatSignal(
 
 private data class ConnectionSecuritySignal(
     val isInsecure: Boolean,
-    val confidence: Double,
     val summary: String,
+    val insecurityFindings: List<String>,
     val indicators: List<String>
 )
 
@@ -16218,6 +16218,32 @@ private fun assessRemoteIdEntityType(normalized: dev.argus.tracker.sensing.remot
 private fun formatCoordinate(value: Double): String =
     String.format(Locale.US, "%.6f", value)
 
+private fun formatConnectivityFinding(finding: String): String = when (finding) {
+    "WIFI_OPEN_AUTH" -> "Wi-Fi open authentication"
+    "WIFI_WEP" -> "Wi-Fi WEP encryption"
+    "WIFI_LEGACY_WPA_TKIP" -> "Wi-Fi legacy WPA/TKIP"
+    "WIFI_ADHOC_IBSS" -> "Wi-Fi ad-hoc IBSS mode"
+    "WIFI_WPS_EXPOSED" -> "Wi-Fi WPS exposed"
+    "WIFI_TRANSITION_MODE" -> "Wi-Fi WPA2/WPA3 transition mode"
+    "WIFI_PMF_NOT_ADVERTISED" -> "Wi-Fi PMF not advertised"
+    "WIFI_HIDDEN_SSID" -> "Wi-Fi hidden SSID"
+    "WIFI_PERSONAL_HOTSPOT" -> "Wi-Fi personal hotspot profile"
+    "BT_CLASSIC_UNBONDED_DISCOVERED" -> "Bluetooth Classic unbonded discovery"
+    "BT_CLASSIC_NETWORKING_CLASS" -> "Bluetooth Classic networking-class device"
+    "BT_CLASSIC_IDENTITY_OBSCURED" -> "Bluetooth Classic obscured identity"
+    "BT_CLASSIC_UNBONDED_CLASSIC_RADIO" -> "Bluetooth Classic unbonded classic-only radio"
+    "BT_CLASSIC_DISCOVERABLE_PERIPHERAL" -> "Bluetooth Classic discoverable peripheral profile"
+    "BLE_CONNECTABLE_ANONYMOUS" -> "BLE connectable anonymous device"
+    "BLE_TRACKER_SIGNATURE" -> "BLE tracker-like signature"
+    "BLE_RANDOMIZED_CONNECTABLE" -> "BLE randomized connectable address"
+    "BLE_LEGACY_ADVERTISING" -> "BLE legacy advertising mode"
+    "BLE_UNCLASSIFIED_CONNECTABLE" -> "BLE unclassified connectable payload"
+    "BLE_FAST_PAIR_SURFACE" -> "BLE Fast Pair service surface"
+    "BLE_EDDYSTONE_CONNECTABLE" -> "BLE Eddystone connectable profile"
+    "BLE_CONSUMER_TRACKER_VENDOR" -> "BLE consumer tracker vendor fingerprint"
+    else -> finding.replace('_', ' ').lowercase(Locale.US)
+}
+
 private fun sourceSpecificDetails(encounter: Encounter): Pair<String, List<Pair<String, String>>> =
     when (encounter.source) {
         EncounterSource.ARGUS_MESH -> "Argus Mesh Peer Details" to readGenericPayloadFields(encounter.rawPayloadJson)
@@ -19485,16 +19511,22 @@ private fun analyzeConnectionSecurity(
 
     return when (source) {
         EncounterSource.WIFI.name -> {
-            val capabilities = encounters
+            val wifiPayloads = encounters
                 .asSequence()
                 .mapNotNull { encounter ->
                     runCatching { JSONObject(encounter.rawPayloadJson) }
                         .getOrNull()
-                        ?.optString("capabilities", "")
-                        ?.trim()
-                        ?.takeIf { it.isNotBlank() }
                 }
                 .toList()
+
+            if (wifiPayloads.isEmpty()) return null
+
+            val capabilities = wifiPayloads
+                .mapNotNull { payload ->
+                    payload.optString("capabilities", "")
+                        .trim()
+                        .takeIf { it.isNotBlank() }
+                }
 
             if (capabilities.isEmpty()) return null
 
@@ -19517,27 +19549,83 @@ private fun analyzeConnectionSecurity(
                         !normalized.contains("sae") &&
                         !normalized.contains("owe"))
             }
+            val ibssCount = capabilities.count { caps ->
+                caps.lowercase(Locale.US).contains("ibss")
+            }
+            val wpsCount = capabilities.count { caps ->
+                caps.lowercase(Locale.US).contains("wps")
+            }
+            val transitionModeCount = capabilities.count { caps ->
+                val normalized = caps.lowercase(Locale.US)
+                (normalized.contains("sae") && normalized.contains("psk")) ||
+                    (normalized.contains("wpa3") && normalized.contains("wpa2"))
+            }
+            val pmfMissingCount = capabilities.count { caps ->
+                val normalized = caps.lowercase(Locale.US)
+                val protectedNetwork = normalized.contains("wpa") || normalized.contains("sae") || normalized.contains("owe")
+                val hasPmfMarker = normalized.contains("mfpc") || normalized.contains("mfpr") || normalized.contains("pmf")
+                protectedNetwork && !hasPmfMarker
+            }
+            val hiddenSsidCount = wifiPayloads.count { payload ->
+                payload.optString("ssid", "").trim().isBlank()
+            }
+            val hotspotRoleCount = wifiPayloads.count { payload ->
+                payload.optString("deviceRoleHint", "")
+                    .trim()
+                    .equals("phone-hotspot", ignoreCase = true)
+            }
 
+            val findings = mutableListOf<String>()
             val indicators = mutableListOf<String>()
-            if (openCount > 0) indicators += "Open authentication observed"
-            if (wepCount > 0) indicators += "WEP authentication observed"
-            if (legacyWeakCount > 0) indicators += "Legacy WPA/TKIP observed"
+            if (openCount > 0) {
+                findings += "WIFI_OPEN_AUTH"
+                indicators += "Open authentication observed"
+            }
+            if (wepCount > 0) {
+                findings += "WIFI_WEP"
+                indicators += "WEP authentication observed"
+            }
+            if (legacyWeakCount > 0) {
+                findings += "WIFI_LEGACY_WPA_TKIP"
+                indicators += "Legacy WPA/TKIP observed"
+            }
+            if (ibssCount > 0) {
+                findings += "WIFI_ADHOC_IBSS"
+                indicators += "Ad-hoc (IBSS) mode observed"
+            }
+            if (wpsCount > 0) {
+                findings += "WIFI_WPS_EXPOSED"
+                indicators += "WPS capability observed"
+            }
+            if (transitionModeCount > 0) {
+                findings += "WIFI_TRANSITION_MODE"
+                indicators += "WPA2/WPA3 transition mode observed"
+            }
+            if (pmfMissingCount > 0) {
+                findings += "WIFI_PMF_NOT_ADVERTISED"
+                indicators += "Protected network without PMF markers"
+            }
+            if (hiddenSsidCount > 0) {
+                findings += "WIFI_HIDDEN_SSID"
+                indicators += "Hidden SSID observed"
+            }
+            if (hotspotRoleCount > 0) {
+                findings += "WIFI_PERSONAL_HOTSPOT"
+                indicators += "Personal hotspot role observed"
+            }
             if (indicators.isEmpty()) return null
-
-            val riskSampleCount = listOf(openCount, wepCount, legacyWeakCount).maxOrNull() ?: 0
-            val confidence = (riskSampleCount.toDouble() / capabilities.size.toDouble())
-                .coerceIn(0.35, 0.98)
 
             val summary = when {
                 wepCount > 0 -> "WEP or legacy encryption detected"
                 openCount > 0 -> "Open Wi-Fi network (no WPA protections)"
+                transitionModeCount > 0 -> "Wi-Fi transition-mode security posture detected"
                 else -> "Weak Wi-Fi cipher settings detected"
             }
 
             ConnectionSecuritySignal(
                 isInsecure = true,
-                confidence = confidence,
                 summary = summary,
+                insecurityFindings = findings,
                 indicators = indicators
             )
         }
@@ -19547,20 +19635,40 @@ private fun analyzeConnectionSecurity(
             val bondState = payload.optInt("bondState", -1)
             val discoverySource = payload.optString("source", "")
             val classLabel = payload.optString("classLabel", "")
+            val deviceAddress = payload.optString("address", "").trim()
+            val deviceName = payload.optString("name", "").trim()
+            val type = payload.optInt("type", -1)
 
             val indicators = mutableListOf<String>()
+            val findings = mutableListOf<String>()
             if (discoverySource.equals("inquiry", ignoreCase = true) && bondState != 12) {
+                findings += "BT_CLASSIC_UNBONDED_DISCOVERED"
                 indicators += "Discovered via inquiry and not bonded"
             }
             if (classLabel.equals("networking", ignoreCase = true)) {
+                findings += "BT_CLASSIC_NETWORKING_CLASS"
                 indicators += "Networking-class Bluetooth device"
+            }
+            if (deviceAddress.isBlank() && deviceName.isBlank()) {
+                findings += "BT_CLASSIC_IDENTITY_OBSCURED"
+                indicators += "Bluetooth Classic identity fields are missing"
+            }
+            if (type == BluetoothDevice.DEVICE_TYPE_CLASSIC && bondState != 12) {
+                findings += "BT_CLASSIC_UNBONDED_CLASSIC_RADIO"
+                indicators += "Classic-only radio observed without bond"
+            }
+            if (discoverySource.equals("inquiry", ignoreCase = true) &&
+                (classLabel.equals("peripheral", ignoreCase = true) || classLabel.equals("audio-video", ignoreCase = true))
+            ) {
+                findings += "BT_CLASSIC_DISCOVERABLE_PERIPHERAL"
+                indicators += "Discoverable peripheral/audio Bluetooth profile"
             }
             if (indicators.isEmpty()) return null
 
             ConnectionSecuritySignal(
                 isInsecure = true,
-                confidence = if (bondState != 12) 0.78 else 0.6,
                 summary = "Untrusted Bluetooth Classic device profile",
+                insecurityFindings = findings,
                 indicators = indicators
             )
         }
@@ -19570,27 +19678,55 @@ private fun analyzeConnectionSecurity(
             val connectable = payload.optBoolean("isConnectable", false)
             val trackerLikely = payload.optBoolean("trackerLikely", false)
             val name = payload.optString("name", "").trim()
+            val isLegacy = payload.optBoolean("isLegacy", false)
+            val serviceUuids = payload.optString("serviceUuids", "")
+                .split(',')
+                .map { it.trim().lowercase(Locale.US) }
+                .filter { it.isNotBlank() }
+            val manufacturerDataCount = payload.optInt("manufacturerSpecificDataSize", 0)
+            val trackerFamilyHint = payload.optString("trackerFamilyHint", "").trim().lowercase(Locale.US)
+            val rawBytesPresent = payload.optString("rawBytesHex", "").isNotBlank()
 
             val indicators = mutableListOf<String>()
+            val findings = mutableListOf<String>()
             if (connectable && name.isBlank()) {
+                findings += "BLE_CONNECTABLE_ANONYMOUS"
                 indicators += "Connectable BLE device without clear identity"
             }
             if (trackerLikely) {
+                findings += "BLE_TRACKER_SIGNATURE"
                 indicators += "Tracker-like BLE signature"
             }
             if (connectable && isLikelyRandomizedMacAddress(latest.primaryId)) {
+                findings += "BLE_RANDOMIZED_CONNECTABLE"
                 indicators += "Randomized BLE address"
+            }
+            if (isLegacy) {
+                findings += "BLE_LEGACY_ADVERTISING"
+                indicators += "Legacy BLE advertising mode observed"
+            }
+            if (connectable && serviceUuids.isEmpty() && manufacturerDataCount <= 0 && rawBytesPresent) {
+                findings += "BLE_UNCLASSIFIED_CONNECTABLE"
+                indicators += "Connectable BLE payload lacks clear service/manufacturer identity"
+            }
+            if (serviceUuids.any { uuid -> uuid.contains("fe2c") }) {
+                findings += "BLE_FAST_PAIR_SURFACE"
+                indicators += "Fast Pair service UUID surface detected"
+            }
+            if (serviceUuids.any { uuid -> uuid.contains("feaa") } && connectable) {
+                findings += "BLE_EDDYSTONE_CONNECTABLE"
+                indicators += "Eddystone-style beacon presented as connectable"
+            }
+            if (trackerFamilyHint in setOf("airtag", "find_my", "tile", "chipolo", "smarttag")) {
+                findings += "BLE_CONSUMER_TRACKER_VENDOR"
+                indicators += "Consumer tracker family fingerprint detected"
             }
             if (indicators.isEmpty()) return null
 
             ConnectionSecuritySignal(
                 isInsecure = true,
-                confidence = when {
-                    trackerLikely && connectable -> 0.86
-                    trackerLikely -> 0.75
-                    else -> 0.62
-                },
                 summary = "Potentially unsafe Bluetooth LE peripheral",
+                insecurityFindings = findings,
                 indicators = indicators
             )
         }
@@ -20162,11 +20298,15 @@ private fun DeviceDetailPage(
                             "No immediate risk"
                         }
                     )
-                    DetailRow(
-                        "Connectivity Risk Confidence",
-                        String.format(Locale.US, "%.0f%%", item.connectionSecurity.confidence * 100.0)
-                    )
                     DetailRow("Connectivity Assessment", item.connectionSecurity.summary)
+                    if (item.connectionSecurity.insecurityFindings.isNotEmpty()) {
+                        DetailRow(
+                            "Insecurity Findings",
+                            item.connectionSecurity.insecurityFindings
+                                .distinct()
+                                .joinToString(" | ") { finding -> formatConnectivityFinding(finding) }
+                        )
+                    }
                     if (item.connectionSecurity.indicators.isNotEmpty()) {
                         DetailRow(
                             "Connectivity Indicators",
@@ -20282,11 +20422,15 @@ private fun EncounterDetailPage(
                             "No immediate risk"
                         }
                     )
-                    DetailRow(
-                        "Connectivity Risk Confidence",
-                        String.format(Locale.US, "%.0f%%", connectionSecurity.confidence * 100.0)
-                    )
                     DetailRow("Connectivity Assessment", connectionSecurity.summary)
+                    if (connectionSecurity.insecurityFindings.isNotEmpty()) {
+                        DetailRow(
+                            "Insecurity Findings",
+                            connectionSecurity.insecurityFindings
+                                .distinct()
+                                .joinToString(" | ") { finding -> formatConnectivityFinding(finding) }
+                        )
+                    }
                     if (connectionSecurity.indicators.isNotEmpty()) {
                         DetailRow("Connectivity Indicators", connectionSecurity.indicators.joinToString(" | "))
                     }
