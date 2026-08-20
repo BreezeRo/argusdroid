@@ -11197,135 +11197,7 @@ private fun DetectionMapPage(
         modifier = contentModifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (!mapOnlyPresentation) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.weight(1f),
-                contentAlignment = androidx.compose.ui.Alignment.CenterEnd
-            ) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (showTimeRangeControl) {
-                        Box {
-                            AssistChip(
-                                onClick = { timeRangeExpanded = true },
-                                label = {
-                                    Text(
-                                        text = "Period: ${selectedTimeRangePreset.label}",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
-                            DropdownMenu(
-                                expanded = timeRangeExpanded,
-                                onDismissRequest = { timeRangeExpanded = false }
-                            ) {
-                                MapTimeRangePreset.entries.forEach { preset ->
-                                    DropdownMenuItem(
-                                        text = { Text(preset.label) },
-                                        onClick = {
-                                            onTimeRangePresetChanged(preset)
-                                            timeRangeExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                        if (selectedTimeRangePreset == MapTimeRangePreset.CUSTOM) {
-                            Box {
-                                AssistChip(
-                                    onClick = { customTimeRangeExpanded = true },
-                                    label = {
-                                        Text(
-                                            text = "Custom: ${ScanSettings.formatInterval(customTimeRangeMinutes * 60L)}",
-                                            style = MaterialTheme.typography.labelSmall
-                                        )
-                                    }
-                                )
-                                DropdownMenu(
-                                    expanded = customTimeRangeExpanded,
-                                    onDismissRequest = { customTimeRangeExpanded = false }
-                                ) {
-                                    mapTimeRangeCustomOptionsMinutes.forEach { optionMinutes ->
-                                        DropdownMenuItem(
-                                            text = { Text(ScanSettings.formatInterval(optionMinutes * 60L)) },
-                                            onClick = {
-                                                onCustomTimeRangeMinutesChanged(optionMinutes)
-                                                customTimeRangeExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    FilterChip(
-                        selected = controlsVisible,
-                        onClick = { controlsVisible = !controlsVisible },
-                        label = {
-                            Text(
-                                text = "Panels",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    )
-                    AssistChip(
-                        onClick = {
-                            val location = currentLocation
-                            if (location == null) {
-                                mapError = "Current location unavailable. Wait for GPS fix and try again."
-                                return@AssistChip
-                            }
-                            mapError = null
-                            scope.launch {
-                                runCatching {
-                                    cameraPositionState.animate(
-                                        CameraUpdateFactory.newLatLngZoom(
-                                            LatLng(location.lat, location.lon),
-                                            17f
-                                        ),
-                                        650
-                                    )
-                                }.onFailure {
-                                    mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
-                                }
-                            }
-                        },
-                        enabled = currentLocation != null,
-                        label = { Text("Locate", style = MaterialTheme.typography.labelSmall) }
-                    )
-                    FilterChip(
-                        selected = effectivePreciseDotsEnabled,
-                        onClick = {
-                            preciseDotsEnabled = !preciseDotsEnabled
-                        },
-                        label = {
-                            Text(
-                                text = "Dots",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    )
-                    AssistChip(
-                        onClick = { legendPanelVisible = !legendPanelVisible },
-                        label = {
-                            Text(
-                                if (legendPanelVisible) "Hide Legend" else "Legend",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    )
-                }
-            }
-        }
-        }
-        if (!mapOnlyPresentation && !legendPanelVisible && legendItems.isNotEmpty()) {
+        if (!mapOnlyPresentation && legendItems.isNotEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -11341,6 +11213,104 @@ private fun DetectionMapPage(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
+                            if (showTimeRangeControl) {
+                                Box {
+                                    AssistChip(
+                                        onClick = { timeRangeExpanded = true },
+                                        label = {
+                                            Text(
+                                                text = "Period: ${selectedTimeRangePreset.label}",
+                                                style = MaterialTheme.typography.labelSmall
+                                            )
+                                        }
+                                    )
+                                    DropdownMenu(
+                                        expanded = timeRangeExpanded,
+                                        onDismissRequest = { timeRangeExpanded = false }
+                                    ) {
+                                        MapTimeRangePreset.entries.forEach { preset ->
+                                            DropdownMenuItem(
+                                                text = { Text(preset.label) },
+                                                onClick = {
+                                                    onTimeRangePresetChanged(preset)
+                                                    timeRangeExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                if (selectedTimeRangePreset == MapTimeRangePreset.CUSTOM) {
+                                    Box {
+                                        AssistChip(
+                                            onClick = { customTimeRangeExpanded = true },
+                                            label = {
+                                                Text(
+                                                    text = "Custom: ${ScanSettings.formatInterval(customTimeRangeMinutes * 60L)}",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        )
+                                        DropdownMenu(
+                                            expanded = customTimeRangeExpanded,
+                                            onDismissRequest = { customTimeRangeExpanded = false }
+                                        ) {
+                                            mapTimeRangeCustomOptionsMinutes.forEach { optionMinutes ->
+                                                DropdownMenuItem(
+                                                    text = { Text(ScanSettings.formatInterval(optionMinutes * 60L)) },
+                                                    onClick = {
+                                                        onCustomTimeRangeMinutesChanged(optionMinutes)
+                                                        customTimeRangeExpanded = false
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            FilterChip(
+                                selected = controlsVisible,
+                                onClick = { controlsVisible = !controlsVisible },
+                                label = { Text("Panels", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            AssistChip(
+                                onClick = {
+                                    val location = currentLocation
+                                    if (location == null) {
+                                        mapError = "Current location unavailable. Wait for GPS fix and try again."
+                                        return@AssistChip
+                                    }
+                                    mapError = null
+                                    scope.launch {
+                                        runCatching {
+                                            cameraPositionState.animate(
+                                                CameraUpdateFactory.newLatLngZoom(
+                                                    LatLng(location.lat, location.lon),
+                                                    17f
+                                                ),
+                                                650
+                                            )
+                                        }.onFailure {
+                                            mapError = "Failed to center on current location: ${it.message ?: "unknown error"}"
+                                        }
+                                    }
+                                },
+                                enabled = currentLocation != null,
+                                label = { Text("Locate", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            FilterChip(
+                                selected = effectivePreciseDotsEnabled,
+                                onClick = { preciseDotsEnabled = !preciseDotsEnabled },
+                                label = { Text("Dots", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            AssistChip(
+                                onClick = { legendPanelVisible = !legendPanelVisible },
+                                label = {
+                                    Text(
+                                        if (legendPanelVisible) "Hide Legend" else "Legend",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
                         }
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -11359,7 +11329,7 @@ private fun DetectionMapPage(
                             }
                         }
                     }
-                    if (!deviceTypeFiltersCollapsed) {
+                    if (!legendPanelVisible && !deviceTypeFiltersCollapsed) {
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
