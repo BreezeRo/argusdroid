@@ -4633,8 +4633,8 @@ private fun HomePage(
                                     )
                                     val batteryUsageMeter = batteryUsageByToggleKey[toggle.key]?.meterFraction ?: 0f
                                     val batteryUsageColor = when {
-                                        batteryUsageMeter >= 0.65f -> Color(0xFFB3261E)
-                                        batteryUsageMeter >= 0.35f -> Color(0xFFE65100)
+                                        batteryUsageMeter >= 0.05f -> Color(0xFFB3261E)
+                                        batteryUsageMeter >= 0.02f -> Color(0xFFE65100)
                                         else -> Color(0xFF2E7D32)
                                     }
                                     LinearProgressIndicator(
@@ -21475,7 +21475,7 @@ private fun estimateSensorBatteryUsageEstimates(
             val weight = weightByKey[toggle.key] ?: 1.0
             val estimatedSensorMa = (dischargeMa * (weight / enabledWeight)).coerceAtLeast(0.0)
             val estimatedPctPerHour = ((estimatedSensorMa / fullCapacityMah) * 100.0).coerceAtLeast(0.0)
-            val meterFraction = (estimatedPctPerHour / 12.0).coerceIn(0.0, 1.0).toFloat()
+            val meterFraction = (estimatedPctPerHour / 100.0).coerceIn(0.0, 1.0).toFloat()
             toggle.key to SensorBatteryUsageEstimate(
                 label = String.format(
                     Locale.US,
