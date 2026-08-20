@@ -5072,7 +5072,7 @@ private fun AppSettingsPage(
                                 onCheckedChange = onMapTrafficEnabledChanged
                             )
                         }
-                        Text("Shows live road traffic overlays on Detection Device Map.")
+                        Text("Shows live road traffic overlays on Detection Device view.")
                         Text("Note: Google traffic layer cannot hide only non-congested (green) segments.")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5206,7 +5206,7 @@ private fun AppSettingsPage(
                             }
                         }
                         Text(
-                            "When enabled, minimizing from Detection > Device Map keeps a sticky compass-like mini map in Picture-in-Picture."
+                            "When enabled, minimizing from Detection > Device keeps a sticky compass-like mini map in Picture-in-Picture."
                         )
                     }
                 }
@@ -7818,7 +7818,7 @@ private fun DetectionPage(
                             magneticDialogVisible = false
                         }
                     ) {
-                        Text("Open Magnetic Map")
+                        Text("Open Magnetic")
                     }
                 },
                 confirmButton = {
@@ -7835,7 +7835,7 @@ private fun DetectionPage(
                 popup = popup,
                 liveCurrentMagnitudeMicroTesla = popupLiveCurrentMagnitudeMicroTesla,
                 onDismiss = { magneticDetectionPopup = null },
-                confirmLabel = "Open Magnetic Map",
+                confirmLabel = "Open Magnetic",
                 onConfirm = {
                     selectedTab = 3
                     selectedMapSubTab = 3
@@ -8060,22 +8060,22 @@ private fun DetectionPage(
                     Tab(
                         selected = selectedMapSubTab == 0,
                         onClick = { selectedMapSubTab = 0 },
-                        text = { Text("Device Map") }
+                        text = { Text("Device") }
                     )
                     Tab(
                         selected = selectedMapSubTab == 1,
                         onClick = { selectedMapSubTab = 1 },
-                        text = { Text("Bluetooth Map") }
+                        text = { Text("Bluetooth") }
                     )
                     Tab(
                         selected = selectedMapSubTab == 2,
                         onClick = { selectedMapSubTab = 2 },
-                        text = { Text("Aircraft Map") }
+                        text = { Text("Aircraft") }
                     )
                     Tab(
                         selected = selectedMapSubTab == 3,
                         onClick = { selectedMapSubTab = 3 },
-                        text = { Text("Magnetic Map") }
+                        text = { Text("Magnetic") }
                     )
                 }
                 }
@@ -8183,8 +8183,8 @@ private fun DetectionPage(
                     LaunchedEffect(deviceMapPins) {
                         RuntimeUiListMemoryGauge.updateActiveDeviceMapPins(deviceMapPins)
                     }
-                    DetectionMapPage(
-                            mapTitle = "Device Map",
+                        DetectionMapPage(
+                            mapTitle = "Device",
                             mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
                             showTrafficLayer = mapTrafficEnabled,
                             currentLocationOverride = deviceMapCurrentLocation,
@@ -8318,8 +8318,8 @@ private fun DetectionPage(
                         }
                     }
 
-                    DetectionMapPage(
-                            mapTitle = "Bluetooth Map",
+                        DetectionMapPage(
+                            mapTitle = "Bluetooth",
                             mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
                             currentLocationOverride = bluetoothMapCurrentLocation,
                             noFlyZones = noFlyZoneOverlays,
@@ -8391,7 +8391,7 @@ private fun DetectionPage(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Enable ADS-B (Aviation) or Public Flight Radar under Status > Sensors to view Aircraft Map."
+                                    text = "Enable ADS-B (Aviation) or Public Flight Radar under Status > Sensors to view Aircraft."
                                 )
                                 Button(onClick = { selectedTab = 0 }) {
                                     Text("Open Status > Sensors")
@@ -8441,7 +8441,7 @@ private fun DetectionPage(
                             }
                         }
                         DetectionMapPage(
-                                mapTitle = "Aircraft Map",
+                            mapTitle = "Aircraft",
                                 mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use time range presets to scope active history.",
                                 currentLocationOverride = flightMapCurrentLocation,
                                 centerOnAircraftCoverageOnOpen = true,
@@ -10190,7 +10190,7 @@ private fun MagneticMonitorMapPage(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text("Google Maps key missing", fontWeight = FontWeight.Bold)
-                    Text("Set MAPS_API_KEY in local.properties or environment to render Magnetic Map.")
+                    Text("Set MAPS_API_KEY in local.properties or environment to render Magnetic.")
                 }
             }
             return@Column
@@ -11217,7 +11217,7 @@ private fun DetectionMapPage(
                                 onClick = { timeRangeExpanded = true },
                                 label = {
                                     Text(
-                                        text = "Range: ${selectedTimeRangePreset.label}",
+                                        text = "Period: ${selectedTimeRangePreset.label}",
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                 }
@@ -11265,11 +11265,12 @@ private fun DetectionMapPage(
                             }
                         }
                     }
-                    AssistChip(
+                    FilterChip(
+                        selected = controlsVisible,
                         onClick = { controlsVisible = !controlsVisible },
                         label = {
                             Text(
-                                text = if (controlsVisible) "Panels: On" else "Panels: Off",
+                                text = "Panels",
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
@@ -11297,15 +11298,16 @@ private fun DetectionMapPage(
                             }
                         },
                         enabled = currentLocation != null,
-                        label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
+                        label = { Text("Locate", style = MaterialTheme.typography.labelSmall) }
                     )
-                    AssistChip(
+                    FilterChip(
+                        selected = effectivePreciseDotsEnabled,
                         onClick = {
                             preciseDotsEnabled = !preciseDotsEnabled
                         },
                         label = {
                             Text(
-                                text = if (effectivePreciseDotsEnabled) "Dots: On" else "Dots: Off",
+                                text = "Dots",
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
@@ -11955,7 +11957,7 @@ private fun DetectionMapPage(
                                     fontWeight = FontWeight.Medium
                                 )
                             }
-                            if (mapTitle == "Aircraft Map") {
+                            if (mapTitle == "Aircraft") {
                                 val perf = aviationPerfSnapshot
                                 if (perf != null) {
                                     Text("Aviation perf:", fontWeight = FontWeight.Bold)
@@ -12173,7 +12175,7 @@ private fun DetectionMapPage(
                                     }
                                 },
                                 enabled = currentLocation != null,
-                                label = { Text("My Location", style = MaterialTheme.typography.labelSmall) }
+                                label = { Text("Locate", style = MaterialTheme.typography.labelSmall) }
                             )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -15064,8 +15066,8 @@ private fun mapNoFlyRenderQualityLabel(level: Int): String = when (level) {
 
 private fun stickyCompassMapLiveModeLabel(mode: String): String = when (mode) {
     ScanSettings.STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY -> "Force Live Only"
-    ScanSettings.STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP -> "Follow Device Map"
-    else -> "Follow Device Map"
+    ScanSettings.STICKY_COMPASS_MAP_LIVE_MODE_FOLLOW_DEVICE_MAP -> "Follow Device"
+    else -> "Follow Device"
 }
 
 private fun mapScannerSweepSpeedPresetLabel(preset: String): String = when (preset) {
