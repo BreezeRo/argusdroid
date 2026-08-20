@@ -115,8 +115,8 @@ object ScanSettings {
     const val DEFAULT_CHAIN_HEARTBEAT_INTERVAL_SECONDS = 20L
     const val DEFAULT_MAP_CLUSTERING_ENABLED = false
     const val DEFAULT_MAP_CLUSTER_RANGE_LEVEL = 3
-    const val DEFAULT_MAP_TRAFFIC_ENABLED = true
-    const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = true
+    const val DEFAULT_MAP_TRAFFIC_ENABLED = false
+    const val DEFAULT_MAP_NO_FLY_ZONES_ENABLED = false
     const val DEFAULT_MAP_NO_FLY_RENDER_QUALITY_LEVEL = 2
     const val DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED = true
     const val MAP_SCANNER_SWEEP_SPEED_PRESET_CONSERVATIVE = "CONSERVATIVE"
@@ -362,7 +362,7 @@ object ScanSettings {
 
     fun isSdrSensorEnabled(context: Context): Boolean =
         SecureSettingsStore.prefs(context, PREFS_NAME)
-            .getBoolean(KEY_SENSOR_SDR_ENABLED, true)
+            .getBoolean(KEY_SENSOR_SDR_ENABLED, false)
 
     fun setSdrSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_SDR_ENABLED, enabled)
@@ -370,7 +370,7 @@ object ScanSettings {
 
     fun isAviationAdsbSensorEnabled(context: Context): Boolean =
         SecureSettingsStore.prefs(context, PREFS_NAME)
-            .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, true)
+            .getBoolean(KEY_SENSOR_AVIATION_ADSB_ENABLED, false)
 
     fun setAviationAdsbSensorEnabled(context: Context, enabled: Boolean) {
         setSensorEnabled(context, KEY_SENSOR_AVIATION_ADSB_ENABLED, enabled)
@@ -549,7 +549,7 @@ object ScanSettings {
 
     fun isNoFlyPassThroughNotificationsEnabled(context: Context): Boolean =
         SecureSettingsStore.prefs(context, PREFS_NAME)
-            .getBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, true)
+            .getBoolean(KEY_NO_FLY_PASS_THROUGH_NOTIFICATIONS_ENABLED, false)
 
     fun setNoFlyPassThroughNotificationsEnabled(context: Context, enabled: Boolean) {
         SecureSettingsStore.prefs(context, PREFS_NAME)
