@@ -10407,7 +10407,6 @@ private fun DetectionMapPage(
     var noFlyZonesVisible by rememberSaveable { mutableStateOf(true) }
     var selectedNoFlyZoneId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
-    var legendPanelVisible by rememberSaveable { mutableStateOf(false) }
     var deviceTypeFiltersCollapsed by rememberSaveable { mutableStateOf(false) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var mapLoaded by remember { mutableStateOf(false) }
@@ -11321,15 +11320,6 @@ private fun DetectionMapPage(
                                 onClick = { preciseDotsEnabled = !preciseDotsEnabled },
                                 label = { Text("Dots", style = MaterialTheme.typography.labelSmall) }
                             )
-                            AssistChip(
-                                onClick = { legendPanelVisible = !legendPanelVisible },
-                                label = {
-                                    Text(
-                                        if (legendPanelVisible) "Hide Legend" else "Legend",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            )
                         }
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -11348,7 +11338,25 @@ private fun DetectionMapPage(
                             }
                         }
                     }
-                    if (!legendPanelVisible && !deviceTypeFiltersCollapsed) {
+                    if (!deviceTypeFiltersCollapsed) {
+                        Text(
+                            "Pin Color Legend",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        OutlinedTextField(
+                            value = metadataFilterQuery,
+                            onValueChange = { metadataFilterQuery = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Pin Metadata Search") },
+                            placeholder = { Text("Filter by ID, source, snippet, payload...") },
+                            singleLine = true
+                        )
+                        Text(
+                            "Matches ${displayFilteredPins.size}/${visiblePins.size} visible pins",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -11383,84 +11391,6 @@ private fun DetectionMapPage(
                     }
                 }
             }
-        }
-        AnimatedVisibility(
-            visible = !mapOnlyPresentation && legendPanelVisible,
-            enter = slideInHorizontally(initialOffsetX = { -it / 2 }) + fadeIn(),
-            exit = slideOutHorizontally(targetOffsetX = { -it / 2 }) + fadeOut()
-        ) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (compactMapLayout) {
-                    Text("Pin Color Legend", fontWeight = FontWeight.Bold)
-                    Text(mapDescription, style = MaterialTheme.typography.bodySmall)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                    ) {
-                        Spacer(modifier = Modifier)
-                        Button(onClick = { controlsVisible = !controlsVisible }) {
-                            Text(if (controlsVisible) "Hide Controls" else "Show Controls")
-                        }
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                    ) {
-                        Text("Pin Color Legend", fontWeight = FontWeight.Bold)
-                    }
-
-                    Text(mapDescription, style = MaterialTheme.typography.bodySmall)
-
-                    OutlinedTextField(
-                        value = metadataFilterQuery,
-                        onValueChange = { metadataFilterQuery = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Pin Metadata Search") },
-                        placeholder = { Text("Filter by ID, source, snippet, payload...") },
-                        singleLine = true
-                    )
-                    Text(
-                        "Matches ${displayFilteredPins.size}/${visiblePins.size} visible pins",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (legendItems.isNotEmpty()) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            legendItems.forEach { item ->
-                                val sourceVisible = item.source !in hiddenLegendSources
-                                FilterChip(
-                                    selected = sourceVisible,
-                                    onClick = {
-                                        hiddenLegendSources = if (sourceVisible) {
-                                            hiddenLegendSources + item.source
-                                        } else {
-                                            hiddenLegendSources - item.source
-                                        }
-                                    },
-                                    label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
-                                    leadingIcon = {
-                                        Text(
-                                            text = "●",
-                                            color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
-                                        )
-                                    }
-                                )
-                            }
-                        }
-                    } else {
-                        Text("No source pins available for legend yet.")
-                    }
-                }
-            }
-        }
         }
         if (!hasMapsApiKey) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -12378,49 +12308,6 @@ private fun DetectionMapPage(
                                 },
                                 activeTargetsBySource = signalLinkTargetBySource
                             )
-                            Text("Pin Color Legend", fontWeight = FontWeight.Bold)
-                            if (legendItems.isNotEmpty()) {
-                                OutlinedTextField(
-                                    value = metadataFilterQuery,
-                                    onValueChange = { metadataFilterQuery = it },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("Pin Metadata Search") },
-                                    placeholder = { Text("Filter by ID, source, snippet, payload...") },
-                                    singleLine = true
-                                )
-                                Text(
-                                    "Matches ${displayFilteredPins.size}/${visiblePins.size} visible pins",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    legendItems.forEach { item ->
-                                        val sourceVisible = item.source !in hiddenLegendSources
-                                        FilterChip(
-                                            selected = sourceVisible,
-                                            onClick = {
-                                                hiddenLegendSources = if (sourceVisible) {
-                                                    hiddenLegendSources + item.source
-                                                } else {
-                                                    hiddenLegendSources - item.source
-                                                }
-                                            },
-                                            label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
-                                            leadingIcon = {
-                                                Text(
-                                                    text = "●",
-                                                    color = if (sourceVisible) item.color else item.color.copy(alpha = 0.45f)
-                                                )
-                                            }
-                                        )
-                                    }
-                                }
-                            } else {
-                                Text("No source pins available for legend yet.")
-                            }
                         }
                     }
                 }
