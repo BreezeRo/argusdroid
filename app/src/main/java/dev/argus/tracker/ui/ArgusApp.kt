@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.PendingIntent
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.bluetooth.BluetoothDevice
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContextWrapper
@@ -54,6 +55,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -216,6 +218,12 @@ import kotlin.time.Duration.Companion.seconds
 private enum class DeviceSortMode {
     LAST_SEEN,
     MOST_SEEN
+}
+
+private enum class SecurityFilterMode {
+    ALL,
+    SECURE_ONLY,
+    INSECURE_ONLY
 }
 
 private const val DETECTION_LIST_PAGE_SIZE = 100
@@ -8842,6 +8850,7 @@ private fun DetectionLogsPage(
     onOpenDeviceDetails: (source: String, primaryId: String) -> Unit
 ) {
     var selectedLogTab by rememberSaveable { mutableStateOf(0) }
+    var viewAsTable by rememberSaveable { mutableStateOf(false) }
 
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
@@ -8894,6 +8903,13 @@ private fun DetectionLogsPage(
             Text("Review historical alerts by category.")
         }
         item {
+            CompactSwitchControl(
+                label = "Table View",
+                checked = viewAsTable,
+                onCheckedChange = { viewAsTable = it }
+            )
+        }
+        item {
             TabRow(selectedTabIndex = safeSelectedLogTab) {
                 tabLabels.forEachIndexed { index, label ->
                     Tab(
@@ -8937,13 +8953,71 @@ private fun DetectionLogsPage(
             }
         }
 
-        itemsIndexed(
-            items = filteredLogs,
-            key = { index, entry ->
-                "${entry.timestampEpochMs}|${entry.type.name}|${entry.source}|${entry.primaryId}|${entry.message.hashCode()}|$index"
-            },
-            contentType = { _, _ -> "alertLog" }
-        ) { _, entry ->
+        if (viewAsTable) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Type", modifier = Modifier.weight(0.9f), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text("Primary ID", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
+                            Text("Time", modifier = Modifier.weight(1.2f), fontWeight = FontWeight.Bold)
+                            Text("Message", modifier = Modifier.weight(2f), fontWeight = FontWeight.Bold)
+                        }
+                        filteredLogs.forEach { entry ->
+                            val rowTypeLabel = when (entry.type) {
+                                AlertLogType.APPROACH -> "Approach"
+                                AlertLogType.TRACKER -> "Tracker"
+                                AlertLogType.STINGRAY -> "Stingray"
+                                AlertLogType.CAMERA_IN_VIEW -> "Camera"
+                                AlertLogType.NO_FLY_PASS_THROUGH -> "No-Fly"
+                                AlertLogType.NFC -> "NFC"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        when {
+                                            entry.type == AlertLogType.APPROACH -> onOpenApproachMap(entry.source, entry.primaryId)
+                                            entry.type == AlertLogType.NO_FLY_PASS_THROUGH -> onOpenNoFlyIncidentPath(
+                                                entry.source,
+                                                entry.primaryId,
+                                                parseNoFlyZoneSummaryFromLogMessage(entry.message) ?: "No-fly zone",
+                                                entry.timestampEpochMs
+                                            )
+                                            else -> onOpenDeviceDetails(entry.source, entry.primaryId)
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(rowTypeLabel, modifier = Modifier.weight(0.9f))
+                                Text(listSourceLabel(entry.source, null), modifier = Modifier.weight(1f))
+                                Text(entry.primaryId, modifier = Modifier.weight(1.3f))
+                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.weight(1.2f))
+                                Text(entry.message.take(120), modifier = Modifier.weight(2f))
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            itemsIndexed(
+                items = filteredLogs,
+                key = { index, entry ->
+                    "${entry.timestampEpochMs}|${entry.type.name}|${entry.source}|${entry.primaryId}|${entry.message.hashCode()}|$index"
+                },
+                contentType = { _, _ -> "alertLog" }
+            ) { _, entry ->
             val typeColor = when (entry.type) {
                 AlertLogType.APPROACH -> Color(0xFF1565C0)
                 AlertLogType.TRACKER -> Color(0xFFB3261E)
@@ -9021,6 +9095,7 @@ private fun DetectionLogsPage(
                     )
                 }
             }
+            }
         }
     }
 }
@@ -9032,6 +9107,7 @@ private fun ErrorLogsPage(
     onClearLogs: () -> Unit
 ) {
     var showWarnings by rememberSaveable { mutableStateOf(false) }
+    var viewAsTable by rememberSaveable { mutableStateOf(false) }
     val warningCount = remember(logs) { logs.count { it.severity == "WARNING" } }
     val errorCount = remember(logs) { logs.count { it.severity != "WARNING" } }
     val filteredLogs = remember(logs, showWarnings) {
@@ -9073,6 +9149,13 @@ private fun ErrorLogsPage(
             }
         }
         item {
+            CompactSwitchControl(
+                label = "Table View",
+                checked = viewAsTable,
+                onCheckedChange = { viewAsTable = it }
+            )
+        }
+        item {
             val latest = latestLogEpoch?.let(::formatEpoch) ?: "n/a"
             Text(
                 "Showing ${filteredLogs.size} log${if (filteredLogs.size == 1) "" else "s"} • Errors $errorCount • Warnings $visibleWarningCount/${warningCount}${if (hiddenWarningCount > 0) " ($hiddenWarningCount hidden)" else ""} • Latest: $latest",
@@ -9107,13 +9190,51 @@ private fun ErrorLogsPage(
             }
         }
 
-        items(
-            items = filteredLogs,
-            key = { entry ->
-                "${entry.timestampEpochMs}|${entry.category}|${entry.source}|${entry.severity}|${entry.message.hashCode()}"
-            },
-            contentType = { "errorLog" }
-        ) { entry ->
+        if (viewAsTable) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Severity", modifier = Modifier.weight(0.9f), fontWeight = FontWeight.Bold)
+                            Text("Category", modifier = Modifier.weight(1.1f), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text("Time", modifier = Modifier.weight(1.2f), fontWeight = FontWeight.Bold)
+                            Text("Message", modifier = Modifier.weight(2f), fontWeight = FontWeight.Bold)
+                        }
+                        filteredLogs.forEach { entry ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(entry.severity, modifier = Modifier.weight(0.9f))
+                                Text(entry.category, modifier = Modifier.weight(1.1f))
+                                Text(entry.source, modifier = Modifier.weight(1f))
+                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.weight(1.2f))
+                                Text(entry.message.take(140), modifier = Modifier.weight(2f))
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            items(
+                items = filteredLogs,
+                key = { entry ->
+                    "${entry.timestampEpochMs}|${entry.category}|${entry.source}|${entry.severity}|${entry.message.hashCode()}"
+                },
+                contentType = { "errorLog" }
+            ) { entry ->
             val isWarning = entry.severity == "WARNING"
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -9132,6 +9253,7 @@ private fun ErrorLogsPage(
                     )
                     Text(entry.message)
                 }
+            }
             }
         }
     }
@@ -18371,8 +18493,9 @@ private fun DevicesPage(
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
     var showCellThreatOnly by rememberSaveable { mutableStateOf(false) }
-    var showInsecureOnly by rememberSaveable { mutableStateOf(false) }
+    var securityFilterMode by rememberSaveable { mutableStateOf(SecurityFilterMode.ALL) }
     var showHomeAwaySuspiciousOnly by rememberSaveable { mutableStateOf(false) }
+    var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
@@ -18433,7 +18556,7 @@ private fun DevicesPage(
         showOwnedOnly,
         showTrackerRiskOnly,
         showCellThreatOnly,
-        showInsecureOnly,
+        securityFilterMode,
         showHomeAwaySuspiciousOnly,
         homePoint,
         showDistance,
@@ -18454,13 +18577,17 @@ private fun DevicesPage(
                         (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
                     val cellThreatMatches = !showCellThreatOnly ||
                         (device.cellThreat?.level == CellThreatLevel.HIGH || device.cellThreat?.level == CellThreatLevel.MEDIUM)
-                    val insecureMatches = !showInsecureOnly || device.connectionSecurity?.isInsecure == true
+                    val securityMatches = when (securityFilterMode) {
+                        SecurityFilterMode.ALL -> true
+                        SecurityFilterMode.SECURE_ONLY -> device.connectionSecurity?.isInsecure != true
+                        SecurityFilterMode.INSECURE_ONLY -> device.connectionSecurity?.isInsecure == true
+                    }
                     val homeAwaySuspiciousMatches = !showHomeAwaySuspiciousOnly || homePoint == null || (
                         !device.isOwned &&
                             device.trackerRisk?.seenAtHome == true &&
                             device.trackerRisk?.seenAwayFromHome == true
                         )
-                    sourceMatches && queryMatches && ownedMatches && riskMatches && cellThreatMatches && insecureMatches && homeAwaySuspiciousMatches
+                    sourceMatches && queryMatches && ownedMatches && riskMatches && cellThreatMatches && securityMatches && homeAwaySuspiciousMatches
                 }
 
                 if (!showDistance || !sortByDistance) {
@@ -18589,10 +18716,32 @@ private fun DevicesPage(
                             checked = showCellThreatOnly,
                             onCheckedChange = { showCellThreatOnly = it }
                         )
+                        Text("Connectivity Security", fontWeight = FontWeight.Medium)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.ALL,
+                                onClick = { securityFilterMode = SecurityFilterMode.ALL },
+                                label = { Text("All") }
+                            )
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.SECURE_ONLY,
+                                onClick = { securityFilterMode = SecurityFilterMode.SECURE_ONLY },
+                                label = { Text("Secure Only") }
+                            )
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.INSECURE_ONLY,
+                                onClick = { securityFilterMode = SecurityFilterMode.INSECURE_ONLY },
+                                label = { Text("Insecure Only") }
+                            )
+                        }
                         CompactSwitchControl(
-                            label = "Insecure Connectivity Only",
-                            checked = showInsecureOnly,
-                            onCheckedChange = { showInsecureOnly = it }
+                            label = "Table View",
+                            checked = viewAsTable,
+                            onCheckedChange = { viewAsTable = it }
                         )
                         CompactSwitchControl(
                             label = "Home→Away Suspicious Only",
@@ -18611,7 +18760,61 @@ private fun DevicesPage(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            pagedDevices.forEach { device ->
+            if (viewAsTable) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text("Source", modifier = Modifier.weight(1.1f), fontWeight = FontWeight.Bold)
+                            Text("Device", modifier = Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
+                            Text("Seen", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold)
+                            Text("Security", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text("Last Seen", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
+                        }
+                        pagedDevices.forEach { device ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onDeviceClick(device) }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    text = listSourceLabel(device.source, null),
+                                    modifier = Modifier.weight(1.1f)
+                                )
+                                Text(
+                                    text = device.primaryId,
+                                    modifier = Modifier.weight(1.5f)
+                                )
+                                Text(
+                                    text = device.seenCount.toString(),
+                                    modifier = Modifier.weight(0.7f)
+                                )
+                                Text(
+                                    text = if (device.connectionSecurity?.isInsecure == true) "Insecure" else "Secure",
+                                    modifier = Modifier.weight(1f),
+                                    color = if (device.connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = formatEpoch(device.lastSeenEpochMs),
+                                    modifier = Modifier.weight(1.3f)
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                pagedDevices.forEach { device ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -18740,6 +18943,7 @@ private fun DevicesPage(
                         Text("Seen ${device.seenCount} times")
                         Text("Last seen ${formatEpoch(device.lastSeenEpochMs)}")
                     }
+                }
                 }
             }
             if (hasMoreDevices) {
@@ -18926,6 +19130,8 @@ private fun EncountersPage(
     var showDistance by rememberSaveable { mutableStateOf(false) }
     var sortByDistance by rememberSaveable { mutableStateOf(false) }
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
+    var securityFilterMode by rememberSaveable { mutableStateOf(SecurityFilterMode.ALL) }
+    var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var collapseSweepEvents by rememberSaveable { mutableStateOf(true) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
@@ -18957,6 +19163,7 @@ private fun EncountersPage(
         sourceFilter,
         queryFilter,
         showOwnedOnly,
+        securityFilterMode,
         collapseSweepEvents,
         ownedDeviceKeys,
         showDistance,
@@ -18980,7 +19187,18 @@ private fun EncountersPage(
                     encounter.rawPayloadJson.contains(queryFilter, ignoreCase = true)
                 val ownedMatches = !showOwnedOnly ||
                     (OwnedDeviceRegistry.keyFor(encounter.source.name, encounter.primaryId) in ownedDeviceKeys)
-                sourceMatches && queryMatches && ownedMatches
+                val securityMatches = when (securityFilterMode) {
+                    SecurityFilterMode.ALL -> true
+                    SecurityFilterMode.SECURE_ONLY -> analyzeConnectionSecurity(
+                        source = encounter.source.name,
+                        encounters = listOf(encounter)
+                    )?.isInsecure != true
+                    SecurityFilterMode.INSECURE_ONLY -> analyzeConnectionSecurity(
+                        source = encounter.source.name,
+                        encounters = listOf(encounter)
+                    )?.isInsecure == true
+                }
+                sourceMatches && queryMatches && ownedMatches && securityMatches
             }
 
             if (!showDistance || !sortByDistance) {
@@ -19101,6 +19319,33 @@ private fun EncountersPage(
                             checked = showOwnedOnly,
                             onCheckedChange = { showOwnedOnly = it }
                         )
+                        Text("Connectivity Security", fontWeight = FontWeight.Medium)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.ALL,
+                                onClick = { securityFilterMode = SecurityFilterMode.ALL },
+                                label = { Text("All") }
+                            )
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.SECURE_ONLY,
+                                onClick = { securityFilterMode = SecurityFilterMode.SECURE_ONLY },
+                                label = { Text("Secure Only") }
+                            )
+                            FilterChip(
+                                selected = securityFilterMode == SecurityFilterMode.INSECURE_ONLY,
+                                onClick = { securityFilterMode = SecurityFilterMode.INSECURE_ONLY },
+                                label = { Text("Insecure Only") }
+                            )
+                        }
+                        CompactSwitchControl(
+                            label = "Table View",
+                            checked = viewAsTable,
+                            onCheckedChange = { viewAsTable = it }
+                        )
                         CompactSwitchControl(
                             label = "Collapse Wi-Fi/BLE Sweep Events",
                             checked = collapseSweepEvents,
@@ -19143,7 +19388,65 @@ private fun EncountersPage(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            pagedEncounters.forEach { encounter ->
+            if (viewAsTable) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text("Primary ID", modifier = Modifier.weight(1.4f), fontWeight = FontWeight.Bold)
+                            Text("Security", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text("RSSI", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold)
+                            Text("Timestamp", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
+                        }
+                        pagedEncounters.forEach { encounter ->
+                            val connectionSecurity = analyzeConnectionSecurity(
+                                source = encounter.source.name,
+                                encounters = listOf(encounter)
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onEncounterClick(encounter) }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = listSourceLabel(encounter.source.name, null),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = encounter.primaryId,
+                                    modifier = Modifier.weight(1.4f)
+                                )
+                                Text(
+                                    text = if (connectionSecurity?.isInsecure == true) "Insecure" else "Secure",
+                                    modifier = Modifier.weight(1f),
+                                    color = if (connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = encounter.rssiDbm?.toString() ?: "n/a",
+                                    modifier = Modifier.weight(0.7f)
+                                )
+                                Text(
+                                    text = formatEpoch(encounter.timestampEpochMs),
+                                    modifier = Modifier.weight(1.3f)
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                pagedEncounters.forEach { encounter ->
                 val connectionSecurity = remember(
                     encounter.source,
                     encounter.primaryId,
@@ -19205,6 +19508,7 @@ private fun EncountersPage(
                         Text("RSSI=${encounter.rssiDbm ?: "n/a"} dBm, Freq=${encounter.frequencyMhz ?: "n/a"} MHz")
                         Text(formatEpoch(encounter.timestampEpochMs))
                     }
+                }
                 }
             }
             if (hasMoreEncounters) {
