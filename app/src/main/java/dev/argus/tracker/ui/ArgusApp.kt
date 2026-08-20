@@ -18589,6 +18589,7 @@ private fun DevicesPage(
         orderedEncounterSourceOptions(devices.map { it.source }.toSet())
     }
     var filteredDeviceCount by remember { mutableStateOf(0) }
+    var filteredDeviceTypeCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var pagedDevices by remember { mutableStateOf<List<DeviceItem>>(emptyList()) }
     var hasMoreDevices by remember { mutableStateOf(false) }
     var visibleDeviceCount by rememberSaveable { mutableStateOf(DETECTION_LIST_PAGE_SIZE) }
@@ -18608,7 +18609,7 @@ private fun DevicesPage(
         visibleDeviceCount
     ) {
         val targetVisible = visibleDeviceCount.coerceAtLeast(DETECTION_LIST_PAGE_SIZE)
-        val (filteredCount, visibleRows) = withContext(Dispatchers.Default) {
+        val (filteredCount, sourceCounts, visibleRows) = withContext(Dispatchers.Default) {
             runCatching {
                 val filteredDevices = devices.asSequence().filter { device ->
                     val sourceMatches = sourceFilter == null || device.source == sourceFilter
@@ -18635,14 +18636,16 @@ private fun DevicesPage(
 
                 if (!showDistance || !sortByDistance) {
                     var count = 0
+                    val sourceCounts = mutableMapOf<String, Int>()
                     val visible = ArrayList<DeviceItem>(targetVisible)
                     filteredDevices.forEach { device ->
                         count += 1
+                        sourceCounts[device.source] = (sourceCounts[device.source] ?: 0) + 1
                         if (visible.size < targetVisible) {
                             visible += device
                         }
                     }
-                    count to visible
+                    Triple(count, sourceCounts.toMap(), visible)
                 } else {
                     val ranked = filteredDevices
                         .map { device -> device to (distanceForDeviceMeters(device, currentLocation) ?: Double.MIN_VALUE) }
@@ -18652,13 +18655,17 @@ private fun DevicesPage(
                         )
                         .map { it.first }
                         .toList()
-                    ranked.size to ranked.take(targetVisible)
+                    val sourceCounts = ranked
+                        .groupingBy { device -> device.source }
+                        .eachCount()
+                    Triple(ranked.size, sourceCounts, ranked.take(targetVisible))
                 }
             }.getOrElse {
-                0 to emptyList()
+                Triple(0, emptyMap(), emptyList())
             }
         }
         filteredDeviceCount = filteredCount
+        filteredDeviceTypeCounts = sourceCounts
         pagedDevices = visibleRows
         hasMoreDevices = filteredCount > visibleRows.size
     }
@@ -18690,7 +18697,8 @@ private fun DevicesPage(
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     Text("Filters & Display", style = MaterialTheme.typography.titleMedium)
                     TextButton(onClick = { filtersExpanded = !filtersExpanded }) {
@@ -18802,6 +18810,41 @@ private fun DevicesPage(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        val deviceTypeCountScroll = rememberScrollState()
+        LaunchedEffect(filteredDeviceTypeCounts) {
+            if (filteredDeviceTypeCounts.size < 2) return@LaunchedEffect
+            while (true) {
+                if (deviceTypeCountScroll.maxValue <= 0) {
+                    delay(1500.milliseconds)
+                    continue
+                }
+                delay(1200.milliseconds)
+                deviceTypeCountScroll.animateScrollTo(deviceTypeCountScroll.maxValue)
+                delay(1200.milliseconds)
+                deviceTypeCountScroll.animateScrollTo(0)
+            }
+        }
+        if (filteredDeviceTypeCounts.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(deviceTypeCountScroll)
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    filteredDeviceTypeCounts
+                        .toList()
+                        .sortedByDescending { it.second }
+                        .forEach { (source, count) ->
+                            AssistChip(
+                                onClick = { sourceFilter = source },
+                                label = { Text("${formatSourceTypeLabel(source)} $count") }
+                            )
+                        }
+                }
+            }
+        }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (viewAsTable) {
                 Card(modifier = Modifier.fillMaxWidth()) {
