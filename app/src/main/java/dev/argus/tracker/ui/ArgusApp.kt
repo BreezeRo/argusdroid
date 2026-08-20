@@ -8896,6 +8896,29 @@ private fun LogsHubPage(
 }
 
 @Composable
+private fun SortableTableHeaderCell(
+    title: String,
+    width: Dp,
+    sortKey: String,
+    activeSortKey: String,
+    ascending: Boolean,
+    onSort: (String) -> Unit
+) {
+    val indicator = if (activeSortKey == sortKey) {
+        if (ascending) " ▲" else " ▼"
+    } else {
+        ""
+    }
+    Text(
+        text = title + indicator,
+        modifier = Modifier
+            .width(width)
+            .clickable { onSort(sortKey) },
+        fontWeight = FontWeight.Bold
+    )
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun DetectionLogsPage(
     logs: List<AlertLogEntry>,
@@ -8907,6 +8930,8 @@ private fun DetectionLogsPage(
     var selectedLogTab by rememberSaveable { mutableStateOf(0) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var compactTableView by rememberSaveable { mutableStateOf(true) }
+    var tableSortKey by rememberSaveable { mutableStateOf("time") }
+    var tableSortAscending by rememberSaveable { mutableStateOf(false) }
 
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
@@ -8938,7 +8963,29 @@ private fun DetectionLogsPage(
             .sortedByDescending { it.timestampEpochMs }
             .toList()
     }
+    val sortedTableLogs = remember(filteredLogs, tableSortKey, tableSortAscending) {
+        val sorted = filteredLogs.sortedWith { a, b ->
+            val result = when (tableSortKey) {
+                "type" -> a.type.name.compareTo(b.type.name)
+                "source" -> a.source.compareTo(b.source)
+                "primary" -> a.primaryId.compareTo(b.primaryId)
+                "confidence" -> (a.confidence ?: -1.0).compareTo(b.confidence ?: -1.0)
+                "message" -> a.message.compareTo(b.message)
+                else -> a.timestampEpochMs.compareTo(b.timestampEpochMs)
+            }
+            if (tableSortAscending) result else -result
+        }
+        sorted
+    }
     val latestLogEpoch = remember(filteredLogs) { filteredLogs.firstOrNull()?.timestampEpochMs }
+    val onTableSort: (String) -> Unit = { key ->
+        if (tableSortKey == key) {
+            tableSortAscending = !tableSortAscending
+        } else {
+            tableSortKey = key
+            tableSortAscending = key != "time"
+        }
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -9058,18 +9105,18 @@ private fun DetectionLogsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Type", modifier = Modifier.width(84.dp), fontWeight = FontWeight.Bold)
-                            Text("Source", modifier = Modifier.width(108.dp), fontWeight = FontWeight.Bold)
-                            Text("Primary ID", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
-                            Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Type", 84.dp, "type", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Source", 108.dp, "source", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Primary ID", 160.dp, "primary", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Time", 160.dp, "time", tableSortKey, tableSortAscending, onTableSort)
                             if (compactTableView) {
-                                Text("Message", modifier = Modifier.width(380.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("Message", 380.dp, "message", tableSortKey, tableSortAscending, onTableSort)
                             } else {
-                                Text("Confidence", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
-                                Text("Message", modifier = Modifier.width(900.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("Confidence", 100.dp, "confidence", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Message", 900.dp, "message", tableSortKey, tableSortAscending, onTableSort)
                             }
                         }
-                        filteredLogs.forEachIndexed { index, entry ->
+                        sortedTableLogs.forEachIndexed { index, entry ->
                             val rowTypeLabel = when (entry.type) {
                                 AlertLogType.APPROACH -> "Approach"
                                 AlertLogType.TRACKER -> "Tracker"
@@ -9219,6 +9266,8 @@ private fun ErrorLogsPage(
     var showWarnings by rememberSaveable { mutableStateOf(false) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var compactTableView by rememberSaveable { mutableStateOf(true) }
+    var tableSortKey by rememberSaveable { mutableStateOf("time") }
+    var tableSortAscending by rememberSaveable { mutableStateOf(false) }
     val warningCount = remember(logs) { logs.count { it.severity == "WARNING" } }
     val errorCount = remember(logs) { logs.count { it.severity != "WARNING" } }
     val filteredLogs = remember(logs, showWarnings) {
@@ -9229,7 +9278,27 @@ private fun ErrorLogsPage(
     val categoryCounts = remember(filteredLogs) {
         filteredLogs.groupingBy { it.category }.eachCount().toList().sortedByDescending { it.second }
     }
+    val sortedTableLogs = remember(filteredLogs, tableSortKey, tableSortAscending) {
+        filteredLogs.sortedWith { a, b ->
+            val result = when (tableSortKey) {
+                "severity" -> a.severity.compareTo(b.severity)
+                "category" -> a.category.compareTo(b.category)
+                "source" -> a.source.compareTo(b.source)
+                "message" -> a.message.compareTo(b.message)
+                else -> a.timestampEpochMs.compareTo(b.timestampEpochMs)
+            }
+            if (tableSortAscending) result else -result
+        }
+    }
     val latestLogEpoch = remember(filteredLogs) { filteredLogs.firstOrNull()?.timestampEpochMs }
+    val onTableSort: (String) -> Unit = { key ->
+        if (tableSortKey == key) {
+            tableSortAscending = !tableSortAscending
+        } else {
+            tableSortKey = key
+            tableSortAscending = key != "time"
+        }
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -9342,17 +9411,20 @@ private fun ErrorLogsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Severity", modifier = Modifier.width(96.dp), fontWeight = FontWeight.Bold)
-                            Text("Category", modifier = Modifier.width(140.dp), fontWeight = FontWeight.Bold)
-                            Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
-                            Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
-                            Text(
+                            SortableTableHeaderCell("Severity", 96.dp, "severity", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Category", 140.dp, "category", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Source", 120.dp, "source", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Time", 160.dp, "time", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell(
                                 "Message",
-                                modifier = Modifier.width(if (compactTableView) 420.dp else 900.dp),
-                                fontWeight = FontWeight.Bold
+                                if (compactTableView) 420.dp else 900.dp,
+                                "message",
+                                tableSortKey,
+                                tableSortAscending,
+                                onTableSort
                             )
                         }
-                        filteredLogs.forEachIndexed { index, entry ->
+                        sortedTableLogs.forEachIndexed { index, entry ->
                             val rowBackgroundColor = if (index % 2 == 0) {
                                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
                             } else {
@@ -18594,6 +18666,8 @@ private fun DevicesPage(
     var showHomeAwaySuspiciousOnly by rememberSaveable { mutableStateOf(false) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var compactTableView by rememberSaveable { mutableStateOf(true) }
+    var tableSortKey by rememberSaveable { mutableStateOf("lastSeen") }
+    var tableSortAscending by rememberSaveable { mutableStateOf(false) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
@@ -18731,6 +18805,33 @@ private fun DevicesPage(
             pagedDevices.associate { device ->
                 "${device.source}|${device.primaryId}" to distanceForDeviceMeters(device, currentLocation)
             }
+        }
+    }
+    val sortedTableDevices = remember(pagedDevices, tableSortKey, tableSortAscending) {
+        pagedDevices.sortedWith { a, b ->
+            val result = when (tableSortKey) {
+                "source" -> a.source.compareTo(b.source)
+                "primary" -> a.primaryId.compareTo(b.primaryId)
+                "secondary" -> (a.secondaryId ?: "").compareTo(b.secondaryId ?: "")
+                "seen" -> a.seenCount.compareTo(b.seenCount)
+                "security" -> (a.connectionSecurity?.isInsecure == true).compareTo(b.connectionSecurity?.isInsecure == true)
+                "rssi" -> (a.lastRssiDbm ?: Int.MIN_VALUE).compareTo(b.lastRssiDbm ?: Int.MIN_VALUE)
+                "freq" -> (a.lastFrequencyMhz ?: Double.NEGATIVE_INFINITY).compareTo(b.lastFrequencyMhz ?: Double.NEGATIVE_INFINITY)
+                "owned" -> a.isOwned.compareTo(b.isOwned)
+                "tracker" -> (a.trackerRisk?.level?.ordinal ?: -1).compareTo(b.trackerRisk?.level?.ordinal ?: -1)
+                "cell" -> (a.cellThreat?.level?.ordinal ?: -1).compareTo(b.cellThreat?.level?.ordinal ?: -1)
+                "chain" -> a.hasChainLinkedData.compareTo(b.hasChainLinkedData)
+                else -> a.lastSeenEpochMs.compareTo(b.lastSeenEpochMs)
+            }
+            if (tableSortAscending) result else -result
+        }
+    }
+    val onTableSort: (String) -> Unit = { key ->
+        if (tableSortKey == key) {
+            tableSortAscending = !tableSortAscending
+        } else {
+            tableSortKey = key
+            tableSortAscending = key != "lastSeen"
         }
     }
     LaunchedEffect(pagedDevices) {
@@ -18921,24 +19022,24 @@ private fun DevicesPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text("Source", modifier = Modifier.width(130.dp), fontWeight = FontWeight.Bold)
-                            Text("Device", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Source", 130.dp, "source", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Device", 200.dp, "primary", tableSortKey, tableSortAscending, onTableSort)
                             if (!compactTableView) {
-                                Text("Secondary", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("Secondary", 160.dp, "secondary", tableSortKey, tableSortAscending, onTableSort)
                             }
-                            Text("Seen", modifier = Modifier.width(64.dp), fontWeight = FontWeight.Bold)
-                            Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Seen", 64.dp, "seen", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Security", 100.dp, "security", tableSortKey, tableSortAscending, onTableSort)
                             if (!compactTableView) {
-                                Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
-                                Text("Freq", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
-                                Text("Owned", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
-                                Text("Tracker", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
-                                Text("Cell", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
-                                Text("Chain", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("RSSI", 70.dp, "rssi", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Freq", 70.dp, "freq", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Owned", 70.dp, "owned", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Tracker", 90.dp, "tracker", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Cell", 90.dp, "cell", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Chain", 90.dp, "chain", tableSortKey, tableSortAscending, onTableSort)
                             }
-                            Text("Last Seen", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Last Seen", 170.dp, "lastSeen", tableSortKey, tableSortAscending, onTableSort)
                         }
-                        pagedDevices.forEachIndexed { index, device ->
+                        sortedTableDevices.forEachIndexed { index, device ->
                             val rowBackgroundColor = if (index % 2 == 0) {
                                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
                             } else {
@@ -19330,6 +19431,8 @@ private fun EncountersPage(
     var securityFilterMode by rememberSaveable { mutableStateOf(SecurityFilterMode.ALL) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
     var compactTableView by rememberSaveable { mutableStateOf(true) }
+    var tableSortKey by rememberSaveable { mutableStateOf("timestamp") }
+    var tableSortAscending by rememberSaveable { mutableStateOf(false) }
     var collapseSweepEvents by rememberSaveable { mutableStateOf(true) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
@@ -19440,6 +19543,33 @@ private fun EncountersPage(
                 "${encounter.timestampEpochMs}|${encounter.source.name}|${encounter.primaryId}" to
                     distanceForEncounterMeters(encounter, currentLocation)
             }
+        }
+    }
+    val sortedTableEncounters = remember(pagedEncounters, tableSortKey, tableSortAscending) {
+        pagedEncounters.sortedWith { a, b ->
+            val aSecurity = analyzeConnectionSecurity(source = a.source.name, encounters = listOf(a))?.isInsecure == true
+            val bSecurity = analyzeConnectionSecurity(source = b.source.name, encounters = listOf(b))?.isInsecure == true
+            val result = when (tableSortKey) {
+                "source" -> a.source.name.compareTo(b.source.name)
+                "primary" -> a.primaryId.compareTo(b.primaryId)
+                "secondary" -> (a.secondaryId ?: "").compareTo(b.secondaryId ?: "")
+                "security" -> aSecurity.compareTo(bSecurity)
+                "rssi" -> (a.rssiDbm ?: Int.MIN_VALUE).compareTo(b.rssiDbm ?: Int.MIN_VALUE)
+                "freq" -> (a.frequencyMhz ?: Double.NEGATIVE_INFINITY).compareTo(b.frequencyMhz ?: Double.NEGATIVE_INFINITY)
+                "lat" -> (a.lat ?: Double.NEGATIVE_INFINITY).compareTo(b.lat ?: Double.NEGATIVE_INFINITY)
+                "lon" -> (a.lon ?: Double.NEGATIVE_INFINITY).compareTo(b.lon ?: Double.NEGATIVE_INFINITY)
+                "payload" -> a.rawPayloadJson.compareTo(b.rawPayloadJson)
+                else -> a.timestampEpochMs.compareTo(b.timestampEpochMs)
+            }
+            if (tableSortAscending) result else -result
+        }
+    }
+    val onTableSort: (String) -> Unit = { key ->
+        if (tableSortKey == key) {
+            tableSortAscending = !tableSortAscending
+        } else {
+            tableSortKey = key
+            tableSortAscending = key != "timestamp"
         }
     }
     LaunchedEffect(pagedEncounters) {
@@ -19624,22 +19754,22 @@ private fun EncountersPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
-                            Text("Primary ID", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Source", 120.dp, "source", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Primary ID", 200.dp, "primary", tableSortKey, tableSortAscending, onTableSort)
                             if (!compactTableView) {
-                                Text("Secondary", modifier = Modifier.width(180.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("Secondary", 180.dp, "secondary", tableSortKey, tableSortAscending, onTableSort)
                             }
-                            Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
-                            Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Security", 100.dp, "security", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("RSSI", 70.dp, "rssi", tableSortKey, tableSortAscending, onTableSort)
                             if (!compactTableView) {
-                                Text("Freq", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
-                                Text("Lat", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
-                                Text("Lon", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
-                                Text("Payload", modifier = Modifier.width(900.dp), fontWeight = FontWeight.Bold)
+                                SortableTableHeaderCell("Freq", 70.dp, "freq", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Lat", 120.dp, "lat", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Lon", 120.dp, "lon", tableSortKey, tableSortAscending, onTableSort)
+                                SortableTableHeaderCell("Payload", 900.dp, "payload", tableSortKey, tableSortAscending, onTableSort)
                             }
-                            Text("Timestamp", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
+                            SortableTableHeaderCell("Timestamp", 170.dp, "timestamp", tableSortKey, tableSortAscending, onTableSort)
                         }
-                        pagedEncounters.forEachIndexed { index, encounter ->
+                        sortedTableEncounters.forEachIndexed { index, encounter ->
                             val connectionSecurity = analyzeConnectionSecurity(
                                 source = encounter.source.name,
                                 encounters = listOf(encounter)
