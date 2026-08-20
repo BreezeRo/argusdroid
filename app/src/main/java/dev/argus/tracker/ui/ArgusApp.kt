@@ -18816,7 +18816,7 @@ private fun DevicesPage(
                 "seen" -> a.seenCount.compareTo(b.seenCount)
                 "security" -> (a.connectionSecurity?.isInsecure == true).compareTo(b.connectionSecurity?.isInsecure == true)
                 "rssi" -> (a.lastRssiDbm ?: Int.MIN_VALUE).compareTo(b.lastRssiDbm ?: Int.MIN_VALUE)
-                "freq" -> (a.lastFrequencyMhz ?: Double.NEGATIVE_INFINITY).compareTo(b.lastFrequencyMhz ?: Double.NEGATIVE_INFINITY)
+                "freq" -> (a.lastFrequencyMhz ?: Int.MIN_VALUE).compareTo(b.lastFrequencyMhz ?: Int.MIN_VALUE)
                 "owned" -> a.isOwned.compareTo(b.isOwned)
                 "tracker" -> (a.trackerRisk?.level?.ordinal ?: -1).compareTo(b.trackerRisk?.level?.ordinal ?: -1)
                 "cell" -> (a.cellThreat?.level?.ordinal ?: -1).compareTo(b.cellThreat?.level?.ordinal ?: -1)
