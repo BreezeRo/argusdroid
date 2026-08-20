@@ -21273,7 +21273,9 @@ private fun DeviceDetailPage(
             SourceSpecificDetailsSection(
                 encounter = deviceEncounter,
                 currentLocation = currentLocation,
-                relatedEncounters = deviceEncounters
+                relatedEncounters = deviceEncounters,
+                suppressFieldLabels = setOf("RSSI", "RSSI dBm", "Frequency", "Frequency MHz"),
+                showCellThreatInsights = false
             )
         }
 
@@ -21321,6 +21323,8 @@ private fun DeviceDetailPage(
                 DetailRow("Secondary ID", item.secondaryId ?: "n/a")
                 item.deviceClassification?.let { classification ->
                     DetailRow("Likely Device Class", classification.summaryLabel())
+                    DetailRow("Classification Evidence", classification.evidence.name)
+                    DetailRow("Classification Confidence", String.format(Locale.US, "%.0f%%", classification.confidence * 100.0))
                     if (classification.matchedSignals.isNotEmpty()) {
                         DetailRow("Classification Signals", classification.matchedSignals.joinToString())
                     }
@@ -21343,6 +21347,7 @@ private fun DeviceDetailPage(
                     }
                 }
                 DetailRow("Seen Count", item.seenCount.toString())
+                DetailRow("Chain-linked Peers", item.chainLinkedPeerCount.toString())
                 DetailRow("Last Seen", formatEpoch(item.lastSeenEpochMs))
                 DetailRow(
                     "Approach Status",
@@ -21358,6 +21363,14 @@ private fun DeviceDetailPage(
                 )
                 DetailRow("Last RSSI", item.lastRssiDbm?.toString() ?: "n/a")
                 DetailRow("Last Frequency", item.lastFrequencyMhz?.toString() ?: "n/a")
+                DetailRow(
+                    "Raw Payload Size",
+                    item.lastRawPayloadJson
+                        ?.toByteArray()
+                        ?.size
+                        ?.let { "$it bytes" }
+                        ?: "n/a"
+                )
                 if (!itemIsCameraSource) {
                     DetailRow(
                         "Motion Status",
@@ -21969,7 +21982,9 @@ private fun separateOverlappingPins(
 private fun SourceSpecificDetailsSection(
     encounter: Encounter,
     currentLocation: DetectionLocation?,
-    relatedEncounters: List<Encounter> = emptyList()
+    relatedEncounters: List<Encounter> = emptyList(),
+    suppressFieldLabels: Set<String> = emptySet(),
+    showCellThreatInsights: Boolean = true
 ) {
     val scope = rememberCoroutineScope()
     // Keep lookup result stable while viewing a device/encounter identity, even if fresh scans update timestamps.
@@ -21979,6 +21994,7 @@ private fun SourceSpecificDetailsSection(
     val details = remember(encounter) { sourceSpecificDetails(encounter) }
     val sectionTitle = details.first
     val sectionFields = details.second
+        .filterNot { (label, _) -> label in suppressFieldLabels }
 
     LaunchedEffect(encounter.source, encounter.primaryId) {
         if (encounter.source != EncounterSource.CELL) return@LaunchedEffect
@@ -22013,21 +22029,23 @@ private fun SourceSpecificDetailsSection(
             .filter { it.source == EncounterSource.CELL }
             .toList()
             .ifEmpty { listOf(encounter) }
-        analyzeCellThreat(threatInput)?.let { threat ->
-            DetailRow(
-                "Cell Threat",
-                when (threat.level) {
-                    CellThreatLevel.HIGH -> "HIGH"
-                    CellThreatLevel.MEDIUM -> "MEDIUM"
-                    CellThreatLevel.LOW -> "LOW"
-                    CellThreatLevel.NONE -> "NONE"
+        if (showCellThreatInsights) {
+            analyzeCellThreat(threatInput)?.let { threat ->
+                DetailRow(
+                    "Cell Threat",
+                    when (threat.level) {
+                        CellThreatLevel.HIGH -> "HIGH"
+                        CellThreatLevel.MEDIUM -> "MEDIUM"
+                        CellThreatLevel.LOW -> "LOW"
+                        CellThreatLevel.NONE -> "NONE"
+                    }
+                )
+                DetailRow("Cell Threat Confidence", String.format(Locale.US, "%.0f%%", threat.confidence * 100.0))
+                DetailRow("Cell Threat Score", String.format(Locale.US, "%.2f", threat.score))
+                DetailRow("Cell Threat Summary", threat.summary)
+                if (threat.indicators.isNotEmpty()) {
+                    DetailRow("Threat Indicators", threat.indicators.joinToString(" | "))
                 }
-            )
-            DetailRow("Cell Threat Confidence", String.format(Locale.US, "%.0f%%", threat.confidence * 100.0))
-            DetailRow("Cell Threat Score", String.format(Locale.US, "%.2f", threat.score))
-            DetailRow("Cell Threat Summary", threat.summary)
-            if (threat.indicators.isNotEmpty()) {
-                DetailRow("Threat Indicators", threat.indicators.joinToString(" | "))
             }
         }
 
