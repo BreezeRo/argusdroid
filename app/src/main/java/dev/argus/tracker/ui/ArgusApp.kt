@@ -8976,17 +8976,43 @@ private fun DetectionLogsPage(
             }
         }
         item {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AssistChip(onClick = { }, label = { Text("Total ${logs.size}") })
-                AssistChip(onClick = { }, label = { Text("Approach $approachCount") })
-                AssistChip(onClick = { }, label = { Text("Tracker $trackerCount") })
-                AssistChip(onClick = { }, label = { Text("Stingray $stingrayCount") })
-                AssistChip(onClick = { }, label = { Text("Camera $cameraInViewCount") })
-                AssistChip(onClick = { }, label = { Text("No-Fly $noFlyCount") })
+            val logTypeCountScroll = rememberScrollState()
+            LaunchedEffect(logs.size, approachCount, trackerCount, stingrayCount, cameraInViewCount, noFlyCount) {
+                val countBuckets = listOf(
+                    logs.size,
+                    approachCount,
+                    trackerCount,
+                    stingrayCount,
+                    cameraInViewCount,
+                    noFlyCount
+                )
+                if (countBuckets.count { it > 0 } < 2) return@LaunchedEffect
+                while (true) {
+                    if (logTypeCountScroll.maxValue <= 0) {
+                        delay(1500.milliseconds)
+                        continue
+                    }
+                    delay(1200.milliseconds)
+                    logTypeCountScroll.animateScrollTo(logTypeCountScroll.maxValue)
+                    delay(1200.milliseconds)
+                    logTypeCountScroll.animateScrollTo(0)
+                }
+            }
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(logTypeCountScroll)
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AssistChip(onClick = { selectedLogTab = 0 }, label = { Text("Total ${logs.size}") })
+                    AssistChip(onClick = { selectedLogTab = 1 }, label = { Text("Approach $approachCount") })
+                    AssistChip(onClick = { selectedLogTab = 2 }, label = { Text("Tracker $trackerCount") })
+                    AssistChip(onClick = { selectedLogTab = 3 }, label = { Text("Stingray $stingrayCount") })
+                    AssistChip(onClick = { selectedLogTab = 4 }, label = { Text("Camera $cameraInViewCount") })
+                    AssistChip(onClick = { selectedLogTab = 5 }, label = { Text("No-Fly $noFlyCount") })
+                }
             }
         }
         item {
@@ -9219,13 +9245,31 @@ private fun ErrorLogsPage(
         }
         if (categoryCounts.isNotEmpty()) {
             item {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    categoryCounts.take(8).forEach { (category, count) ->
-                        AssistChip(onClick = { }, label = { Text("$category $count") })
+                val categoryCountScroll = rememberScrollState()
+                LaunchedEffect(categoryCounts) {
+                    if (categoryCounts.size < 2) return@LaunchedEffect
+                    while (true) {
+                        if (categoryCountScroll.maxValue <= 0) {
+                            delay(1500.milliseconds)
+                            continue
+                        }
+                        delay(1200.milliseconds)
+                        categoryCountScroll.animateScrollTo(categoryCountScroll.maxValue)
+                        delay(1200.milliseconds)
+                        categoryCountScroll.animateScrollTo(0)
+                    }
+                }
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(categoryCountScroll)
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        categoryCounts.take(8).forEach { (category, count) ->
+                            AssistChip(onClick = { }, label = { Text("$category $count") })
+                        }
                     }
                 }
             }
