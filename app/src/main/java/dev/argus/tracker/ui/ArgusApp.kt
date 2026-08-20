@@ -21,6 +21,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Debug
 import android.os.Handler
 import android.os.Looper
@@ -470,6 +471,11 @@ private data class HomeSensorToggle(
     val subtitle: String,
     val enabled: Boolean,
     val status: SensorStatus?
+)
+
+private data class BatteryTelemetrySnapshot(
+    val dischargeCurrentMilliAmps: Double?,
+    val estimatedFullCapacityMilliAmpHours: Double?
 )
 
 private data class DeviceItem(
@@ -4591,6 +4597,7 @@ private fun HomePage(
                             sensorStatusByName["Magnetometer (Direct)"]
                         )
                     )
+                    val batteryUsageByToggleKey = estimateSensorBatteryUsageLabels(context, toggles)
                     HomeResponsiveGrid(
                         items = toggles,
                         twoColumnMinWidth = HOME_TWO_COLUMN_MIN_WIDTH,
@@ -4609,6 +4616,13 @@ private fun HomePage(
                                         toggle.subtitle,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = batteryUsageByToggleKey[toggle.key]
+                                            ?: "Estimate unavailable",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp)
                                     )
                                     toggle.status?.let { sensorStatus ->
                                         val statusText = "${if (sensorStatus.isOn) "On" else "Off"} | ${if (sensorStatus.factoredByArgus) "Factored" else "Not factored"}"
@@ -21324,6 +21338,78 @@ private fun orderedEncounterSourceOptions(sources: Set<String>): List<String> {
     val preferredOrder = SOURCE_TYPE_UI_META_ORDERED.map { it.source }
     return preferredOrder.filter { it in sources } +
         sources.filterNot { it in preferredOrder }.sorted()
+}
+
+private fun readBatteryTelemetrySnapshot(context: Context): BatteryTelemetrySnapshot {
+    val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        ?: return BatteryTelemetrySnapshot(null, null)
+
+    val currentNowMicroAmps = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+    val currentAverageMicroAmps = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE)
+    val chargeCounterMicroAmpHours = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+    val capacityPercent = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+
+    val dischargeCurrentMilliAmps = when {
+        currentNowMicroAmps < 0L -> (-currentNowMicroAmps) / 1000.0
+        currentAverageMicroAmps < 0L -> (-currentAverageMicroAmps) / 1000.0
+        else -> null
+    }?.takeIf { it.isFinite() && it > 0.0 }
+
+    val safeCapacityPercent = capacityPercent.takeIf { it in 1..100 }
+    val estimatedFullCapacityMilliAmpHours = if (chargeCounterMicroAmpHours > 0L && safeCapacityPercent != null) {
+        val currentChargeMah = chargeCounterMicroAmpHours / 1000.0
+        (currentChargeMah / (safeCapacityPercent / 100.0)).takeIf { it.isFinite() && it > 0.0 }
+    } else {
+        null
+    }
+
+    return BatteryTelemetrySnapshot(
+        dischargeCurrentMilliAmps = dischargeCurrentMilliAmps,
+        estimatedFullCapacityMilliAmpHours = estimatedFullCapacityMilliAmpHours
+    )
+}
+
+private fun estimateSensorBatteryUsageLabels(
+    context: Context,
+    toggles: List<HomeSensorToggle>
+): Map<String, String> {
+    val telemetry = readBatteryTelemetrySnapshot(context)
+    val dischargeMa = telemetry.dischargeCurrentMilliAmps
+    val fullCapacityMah = telemetry.estimatedFullCapacityMilliAmpHours
+
+    val weightByKey = mapOf(
+        "wifi" to 1.0,
+        "bluetooth_le" to 1.1,
+        "cellular" to 1.5,
+        "nfc" to 0.4,
+        "aviation_adsb" to 1.2,
+        "aviation_public" to 0.5,
+        "sdr" to 2.2,
+        "direct_acoustic" to 1.7,
+        "direct_magnetic" to 0.8
+    )
+
+    val enabledWeight = toggles
+        .asSequence()
+        .filter { it.enabled }
+        .sumOf { toggle -> weightByKey[toggle.key] ?: 1.0 }
+
+    if (enabledWeight <= 0.0) {
+        return toggles.associate { toggle -> toggle.key to "Off (est. 0.0%/hr)" }
+    }
+
+    return toggles.associate { toggle ->
+        if (!toggle.enabled) {
+            toggle.key to "Off (est. 0.0%/hr)"
+        } else if (dischargeMa == null || fullCapacityMah == null) {
+            toggle.key to "Estimate unavailable (battery telemetry restricted)"
+        } else {
+            val weight = weightByKey[toggle.key] ?: 1.0
+            val estimatedSensorMa = (dischargeMa * (weight / enabledWeight)).coerceAtLeast(0.0)
+            val estimatedPctPerHour = ((estimatedSensorMa / fullCapacityMah) * 100.0).coerceAtLeast(0.0)
+            toggle.key to String.format(Locale.US, "Est. %.1f%%/hr (%.0f mA)", estimatedPctPerHour, estimatedSensorMa)
+        }
+    }
 }
 
 private fun mapTimeRangeCutoffEpochMs(
