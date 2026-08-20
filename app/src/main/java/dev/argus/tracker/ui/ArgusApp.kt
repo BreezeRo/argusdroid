@@ -8183,14 +8183,7 @@ private fun DetectionPage(
                     LaunchedEffect(deviceMapPins) {
                         RuntimeUiListMemoryGauge.updateActiveDeviceMapPins(deviceMapPins)
                     }
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MapTimeRangeSelector(
-                            selectedPreset = deviceMapTimeRangePreset,
-                            onPresetChanged = { deviceMapTimeRangePreset = it },
-                            customRangeMinutes = deviceMapCustomRangeMinutes,
-                            onCustomRangeMinutesChanged = { deviceMapCustomRangeMinutes = it }
-                        )
-                        DetectionMapPage(
+                    DetectionMapPage(
                             mapTitle = "Device Map",
                             mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
                             showTrafficLayer = mapTrafficEnabled,
@@ -8260,12 +8253,16 @@ private fun DetectionPage(
                             onCaptureSnapshot = {
                                 deviceMapSnapshotEpochMs = System.currentTimeMillis()
                             },
+                            showTimeRangeControl = true,
+                            selectedTimeRangePreset = deviceMapTimeRangePreset,
+                            onTimeRangePresetChanged = { deviceMapTimeRangePreset = it },
+                            customTimeRangeMinutes = deviceMapCustomRangeMinutes,
+                            onCustomTimeRangeMinutesChanged = { deviceMapCustomRangeMinutes = it },
                             mapOnlyPresentation = mapOnlyMode,
                             externalZoomCommandNonce = pipZoomCommandNonce,
                             externalZoomCommandDelta = pipZoomCommandDelta,
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
-                    }
                 } else if (selectedMapSubTab == 1) {
                     val bluetoothMapPins by produceState(
                         estimatedDeviceLocationPins,
@@ -8321,14 +8318,7 @@ private fun DetectionPage(
                         }
                     }
 
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MapTimeRangeSelector(
-                            selectedPreset = bluetoothMapTimeRangePreset,
-                            onPresetChanged = { bluetoothMapTimeRangePreset = it },
-                            customRangeMinutes = bluetoothMapCustomRangeMinutes,
-                            onCustomRangeMinutesChanged = { bluetoothMapCustomRangeMinutes = it }
-                        )
-                        DetectionMapPage(
+                    DetectionMapPage(
                             mapTitle = "Bluetooth Map",
                             mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
                             currentLocationOverride = bluetoothMapCurrentLocation,
@@ -8380,9 +8370,13 @@ private fun DetectionPage(
                                 bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
                             },
                             showTrackerFamilyBadge = true,
+                            showTimeRangeControl = true,
+                            selectedTimeRangePreset = bluetoothMapTimeRangePreset,
+                            onTimeRangePresetChanged = { bluetoothMapTimeRangePreset = it },
+                            customTimeRangeMinutes = bluetoothMapCustomRangeMinutes,
+                            onCustomTimeRangeMinutesChanged = { bluetoothMapCustomRangeMinutes = it },
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
-                    }
                 } else if (selectedMapSubTab == 2) {
                     val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
                         ScanSettings.isAviationPublicSensorEnabled(context)
@@ -8446,14 +8440,7 @@ private fun DetectionPage(
                                     .toList()
                             }
                         }
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MapTimeRangeSelector(
-                                selectedPreset = flightMapTimeRangePreset,
-                                onPresetChanged = { flightMapTimeRangePreset = it },
-                                customRangeMinutes = flightMapCustomRangeMinutes,
-                                onCustomRangeMinutesChanged = { flightMapCustomRangeMinutes = it }
-                            )
-                            DetectionMapPage(
+                        DetectionMapPage(
                                 mapTitle = "Aircraft Map",
                                 mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use time range presets to scope active history.",
                                 currentLocationOverride = flightMapCurrentLocation,
@@ -8509,9 +8496,13 @@ private fun DetectionPage(
                                 onCaptureSnapshot = {
                                     flightMapSnapshotEpochMs = System.currentTimeMillis()
                                 },
+                                showTimeRangeControl = true,
+                                selectedTimeRangePreset = flightMapTimeRangePreset,
+                                onTimeRangePresetChanged = { flightMapTimeRangePreset = it },
+                                customTimeRangeMinutes = flightMapCustomRangeMinutes,
+                                onCustomTimeRangeMinutesChanged = { flightMapCustomRangeMinutes = it },
                                 liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                             )
-                        }
                     }
                 } else {
                     val magneticMapSamples = remember(meshInsightEncounters, magneticMapPinLimit) {
@@ -10363,6 +10354,11 @@ private fun DetectionMapPage(
     onSinceSnapshotEnabledChange: (Boolean) -> Unit = {},
     onCaptureSnapshot: () -> Unit = {},
     showTrackerFamilyBadge: Boolean = false,
+    showTimeRangeControl: Boolean = false,
+    selectedTimeRangePreset: MapTimeRangePreset = MapTimeRangePreset.PAST_HOUR,
+    onTimeRangePresetChanged: (MapTimeRangePreset) -> Unit = {},
+    customTimeRangeMinutes: Long = DEFAULT_CUSTOM_MAP_RANGE_MINUTES,
+    onCustomTimeRangeMinutesChanged: (Long) -> Unit = {},
     mapOnlyPresentation: Boolean = false,
     externalZoomCommandNonce: Long = 0L,
     externalZoomCommandDelta: Float = 0f,
@@ -10376,10 +10372,15 @@ private fun DetectionMapPage(
     val mapsApiKeyDiagnostic = remember(context) { getMapsApiKeyDiagnostic(context) }
     val playServicesDiagnostic = remember(context) { getPlayServicesDiagnostic(context) }
     val hasNetwork = remember(context) { hasNetworkConnectivity(context) }
+    val mapTimeRangeCustomOptionsMinutes = remember {
+        listOf(1L, 5L, 15L, 30L, 60L, 180L, 360L, 720L, 1440L, 2880L, 10080L)
+    }
     val hasLocationPermission = remember(context) {
         AppPermissions.hasAnyLocationPermission(context)
     }
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
+    var timeRangeExpanded by remember { mutableStateOf(false) }
+    var customTimeRangeExpanded by remember { mutableStateOf(false) }
     var pinLimitExpanded by remember { mutableStateOf(false) }
     var clusterRangeExpanded by remember { mutableStateOf(false) }
     var radiusExpanded by remember { mutableStateOf(false) }
@@ -11210,6 +11211,60 @@ private fun DetectionMapPage(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    if (showTimeRangeControl) {
+                        Box {
+                            AssistChip(
+                                onClick = { timeRangeExpanded = true },
+                                label = {
+                                    Text(
+                                        text = "Range: ${selectedTimeRangePreset.label}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
+                            DropdownMenu(
+                                expanded = timeRangeExpanded,
+                                onDismissRequest = { timeRangeExpanded = false }
+                            ) {
+                                MapTimeRangePreset.entries.forEach { preset ->
+                                    DropdownMenuItem(
+                                        text = { Text(preset.label) },
+                                        onClick = {
+                                            onTimeRangePresetChanged(preset)
+                                            timeRangeExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        if (selectedTimeRangePreset == MapTimeRangePreset.CUSTOM) {
+                            Box {
+                                AssistChip(
+                                    onClick = { customTimeRangeExpanded = true },
+                                    label = {
+                                        Text(
+                                            text = "Custom: ${ScanSettings.formatInterval(customTimeRangeMinutes * 60L)}",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                )
+                                DropdownMenu(
+                                    expanded = customTimeRangeExpanded,
+                                    onDismissRequest = { customTimeRangeExpanded = false }
+                                ) {
+                                    mapTimeRangeCustomOptionsMinutes.forEach { optionMinutes ->
+                                        DropdownMenuItem(
+                                            text = { Text(ScanSettings.formatInterval(optionMinutes * 60L)) },
+                                            onClick = {
+                                                onCustomTimeRangeMinutesChanged(optionMinutes)
+                                                customTimeRangeExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     AssistChip(
                         onClick = { controlsVisible = !controlsVisible },
                         label = {
@@ -21482,66 +21537,6 @@ private fun isMapPinWithinSelectedRange(
 ): Boolean {
     val cutoff = mapTimeRangeCutoffEpochMs(nowEpochMs, preset, customRangeMinutes) ?: return true
     return pinTimestampEpochMs >= cutoff
-}
-
-@Composable
-@OptIn(ExperimentalLayoutApi::class)
-private fun MapTimeRangeSelector(
-    selectedPreset: MapTimeRangePreset,
-    onPresetChanged: (MapTimeRangePreset) -> Unit,
-    customRangeMinutes: Long,
-    onCustomRangeMinutesChanged: (Long) -> Unit
-) {
-    var customRangeExpanded by remember { mutableStateOf(false) }
-    val customOptionsMinutes = listOf(1L, 5L, 15L, 30L, 60L, 180L, 360L, 720L, 1440L, 2880L, 10080L)
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text("Map Time Range", fontWeight = FontWeight.SemiBold)
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                MapTimeRangePreset.entries.forEach { preset ->
-                    FilterChip(
-                        selected = selectedPreset == preset,
-                        onClick = { onPresetChanged(preset) },
-                        label = { Text(preset.label) }
-                    )
-                }
-            }
-            if (selectedPreset == MapTimeRangePreset.CUSTOM) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    Text("Custom window: ${ScanSettings.formatInterval(customRangeMinutes * 60L)}")
-                    Button(onClick = { customRangeExpanded = true }) {
-                        Text("Change")
-                    }
-                    DropdownMenu(
-                        expanded = customRangeExpanded,
-                        onDismissRequest = { customRangeExpanded = false }
-                    ) {
-                        customOptionsMinutes.forEach { optionMinutes ->
-                            DropdownMenuItem(
-                                text = { Text(ScanSettings.formatInterval(optionMinutes * 60L)) },
-                                onClick = {
-                                    onCustomRangeMinutesChanged(optionMinutes)
-                                    customRangeExpanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
