@@ -438,6 +438,13 @@ private data class CellThreatSignal(
     val indicators: List<String>
 )
 
+private data class ConnectionSecuritySignal(
+    val isInsecure: Boolean,
+    val confidence: Double,
+    val summary: String,
+    val indicators: List<String>
+)
+
 private data class HomeSensorToggle(
     val key: String,
     val title: String,
@@ -474,7 +481,8 @@ private data class DeviceItem(
     val isOwned: Boolean,
     val gpsSpoofSuspected: Boolean,
     val trackerRisk: TrackerRiskSignal?,
-    val cellThreat: CellThreatSignal?
+    val cellThreat: CellThreatSignal?,
+    val connectionSecurity: ConnectionSecuritySignal?
 )
 
 private data class DeviceDetailComputed(
@@ -552,6 +560,7 @@ private data class DeviceLocationCandidate(
     val motionSignal: MotionSignal? = null,
     val trackerRisk: TrackerRiskSignal? = null,
     val cellThreat: CellThreatSignal? = null,
+    val connectionSecurity: ConnectionSecuritySignal? = null,
     val isOwned: Boolean = false
 )
 
@@ -7076,6 +7085,10 @@ private fun DetectionPage(
                         null
                     }
                     val motionSignal = if (isCameraSource) null else analyzeMotionSignal(recentDeviceEncounters)
+                    val connectionSecurity = analyzeConnectionSecurity(
+                        source = latest.source.name,
+                        encounters = recentDeviceEncounters
+                    )
                     DeviceLocationCandidate(
                         source = latest.source.name,
                         primaryId = latest.primaryId,
@@ -7103,7 +7116,8 @@ private fun DetectionPage(
                                 homePoint = trackerHomePoint
                             )
                         },
-                        cellThreat = if (isCellSource) analyzeCellThreat(recentDeviceEncounters) else null
+                        cellThreat = if (isCellSource) analyzeCellThreat(recentDeviceEncounters) else null,
+                        connectionSecurity = connectionSecurity
                     )
                 }
                 .toList()
@@ -7533,6 +7547,11 @@ private fun DetectionPage(
                     CellThreatLevel.LOW -> " • Cell Threat LOW"
                     else -> ""
                 }
+                val insecureConnectSnippet = if (candidate.connectionSecurity?.isInsecure == true) {
+                    " • Avoid connect"
+                } else {
+                    ""
+                }
                 val isCameraSource = candidate.source == EncounterSource.CAMERA.name
                 val motionBadge = if (isCameraSource) {
                     null
@@ -7580,7 +7599,7 @@ private fun DetectionPage(
                 }
                 val line1 = "Seen ${candidate.seenCount}x"
                 val line2 = "$freshnessSnippet • Last ${formatEpoch(candidate.latestTimestampEpochMs)}$rangeSnippet$approachSnippet"
-                val line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet$cellThreatSnippet"
+                val line3 = "$motionLine$topSpeedLine$ownershipSnippet$chainSnippet$trackerSnippet$cellThreatSnippet$insecureConnectSnippet"
                 val pinSnippet = buildThreeLineSnippet(
                     line1 = line1,
                     line2 = line2,
@@ -18326,6 +18345,7 @@ private fun DevicesPage(
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var showTrackerRiskOnly by rememberSaveable { mutableStateOf(false) }
     var showCellThreatOnly by rememberSaveable { mutableStateOf(false) }
+    var showInsecureOnly by rememberSaveable { mutableStateOf(false) }
     var showHomeAwaySuspiciousOnly by rememberSaveable { mutableStateOf(false) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
@@ -18387,6 +18407,7 @@ private fun DevicesPage(
         showOwnedOnly,
         showTrackerRiskOnly,
         showCellThreatOnly,
+        showInsecureOnly,
         showHomeAwaySuspiciousOnly,
         homePoint,
         showDistance,
@@ -18407,12 +18428,13 @@ private fun DevicesPage(
                         (device.trackerRisk?.level == TrackerRiskLevel.HIGH || device.trackerRisk?.level == TrackerRiskLevel.MEDIUM)
                     val cellThreatMatches = !showCellThreatOnly ||
                         (device.cellThreat?.level == CellThreatLevel.HIGH || device.cellThreat?.level == CellThreatLevel.MEDIUM)
+                    val insecureMatches = !showInsecureOnly || device.connectionSecurity?.isInsecure == true
                     val homeAwaySuspiciousMatches = !showHomeAwaySuspiciousOnly || homePoint == null || (
                         !device.isOwned &&
                             device.trackerRisk?.seenAtHome == true &&
                             device.trackerRisk?.seenAwayFromHome == true
                         )
-                    sourceMatches && queryMatches && ownedMatches && riskMatches && cellThreatMatches && homeAwaySuspiciousMatches
+                    sourceMatches && queryMatches && ownedMatches && riskMatches && cellThreatMatches && insecureMatches && homeAwaySuspiciousMatches
                 }
 
                 if (!showDistance || !sortByDistance) {
@@ -18542,6 +18564,11 @@ private fun DevicesPage(
                             onCheckedChange = { showCellThreatOnly = it }
                         )
                         CompactSwitchControl(
+                            label = "Insecure Connectivity Only",
+                            checked = showInsecureOnly,
+                            onCheckedChange = { showInsecureOnly = it }
+                        )
+                        CompactSwitchControl(
                             label = "Home→Away Suspicious Only",
                             checked = showHomeAwaySuspiciousOnly,
                             onCheckedChange = { showHomeAwaySuspiciousOnly = it },
@@ -18601,6 +18628,13 @@ private fun DevicesPage(
                             Text(
                                 text = "GPS Spoof? Remote ID location looks inconsistent",
                                 color = Color(0xFFB26A00),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        if (device.connectionSecurity?.isInsecure == true) {
+                            Text(
+                                text = "Insecure connectivity risk: ${device.connectionSecurity.summary}. Avoid connecting.",
+                                color = Color(0xFFB3261E),
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -19289,6 +19323,10 @@ private fun buildDeviceItemForGroup(
         )
     }
     val motionSignal = if (isCameraSource) null else analyzeMotionSignal(groupedEncounters)
+    val connectionSecurity = analyzeConnectionSecurity(
+        source = source,
+        encounters = groupedEncounters
+    )
     val gpsSpoofSuspected =
         source == EncounterSource.REMOTE_ID.name &&
             isLikelyRemoteIdLocationSpoofed(groupedEncounters)
@@ -19329,7 +19367,8 @@ private fun buildDeviceItemForGroup(
         isOwned = owned,
         gpsSpoofSuspected = gpsSpoofSuspected,
         trackerRisk = trackerRisk,
-        cellThreat = if (isCellSource) analyzeCellThreat(groupedEncounters) else null
+        cellThreat = if (isCellSource) analyzeCellThreat(groupedEncounters) else null,
+        connectionSecurity = connectionSecurity
     )
 }
 
@@ -19416,6 +19455,130 @@ private fun countSuppressedLikelyRandomizedWifiOneOffDevices(
                 bleSuppressionEnabled = false
             )
         }
+}
+
+private fun analyzeConnectionSecurity(
+    source: String,
+    encounters: List<Encounter>
+): ConnectionSecuritySignal? {
+    if (encounters.isEmpty()) return null
+
+    val latest = encounters.maxByOrNull { it.timestampEpochMs } ?: return null
+
+    return when (source) {
+        EncounterSource.WIFI.name -> {
+            val capabilities = encounters
+                .asSequence()
+                .mapNotNull { encounter ->
+                    runCatching { JSONObject(encounter.rawPayloadJson) }
+                        .getOrNull()
+                        ?.optString("capabilities", "")
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                }
+                .toList()
+
+            if (capabilities.isEmpty()) return null
+
+            val openCount = capabilities.count { caps ->
+                val normalized = caps.lowercase(Locale.US)
+                !normalized.contains("wpa") &&
+                    !normalized.contains("sae") &&
+                    !normalized.contains("owe") &&
+                    !normalized.contains("wep")
+            }
+            val wepCount = capabilities.count { caps ->
+                caps.lowercase(Locale.US).contains("wep")
+            }
+            val legacyWeakCount = capabilities.count { caps ->
+                val normalized = caps.lowercase(Locale.US)
+                normalized.contains("tkip") ||
+                    (normalized.contains("wpa") &&
+                        !normalized.contains("wpa2") &&
+                        !normalized.contains("wpa3") &&
+                        !normalized.contains("sae") &&
+                        !normalized.contains("owe"))
+            }
+
+            val indicators = mutableListOf<String>()
+            if (openCount > 0) indicators += "Open authentication observed"
+            if (wepCount > 0) indicators += "WEP authentication observed"
+            if (legacyWeakCount > 0) indicators += "Legacy WPA/TKIP observed"
+            if (indicators.isEmpty()) return null
+
+            val riskSampleCount = listOf(openCount, wepCount, legacyWeakCount).maxOrNull() ?: 0
+            val confidence = (riskSampleCount.toDouble() / capabilities.size.toDouble())
+                .coerceIn(0.35, 0.98)
+
+            val summary = when {
+                wepCount > 0 -> "WEP or legacy encryption detected"
+                openCount > 0 -> "Open Wi-Fi network (no WPA protections)"
+                else -> "Weak Wi-Fi cipher settings detected"
+            }
+
+            ConnectionSecuritySignal(
+                isInsecure = true,
+                confidence = confidence,
+                summary = summary,
+                indicators = indicators
+            )
+        }
+
+        EncounterSource.BLUETOOTH_CLASSIC.name -> {
+            val payload = runCatching { JSONObject(latest.rawPayloadJson) }.getOrNull() ?: return null
+            val bondState = payload.optInt("bondState", -1)
+            val discoverySource = payload.optString("source", "")
+            val classLabel = payload.optString("classLabel", "")
+
+            val indicators = mutableListOf<String>()
+            if (discoverySource.equals("inquiry", ignoreCase = true) && bondState != 12) {
+                indicators += "Discovered via inquiry and not bonded"
+            }
+            if (classLabel.equals("networking", ignoreCase = true)) {
+                indicators += "Networking-class Bluetooth device"
+            }
+            if (indicators.isEmpty()) return null
+
+            ConnectionSecuritySignal(
+                isInsecure = true,
+                confidence = if (bondState != 12) 0.78 else 0.6,
+                summary = "Untrusted Bluetooth Classic device profile",
+                indicators = indicators
+            )
+        }
+
+        EncounterSource.BLUETOOTH_LE.name -> {
+            val payload = runCatching { JSONObject(latest.rawPayloadJson) }.getOrNull() ?: return null
+            val connectable = payload.optBoolean("isConnectable", false)
+            val trackerLikely = payload.optBoolean("trackerLikely", false)
+            val name = payload.optString("name", "").trim()
+
+            val indicators = mutableListOf<String>()
+            if (connectable && name.isBlank()) {
+                indicators += "Connectable BLE device without clear identity"
+            }
+            if (trackerLikely) {
+                indicators += "Tracker-like BLE signature"
+            }
+            if (connectable && isLikelyRandomizedMacAddress(latest.primaryId)) {
+                indicators += "Randomized BLE address"
+            }
+            if (indicators.isEmpty()) return null
+
+            ConnectionSecuritySignal(
+                isInsecure = true,
+                confidence = when {
+                    trackerLikely && connectable -> 0.86
+                    trackerLikely -> 0.75
+                    else -> 0.62
+                },
+                summary = "Potentially unsafe Bluetooth LE peripheral",
+                indicators = indicators
+            )
+        }
+
+        else -> null
+    }
 }
 
 private fun countSuppressedLikelyRandomizedBleOneOffDevices(
@@ -19955,6 +20118,27 @@ private fun DeviceDetailPage(
                     DetailRow("Cell Threat Summary", item.cellThreat.summary)
                     if (item.cellThreat.indicators.isNotEmpty()) {
                         DetailRow("Cell Threat Indicators", item.cellThreat.indicators.joinToString(" | "))
+                    }
+                }
+                if (item.connectionSecurity != null) {
+                    DetailRow(
+                        "Connectivity Security",
+                        if (item.connectionSecurity.isInsecure) {
+                            "INSECURE - Avoid connecting"
+                        } else {
+                            "No immediate risk"
+                        }
+                    )
+                    DetailRow(
+                        "Connectivity Risk Confidence",
+                        String.format(Locale.US, "%.0f%%", item.connectionSecurity.confidence * 100.0)
+                    )
+                    DetailRow("Connectivity Assessment", item.connectionSecurity.summary)
+                    if (item.connectionSecurity.indicators.isNotEmpty()) {
+                        DetailRow(
+                            "Connectivity Indicators",
+                            item.connectionSecurity.indicators.joinToString(" | ")
+                        )
                     }
                 }
                 DetailRow(
