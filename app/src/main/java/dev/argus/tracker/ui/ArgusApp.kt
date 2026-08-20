@@ -8906,6 +8906,7 @@ private fun DetectionLogsPage(
 ) {
     var selectedLogTab by rememberSaveable { mutableStateOf(0) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
+    var compactTableView by rememberSaveable { mutableStateOf(true) }
 
     val approachCount = remember(logs) { logs.count { it.type == AlertLogType.APPROACH } }
     val trackerCount = remember(logs) { logs.count { it.type == AlertLogType.TRACKER } }
@@ -8963,6 +8964,15 @@ private fun DetectionLogsPage(
                 checked = viewAsTable,
                 onCheckedChange = { viewAsTable = it }
             )
+        }
+        if (viewAsTable) {
+            item {
+                CompactSwitchControl(
+                    label = "Compact View",
+                    checked = compactTableView,
+                    onCheckedChange = { compactTableView = it }
+                )
+            }
         }
         item {
             TabRow(selectedTabIndex = safeSelectedLogTab) {
@@ -9052,7 +9062,12 @@ private fun DetectionLogsPage(
                             Text("Source", modifier = Modifier.width(108.dp), fontWeight = FontWeight.Bold)
                             Text("Primary ID", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
                             Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
-                            Text("Message", modifier = Modifier.width(380.dp), fontWeight = FontWeight.Bold)
+                            if (compactTableView) {
+                                Text("Message", modifier = Modifier.width(380.dp), fontWeight = FontWeight.Bold)
+                            } else {
+                                Text("Confidence", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
+                                Text("Message", modifier = Modifier.width(900.dp), fontWeight = FontWeight.Bold)
+                            }
                         }
                         filteredLogs.forEachIndexed { index, entry ->
                             val rowTypeLabel = when (entry.type) {
@@ -9091,7 +9106,15 @@ private fun DetectionLogsPage(
                                 Text(listSourceLabel(entry.source, null), modifier = Modifier.width(108.dp))
                                 Text(entry.primaryId, modifier = Modifier.width(160.dp))
                                 Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.width(160.dp))
-                                Text(entry.message.take(120), modifier = Modifier.width(380.dp))
+                                if (compactTableView) {
+                                    Text(entry.message.take(120), modifier = Modifier.width(380.dp))
+                                } else {
+                                    val confidenceText = entry.confidence?.let {
+                                        String.format(Locale.US, "%.0f%%", it * 100.0)
+                                    } ?: "n/a"
+                                    Text(confidenceText, modifier = Modifier.width(100.dp))
+                                    Text(entry.message, modifier = Modifier.width(900.dp))
+                                }
                             }
                         }
                     }
@@ -9195,6 +9218,7 @@ private fun ErrorLogsPage(
 ) {
     var showWarnings by rememberSaveable { mutableStateOf(false) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
+    var compactTableView by rememberSaveable { mutableStateOf(true) }
     val warningCount = remember(logs) { logs.count { it.severity == "WARNING" } }
     val errorCount = remember(logs) { logs.count { it.severity != "WARNING" } }
     val filteredLogs = remember(logs, showWarnings) {
@@ -9241,6 +9265,15 @@ private fun ErrorLogsPage(
                 checked = viewAsTable,
                 onCheckedChange = { viewAsTable = it }
             )
+        }
+        if (viewAsTable) {
+            item {
+                CompactSwitchControl(
+                    label = "Compact View",
+                    checked = compactTableView,
+                    onCheckedChange = { compactTableView = it }
+                )
+            }
         }
         item {
             val latest = latestLogEpoch?.let(::formatEpoch) ?: "n/a"
@@ -9313,7 +9346,11 @@ private fun ErrorLogsPage(
                             Text("Category", modifier = Modifier.width(140.dp), fontWeight = FontWeight.Bold)
                             Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
                             Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
-                            Text("Message", modifier = Modifier.width(420.dp), fontWeight = FontWeight.Bold)
+                            Text(
+                                "Message",
+                                modifier = Modifier.width(if (compactTableView) 420.dp else 900.dp),
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         filteredLogs.forEachIndexed { index, entry ->
                             val rowBackgroundColor = if (index % 2 == 0) {
@@ -9332,7 +9369,10 @@ private fun ErrorLogsPage(
                                 Text(entry.category, modifier = Modifier.width(140.dp))
                                 Text(entry.source, modifier = Modifier.width(120.dp))
                                 Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.width(160.dp))
-                                Text(entry.message.take(140), modifier = Modifier.width(420.dp))
+                                Text(
+                                    if (compactTableView) entry.message.take(140) else entry.message,
+                                    modifier = Modifier.width(if (compactTableView) 420.dp else 900.dp)
+                                )
                             }
                         }
                     }
@@ -18553,6 +18593,7 @@ private fun DevicesPage(
     var securityFilterMode by rememberSaveable { mutableStateOf(SecurityFilterMode.ALL) }
     var showHomeAwaySuspiciousOnly by rememberSaveable { mutableStateOf(false) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
+    var compactTableView by rememberSaveable { mutableStateOf(true) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
         LocationSnapshotProvider.observe(context).collectAsState(
@@ -18808,6 +18849,13 @@ private fun DevicesPage(
                             checked = viewAsTable,
                             onCheckedChange = { viewAsTable = it }
                         )
+                        if (viewAsTable) {
+                            CompactSwitchControl(
+                                label = "Compact View",
+                                checked = compactTableView,
+                                onCheckedChange = { compactTableView = it }
+                            )
+                        }
                         CompactSwitchControl(
                             label = "Home→Away Suspicious Only",
                             checked = showHomeAwaySuspiciousOnly,
@@ -18875,8 +18923,19 @@ private fun DevicesPage(
                         ) {
                             Text("Source", modifier = Modifier.width(130.dp), fontWeight = FontWeight.Bold)
                             Text("Device", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            if (!compactTableView) {
+                                Text("Secondary", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                            }
                             Text("Seen", modifier = Modifier.width(64.dp), fontWeight = FontWeight.Bold)
                             Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
+                            if (!compactTableView) {
+                                Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                                Text("Freq", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                                Text("Owned", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                                Text("Tracker", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
+                                Text("Cell", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
+                                Text("Chain", modifier = Modifier.width(90.dp), fontWeight = FontWeight.Bold)
+                            }
                             Text("Last Seen", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
                         pagedDevices.forEachIndexed { index, device ->
@@ -18901,6 +18960,12 @@ private fun DevicesPage(
                                     text = device.primaryId,
                                     modifier = Modifier.width(200.dp)
                                 )
+                                if (!compactTableView) {
+                                    Text(
+                                        text = device.secondaryId ?: "n/a",
+                                        modifier = Modifier.width(160.dp)
+                                    )
+                                }
                                 Text(
                                     text = device.seenCount.toString(),
                                     modifier = Modifier.width(64.dp)
@@ -18911,6 +18976,32 @@ private fun DevicesPage(
                                     color = if (device.connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
                                     fontWeight = FontWeight.Medium
                                 )
+                                if (!compactTableView) {
+                                    Text(
+                                        text = device.lastRssiDbm?.toString() ?: "n/a",
+                                        modifier = Modifier.width(70.dp)
+                                    )
+                                    Text(
+                                        text = device.lastFrequencyMhz?.toString() ?: "n/a",
+                                        modifier = Modifier.width(70.dp)
+                                    )
+                                    Text(
+                                        text = if (device.isOwned) "Yes" else "No",
+                                        modifier = Modifier.width(70.dp)
+                                    )
+                                    Text(
+                                        text = device.trackerRisk?.level?.name ?: "None",
+                                        modifier = Modifier.width(90.dp)
+                                    )
+                                    Text(
+                                        text = device.cellThreat?.level?.name ?: "None",
+                                        modifier = Modifier.width(90.dp)
+                                    )
+                                    Text(
+                                        text = if (device.hasChainLinkedData) "Yes" else "No",
+                                        modifier = Modifier.width(90.dp)
+                                    )
+                                }
                                 Text(
                                     text = formatEpoch(device.lastSeenEpochMs),
                                     modifier = Modifier.width(170.dp)
@@ -19238,6 +19329,7 @@ private fun EncountersPage(
     var showOwnedOnly by rememberSaveable { mutableStateOf(false) }
     var securityFilterMode by rememberSaveable { mutableStateOf(SecurityFilterMode.ALL) }
     var viewAsTable by rememberSaveable { mutableStateOf(false) }
+    var compactTableView by rememberSaveable { mutableStateOf(true) }
     var collapseSweepEvents by rememberSaveable { mutableStateOf(true) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val currentLocation by if (showDistance) {
@@ -19452,6 +19544,13 @@ private fun EncountersPage(
                             checked = viewAsTable,
                             onCheckedChange = { viewAsTable = it }
                         )
+                        if (viewAsTable) {
+                            CompactSwitchControl(
+                                label = "Compact View",
+                                checked = compactTableView,
+                                onCheckedChange = { compactTableView = it }
+                            )
+                        }
                         CompactSwitchControl(
                             label = "Collapse Wi-Fi/BLE Sweep Events",
                             checked = collapseSweepEvents,
@@ -19527,8 +19626,17 @@ private fun EncountersPage(
                         ) {
                             Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
                             Text("Primary ID", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            if (!compactTableView) {
+                                Text("Secondary", modifier = Modifier.width(180.dp), fontWeight = FontWeight.Bold)
+                            }
                             Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
                             Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                            if (!compactTableView) {
+                                Text("Freq", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                                Text("Lat", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
+                                Text("Lon", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
+                                Text("Payload", modifier = Modifier.width(900.dp), fontWeight = FontWeight.Bold)
+                            }
                             Text("Timestamp", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
                         pagedEncounters.forEachIndexed { index, encounter ->
@@ -19557,6 +19665,12 @@ private fun EncountersPage(
                                     text = encounter.primaryId,
                                     modifier = Modifier.width(200.dp)
                                 )
+                                if (!compactTableView) {
+                                    Text(
+                                        text = encounter.secondaryId ?: "n/a",
+                                        modifier = Modifier.width(180.dp)
+                                    )
+                                }
                                 Text(
                                     text = if (connectionSecurity?.isInsecure == true) "Insecure" else "Secure",
                                     modifier = Modifier.width(100.dp),
@@ -19567,6 +19681,24 @@ private fun EncountersPage(
                                     text = encounter.rssiDbm?.toString() ?: "n/a",
                                     modifier = Modifier.width(70.dp)
                                 )
+                                if (!compactTableView) {
+                                    Text(
+                                        text = encounter.frequencyMhz?.toString() ?: "n/a",
+                                        modifier = Modifier.width(70.dp)
+                                    )
+                                    Text(
+                                        text = encounter.lat?.let { String.format(Locale.US, "%.5f", it) } ?: "n/a",
+                                        modifier = Modifier.width(120.dp)
+                                    )
+                                    Text(
+                                        text = encounter.lon?.let { String.format(Locale.US, "%.5f", it) } ?: "n/a",
+                                        modifier = Modifier.width(120.dp)
+                                    )
+                                    Text(
+                                        text = encounter.rawPayloadJson,
+                                        modifier = Modifier.width(900.dp)
+                                    )
+                                }
                                 Text(
                                     text = formatEpoch(encounter.timestampEpochMs),
                                     modifier = Modifier.width(170.dp)
