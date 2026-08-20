@@ -3146,66 +3146,6 @@ fun ArgusApp(
                     onRefresh = {
                         readinessItems = DetectionReadinessAdvisor.evaluate(context)
                     },
-                    onLiveCollect = {
-                        val meshGate = ScanSettings.getMeshWipeGateState(context)
-                        if (meshGate.enabled) {
-                            val initiator = meshGate.initiatorDeviceName
-                                ?: meshGate.initiatorNodeId
-                                ?: "mesh coordinator"
-                            return@DetectionPage "Live scan paused: mesh wipe gate active (initiated by $initiator)."
-                        }
-
-                        runCatching {
-                            val (scanResult, chainStats) = withContext(Dispatchers.IO) {
-                                val scan = app.container.sensingService.collectBatchWithMetrics()
-                                app.container.repository.insertBatch(scan.encounters)
-                                val chain = app.container.chainLinkCoordinator.syncNow()
-                                scan to chain
-                            }
-                            ScanSettings.setLastScanDurationMs(context, scanResult.totalDurationMs)
-                            scanResult.sourceDurationsMs.forEach { (sourceType, durationMs) ->
-                                ScanSettings.recordSourceScanDurationMs(context, sourceType, durationMs)
-                            }
-                            lastScanDurationMs = scanResult.totalDurationMs
-                            sourceScanTimings = ScanSettings.getSourceScanTimings(context)
-                            viewModel?.refreshSummary()
-                            readinessItems = DetectionReadinessAdvisor.evaluate(context)
-                            errorLogs = OperationalErrorLogStore.read(context)
-                            if (scanResult.encounters.isEmpty()) {
-                                if (chainStats.enabled) {
-                                    if (!chainStats.authConfigured) {
-                                        "Live scan completed: set a shared chain passphrase to enable secure peer sync."
-                                    } else {
-                                        "Live scan completed: no local detections. Chain imported ${chainStats.importedRecords} from ${chainStats.peersSynced} peers."
-                                    }
-                                } else {
-                                    "Live scan completed: no detections this cycle."
-                                }
-                            } else {
-                                if (chainStats.enabled) {
-                                    if (!chainStats.authConfigured) {
-                                        "Live scan added ${scanResult.encounters.size} local detections. Configure a shared chain passphrase to sync peers."
-                                    } else {
-                                        "Live scan added ${scanResult.encounters.size} local detections and ${chainStats.importedRecords} chain detections."
-                                    }
-                                } else {
-                                    "Live scan added ${scanResult.encounters.size} detections."
-                                }
-                            }
-                        }.getOrElse { error ->
-                            if (error is CancellationException) {
-                                throw error
-                            }
-                            OperationalErrorLogStore.append(
-                                context = context,
-                                category = "LIVE_COLLECT",
-                                source = "system",
-                                message = error.message ?: "unknown error"
-                            )
-                            errorLogs = OperationalErrorLogStore.read(context)
-                            "Live scan failed: ${error.message ?: "unknown error"}"
-                        }
-                    },
                     onOpenReadinessSetting = { item ->
                         runCatching {
                             context.startActivity(item.settingsIntent)
@@ -6731,7 +6671,6 @@ private fun DetectionPage(
     onDeviceClick: (DeviceItem) -> Unit,
     onMovingDeviceMapPinClick: (source: String, primaryId: String) -> Unit,
     onRefresh: () -> Unit,
-    onLiveCollect: suspend () -> String,
     onOpenReadinessSetting: (DetectionReadinessItem) -> Unit,
     onDirectMagneticChannelEnabledChanged: (Boolean) -> Unit,
     onMagneticRhythmBeepEnabledChanged: (Boolean) -> Unit,
@@ -8228,7 +8167,6 @@ private fun DetectionPage(
                                 )
                             }
                         },
-                        liveUpdatesAllowed = true,
                         useSourceOnlyPinColors = true,
                         enableVerticalScroll = true,
                         showLiveOnlyControl = true,
@@ -8266,7 +8204,6 @@ private fun DetectionPage(
                         mapOnlyPresentation = mapOnlyMode,
                         externalZoomCommandNonce = pipZoomCommandNonce,
                         externalZoomCommandDelta = pipZoomCommandDelta,
-                        onLiveCollect = onLiveCollect,
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
                 } else if (selectedMapSubTab == 1) {
@@ -8356,7 +8293,6 @@ private fun DetectionPage(
                                 )
                             }
                         },
-                        liveUpdatesAllowed = true,
                         useSourceOnlyPinColors = true,
                         enableVerticalScroll = true,
                         showLiveOnlyControl = true,
@@ -8382,7 +8318,6 @@ private fun DetectionPage(
                             bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
                         },
                         showTrackerFamilyBadge = true,
-                        onLiveCollect = onLiveCollect,
                         liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                     )
                 } else if (selectedMapSubTab == 2) {
@@ -8471,7 +8406,6 @@ private fun DetectionPage(
                                     pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
                                 )
                             },
-                            liveUpdatesAllowed = true,
                             useSourceOnlyPinColors = true,
                             enableVerticalScroll = true,
                             showLiveOnlyControl = true,
@@ -8504,7 +8438,6 @@ private fun DetectionPage(
                             onCaptureSnapshot = {
                                 flightMapSnapshotEpochMs = System.currentTimeMillis()
                             },
-                            onLiveCollect = onLiveCollect,
                             liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
                         )
                     }
@@ -10221,7 +10154,6 @@ private fun DetectionMapPage(
     mapScannerSweepAnimationEnabled: Boolean = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_ENABLED,
     mapScannerSweepAnimationSpeedPreset: String = ScanSettings.DEFAULT_MAP_SCANNER_SWEEP_ANIMATION_SPEED_PRESET,
     onPinDetailsClick: (MapPin) -> Unit,
-    liveUpdatesAllowed: Boolean = true,
     useSourceOnlyPinColors: Boolean = false,
     enableVerticalScroll: Boolean = false,
     showLiveOnlyControl: Boolean = false,
@@ -10248,7 +10180,6 @@ private fun DetectionMapPage(
     mapOnlyPresentation: Boolean = false,
     externalZoomCommandNonce: Long = 0L,
     externalZoomCommandDelta: Float = 0f,
-    onLiveCollect: suspend () -> String,
     liveMapUpdateIntervalSeconds: Long
 ) {
     val pinLimitOptions = listOf(100, 250, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000)
@@ -10272,10 +10203,7 @@ private fun DetectionMapPage(
     var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
     var legendPanelVisible by rememberSaveable { mutableStateOf(false) }
     var deviceTypeFiltersCollapsed by rememberSaveable { mutableStateOf(false) }
-    var liveModeEnabled by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
-    var liveCollectInProgress by remember { mutableStateOf(false) }
-    var liveStatusMessage by remember { mutableStateOf("Live mode is off.") }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
     var mapTouchInProgress by remember { mutableStateOf(false) }
@@ -10994,26 +10922,6 @@ private fun DetectionMapPage(
         }
     }
 
-    LaunchedEffect(liveModeEnabled, liveUpdatesAllowed) {
-        if (!liveUpdatesAllowed) {
-            liveCollectInProgress = false
-            liveStatusMessage = "Live updates are available on Device Location Map only."
-            return@LaunchedEffect
-        }
-
-        if (!liveModeEnabled) {
-            liveCollectInProgress = false
-            liveStatusMessage = "Live mode is off."
-            return@LaunchedEffect
-        }
-
-        tickerFlow(periodMs = liveMapUpdateIntervalSeconds.coerceAtLeast(1L) * 1000L).collect {
-            liveCollectInProgress = true
-            liveStatusMessage = onLiveCollect()
-            liveCollectInProgress = false
-        }
-    }
-
     LaunchedEffect(useScrollableLayout) {
         if (!useScrollableLayout) {
             mapTouchInProgress = false
@@ -11367,26 +11275,6 @@ private fun DetectionMapPage(
                             }
                             Card(modifier = Modifier.weight(1f).fillMaxHeight()) {
                                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
-                                        Switch(
-                                            checked = liveModeEnabled && liveUpdatesAllowed,
-                                            onCheckedChange = { enabled ->
-                                                if (liveUpdatesAllowed) {
-                                                    liveModeEnabled = enabled
-                                                }
-                                            },
-                                            enabled = liveUpdatesAllowed
-                                        )
-                                    }
-                                    Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
-                                    Text(
-                                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
-                                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
-                                    )
                                     if (showLiveOnlyControl) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -11593,26 +11481,6 @@ private fun DetectionMapPage(
                             }
                             Card(modifier = Modifier.fillMaxWidth()) {
                                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Live Map Updates", fontWeight = FontWeight.Bold)
-                                        Switch(
-                                            checked = liveModeEnabled && liveUpdatesAllowed,
-                                            onCheckedChange = { enabled ->
-                                                if (liveUpdatesAllowed) {
-                                                    liveModeEnabled = enabled
-                                                }
-                                            },
-                                            enabled = liveUpdatesAllowed
-                                        )
-                                    }
-                                    Text("Foreground scan every ${formatLiveMapIntervalLabel(liveMapUpdateIntervalSeconds)} while open.")
-                                    Text(
-                                        text = if (liveCollectInProgress) "Live scan running..." else liveStatusMessage,
-                                        color = if (liveStatusMessage.startsWith("Live scan failed")) Color(0xFFB3261E) else Color.Unspecified
-                                    )
                                     if (showLiveOnlyControl) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -12142,16 +12010,7 @@ private fun DetectionMapPage(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                             ) {
-                                Text("Live updates", fontWeight = FontWeight.Bold)
-                                Switch(
-                                    checked = liveModeEnabled && liveUpdatesAllowed,
-                                    onCheckedChange = { enabled ->
-                                        if (liveUpdatesAllowed) {
-                                            liveModeEnabled = enabled
-                                        }
-                                    },
-                                    enabled = liveUpdatesAllowed
-                                )
+                                Text("Map Controls", fontWeight = FontWeight.Bold)
                             }
                             if (showLiveOnlyControl) {
                                 Row(
