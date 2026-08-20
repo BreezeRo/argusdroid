@@ -479,6 +479,11 @@ private data class BatteryTelemetrySnapshot(
     val estimatedFullCapacityMilliAmpHours: Double?
 )
 
+private data class SensorBatteryUsageEstimate(
+    val label: String,
+    val meterFraction: Float
+)
+
 private data class DeviceItem(
     val source: String,
     val primaryId: String,
@@ -4599,7 +4604,7 @@ private fun HomePage(
                             sensorStatusByName["Magnetometer (Direct)"]
                         )
                     )
-                    val batteryUsageByToggleKey = estimateSensorBatteryUsageLabels(context, toggles)
+                    val batteryUsageByToggleKey = estimateSensorBatteryUsageEstimates(context, toggles)
                     HomeResponsiveGrid(
                         items = toggles,
                         twoColumnMinWidth = HOME_TWO_COLUMN_MIN_WIDTH,
@@ -4620,11 +4625,25 @@ private fun HomePage(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
-                                        text = batteryUsageByToggleKey[toggle.key]
-                                            ?: "Estimate unavailable",
+                                        text = batteryUsageByToggleKey[toggle.key]?.label
+                                            ?: "\uD83D\uDD0B EST (battery usage): unavailable",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                    val batteryUsageMeter = batteryUsageByToggleKey[toggle.key]?.meterFraction ?: 0f
+                                    val batteryUsageColor = when {
+                                        batteryUsageMeter >= 0.65f -> Color(0xFFB3261E)
+                                        batteryUsageMeter >= 0.35f -> Color(0xFFE65100)
+                                        else -> Color(0xFF2E7D32)
+                                    }
+                                    LinearProgressIndicator(
+                                        progress = { batteryUsageMeter },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 4.dp),
+                                        color = batteryUsageColor,
+                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
                                     )
                                     toggle.status?.let { sensorStatus ->
                                         val statusText = "${if (sensorStatus.isOn) "On" else "Off"} | ${if (sensorStatus.factoredByArgus) "Factored" else "Not factored"}"
@@ -21441,10 +21460,10 @@ private fun readBatteryTelemetrySnapshot(context: Context): BatteryTelemetrySnap
     )
 }
 
-private fun estimateSensorBatteryUsageLabels(
+private fun estimateSensorBatteryUsageEstimates(
     context: Context,
     toggles: List<HomeSensorToggle>
-): Map<String, String> {
+): Map<String, SensorBatteryUsageEstimate> {
     val telemetry = readBatteryTelemetrySnapshot(context)
     val dischargeMa = telemetry.dischargeCurrentMilliAmps
     val fullCapacityMah = telemetry.estimatedFullCapacityMilliAmpHours
@@ -21467,19 +21486,39 @@ private fun estimateSensorBatteryUsageLabels(
         .sumOf { toggle -> weightByKey[toggle.key] ?: 1.0 }
 
     if (enabledWeight <= 0.0) {
-        return toggles.associate { toggle -> toggle.key to "Off (est. 0.0%/hr)" }
+        return toggles.associate { toggle ->
+            toggle.key to SensorBatteryUsageEstimate(
+                label = "\uD83D\uDD0B EST (battery usage): off (0.0%/hr)",
+                meterFraction = 0f
+            )
+        }
     }
 
     return toggles.associate { toggle ->
         if (!toggle.enabled) {
-            toggle.key to "Off (est. 0.0%/hr)"
+            toggle.key to SensorBatteryUsageEstimate(
+                label = "\uD83D\uDD0B EST (battery usage): off (0.0%/hr)",
+                meterFraction = 0f
+            )
         } else if (dischargeMa == null || fullCapacityMah == null) {
-            toggle.key to "Estimate unavailable (battery telemetry restricted)"
+            toggle.key to SensorBatteryUsageEstimate(
+                label = "\uD83D\uDD0B EST (battery usage): unavailable (battery telemetry restricted)",
+                meterFraction = 0f
+            )
         } else {
             val weight = weightByKey[toggle.key] ?: 1.0
             val estimatedSensorMa = (dischargeMa * (weight / enabledWeight)).coerceAtLeast(0.0)
             val estimatedPctPerHour = ((estimatedSensorMa / fullCapacityMah) * 100.0).coerceAtLeast(0.0)
-            toggle.key to String.format(Locale.US, "Est. %.1f%%/hr (%.0f mA)", estimatedPctPerHour, estimatedSensorMa)
+            val meterFraction = (estimatedPctPerHour / 12.0).coerceIn(0.0, 1.0).toFloat()
+            toggle.key to SensorBatteryUsageEstimate(
+                label = String.format(
+                    Locale.US,
+                    "\uD83D\uDD0B EST (battery usage): %.1f%%/hr (%.0f mA)",
+                    estimatedPctPerHour,
+                    estimatedSensorMa
+                ),
+                meterFraction = meterFraction
+            )
         }
     }
 }
