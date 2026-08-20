@@ -404,6 +404,14 @@ private val LOCAL_DEVICE_CLASSIFIER_VENDOR_SIGNATURES = listOf(
         sourceHints = setOf("WIFI", "BLUETOOTH_LE")
     )
 )
+private val LOCAL_BLUETOOTH_MANUFACTURER_NAMES = mapOf(
+    6 to "Microsoft",
+    76 to "Apple",
+    117 to "Samsung Electronics",
+    224 to "Google",
+    305 to "Sony",
+    488 to "Amazon.com Services"
+)
 private val LOCAL_DEVICE_CLASSIFIER_SIGNATURES = listOf(
     DeviceClassifierSignature(
         category = "Router / Access Point",
@@ -641,11 +649,20 @@ private data class DeviceClassificationResult(
     val category: String,
     val confidence: Double,
     val matchedSignals: List<String>,
-    val evidence: DeviceClassificationEvidence
+    val evidence: DeviceClassificationEvidence,
+    val manufacturerName: String? = null
 ) {
     fun summaryLabel(): String {
         val prefix = if (evidence == DeviceClassificationEvidence.EXACT) "Identified" else "Likely"
         return "$prefix $category (${(confidence * 100.0).roundToInt()}%)"
+    }
+
+    fun evidenceLabel(): String = when {
+        evidence == DeviceClassificationEvidence.EXACT -> "Exact identity or model match"
+        matchedSignals.any { it.startsWith("OUI:") } -> "Network vendor from OUI prefix"
+        matchedSignals.any { it.startsWith("MFG_ID:") } -> "Manufacturer company ID"
+        evidence == DeviceClassificationEvidence.VENDOR -> "Manufacturer or vendor metadata"
+        else -> "Heuristic metadata match"
     }
 }
 
@@ -17790,6 +17807,12 @@ private fun classifyDeviceFromMetadata(
     val classifierMetadata = buildDeviceClassifierMetadata(primaryId, secondaryId, rawPayloadJson)
     val normalizedText = classifierMetadata.normalizedText
     if (normalizedText.isBlank()) return null
+    val manufacturerName = classifierMetadata.manufacturerCompanyIds
+        .asSequence()
+        .mapNotNull { companyId -> LOCAL_BLUETOOTH_MANUFACTURER_NAMES[companyId] }
+        .distinct()
+        .joinToString(", ")
+        .takeIf { it.isNotBlank() }
 
     // Stage 1: exact model/type or explicit identity match.
     val exactMatch = LOCAL_DEVICE_CLASSIFIER_EXACT_SIGNATURES.firstOrNull { signature ->
@@ -17808,7 +17831,8 @@ private fun classifyDeviceFromMetadata(
             category = exactMatch.category,
             confidence = 0.96,
             matchedSignals = matched,
-            evidence = DeviceClassificationEvidence.EXACT
+            evidence = DeviceClassificationEvidence.EXACT,
+            manufacturerName = manufacturerName
         )
     }
 
@@ -17824,11 +17848,10 @@ private fun classifyDeviceFromMetadata(
         }
         val ouiHit = classifierMetadata.ouiPrefix?.takeIf { it in signature.ouiPrefixes }
         val companyIdHits = classifierMetadata.manufacturerCompanyIds.intersect(signature.manufacturerCompanyIds)
-        if (vendorHits.isEmpty() && ouiHit == null && companyIdHits.isEmpty()) return@forEach
+        if (vendorHits.isEmpty() && ouiHit == null) return@forEach
 
         var score = vendorHits.size * 1.15
         if (ouiHit != null) score += 1.75
-        score += companyIdHits.size * 2.1
         if (seenCount >= 5) score += 0.1
 
         if (score > bestVendorScore) {
@@ -17847,7 +17870,8 @@ private fun classifyDeviceFromMetadata(
             category = bestVendorSignature!!.category,
             confidence = vendorConfidence,
             matchedSignals = bestVendorSignals.distinct().take(4),
-            evidence = DeviceClassificationEvidence.VENDOR
+            evidence = DeviceClassificationEvidence.VENDOR,
+            manufacturerName = manufacturerName
         )
     }
 
@@ -17884,7 +17908,18 @@ private fun classifyDeviceFromMetadata(
         }
     }
 
-    val signature = bestSignature ?: return null
+    val signature = bestSignature
+    if (signature == null && manufacturerName != null) {
+        return DeviceClassificationResult(
+            category = "Unclassified device",
+            confidence = 0.55,
+            matchedSignals = classifierMetadata.manufacturerCompanyIds
+                .map { companyId -> "MFG_ID:$companyId" },
+            evidence = DeviceClassificationEvidence.VENDOR,
+            manufacturerName = manufacturerName
+        )
+    }
+    signature ?: return null
     if (bestScore < 1.05) return null
 
     val confidence = (0.36 + (bestScore / 7.0)).coerceIn(0.36, 0.74)
@@ -17892,7 +17927,8 @@ private fun classifyDeviceFromMetadata(
         category = signature.category,
         confidence = confidence,
         matchedSignals = bestHits.distinct().take(4),
-        evidence = DeviceClassificationEvidence.HEURISTIC
+        evidence = DeviceClassificationEvidence.HEURISTIC,
+        manufacturerName = manufacturerName
     )
 }
 
@@ -21323,7 +21359,10 @@ private fun DeviceDetailPage(
                 DetailRow("Secondary ID", item.secondaryId ?: "n/a")
                 item.deviceClassification?.let { classification ->
                     DetailRow("Likely Device Class", classification.summaryLabel())
-                    DetailRow("Classification Evidence", classification.evidence.name)
+                    classification.manufacturerName?.let { manufacturer ->
+                        DetailRow("Manufacturer", manufacturer)
+                    }
+                    DetailRow("Classification Evidence", classification.evidenceLabel())
                     DetailRow("Classification Confidence", String.format(Locale.US, "%.0f%%", classification.confidence * 100.0))
                     if (classification.matchedSignals.isNotEmpty()) {
                         DetailRow("Classification Signals", classification.matchedSignals.joinToString())
