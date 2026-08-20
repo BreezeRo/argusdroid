@@ -226,7 +226,18 @@ private enum class SecurityFilterMode {
     INSECURE_ONLY
 }
 
+private enum class MapTimeRangePreset(val label: String) {
+    PAST_MINUTE("Past minute"),
+    PAST_5_MINUTES("Past 5 minutes"),
+    PAST_HOUR("Past hour"),
+    PAST_DAY("Past day"),
+    PAST_WEEK("Past week"),
+    CUSTOM("Custom range"),
+    ALL("All")
+}
+
 private const val DETECTION_LIST_PAGE_SIZE = 100
+private const val DEFAULT_CUSTOM_MAP_RANGE_MINUTES = 180L
 
 private enum class AppThemeMode {
     SYSTEM,
@@ -6706,23 +6717,26 @@ private fun DetectionPage(
     var selectedTab by rememberSaveable { mutableStateOf(0) }
     var permissionsExpanded by rememberSaveable { mutableStateOf(false) }
     var cellDevicePinLimit by rememberSaveable { mutableStateOf(10000) }
-    var liveOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var identityModeOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var movingOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnDeviceMap by rememberSaveable { mutableStateOf(false) }
     var deviceMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
     var selectedMapSubTab by rememberSaveable { mutableStateOf(0) }
     var flightMapPinLimit by rememberSaveable { mutableStateOf(1000) }
-    var liveOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var identityModeOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnFlightMap by rememberSaveable { mutableStateOf(false) }
     var flightMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    var flightMapTimeRangePreset by rememberSaveable { mutableStateOf(MapTimeRangePreset.PAST_HOUR) }
+    var flightMapCustomRangeMinutes by rememberSaveable { mutableStateOf(DEFAULT_CUSTOM_MAP_RANGE_MINUTES) }
     var bluetoothMapPinLimit by rememberSaveable { mutableStateOf(1000) }
-    var liveOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var identityModeOnBluetoothMap by rememberSaveable { mutableStateOf(true) }
     var movingOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var sinceSnapshotOnlyOnBluetoothMap by rememberSaveable { mutableStateOf(false) }
     var bluetoothMapSnapshotEpochMs by rememberSaveable { mutableStateOf<Long?>(null) }
+    var bluetoothMapTimeRangePreset by rememberSaveable { mutableStateOf(MapTimeRangePreset.PAST_HOUR) }
+    var bluetoothMapCustomRangeMinutes by rememberSaveable { mutableStateOf(DEFAULT_CUSTOM_MAP_RANGE_MINUTES) }
+    var deviceMapTimeRangePreset by rememberSaveable { mutableStateOf(MapTimeRangePreset.PAST_HOUR) }
+    var deviceMapCustomRangeMinutes by rememberSaveable { mutableStateOf(DEFAULT_CUSTOM_MAP_RANGE_MINUTES) }
     var magneticMapPinLimit by rememberSaveable { mutableStateOf(1500) }
     var magneticMapFocusRequestNonce by rememberSaveable { mutableStateOf(0) }
     var deviceMapAircraftRadiusMiles by rememberSaveable {
@@ -6733,11 +6747,6 @@ private fun DetectionPage(
     }
     val tabs = listOf("Status", "Device", "Flock", "Map", "Mesh")
     var mapLiveNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    val stickyMapForcesLiveOnly =
-        stickyCompassMapEnabled &&
-            stickyCompassMapLiveMode == ScanSettings.STICKY_COMPASS_MAP_LIVE_MODE_FORCE_LIVE_ONLY
-    val deviceMapLiveOnlyEnabled = liveOnlyOnDeviceMap || stickyMapForcesLiveOnly
-
     val stickyPipEligible =
         stickyCompassMapEnabled &&
             selectedTab == 3 &&
@@ -6772,9 +6781,11 @@ private fun DetectionPage(
     val isDeviceLocationTabActive = selectedTab == 3 && (selectedMapSubTab == 0 || selectedMapSubTab == 1)
     val isDeviceMapActive = selectedTab == 3 && selectedMapSubTab == 0
     val isBluetoothMapActive = selectedTab == 3 && selectedMapSubTab == 1
+    val deviceMapUsesAllTime = deviceMapTimeRangePreset == MapTimeRangePreset.ALL
+    val bluetoothMapUsesAllTime = bluetoothMapTimeRangePreset == MapTimeRangePreset.ALL
     val useFullHistoryForActiveDeviceLocationMap =
-        (isDeviceMapActive && !deviceMapLiveOnlyEnabled && !movingOnlyOnDeviceMap && !sinceSnapshotOnlyOnDeviceMap) ||
-            (isBluetoothMapActive && !liveOnlyOnBluetoothMap && !movingOnlyOnBluetoothMap && !sinceSnapshotOnlyOnBluetoothMap)
+        (isDeviceMapActive && deviceMapUsesAllTime && !movingOnlyOnDeviceMap && !sinceSnapshotOnlyOnDeviceMap) ||
+            (isBluetoothMapActive && bluetoothMapUsesAllTime && !movingOnlyOnBluetoothMap && !sinceSnapshotOnlyOnBluetoothMap)
     val scopedMapSources: Set<EncounterSource>? = if (isBluetoothMapActive) {
         setOf(
             EncounterSource.BLUETOOTH_LE,
@@ -8055,7 +8066,10 @@ private fun DetectionPage(
 
                 if (selectedMapSubTab == 0) {
                     val deviceMapAircraftRadiusMeters = deviceMapAircraftRadiusMiles.coerceIn(25, 75) * 1609.344
-                    val allModeEnabled = !deviceMapLiveOnlyEnabled && !movingOnlyOnDeviceMap && !sinceSnapshotOnlyOnDeviceMap
+                    val allModeEnabled =
+                        deviceMapTimeRangePreset == MapTimeRangePreset.ALL &&
+                            !movingOnlyOnDeviceMap &&
+                            !sinceSnapshotOnlyOnDeviceMap
                     val resolveElapsedMs = when {
                         deviceMapResolveStartedEpochMs == null -> 0L
                         deviceMapResolveInProgress -> System.currentTimeMillis() - (deviceMapResolveStartedEpochMs ?: 0L)
@@ -8068,7 +8082,8 @@ private fun DetectionPage(
                         estimatedDeviceLocationPins,
                         deviceMapCurrentLocation,
                         deviceMapAircraftRadiusMeters,
-                        deviceMapLiveOnlyEnabled,
+                        deviceMapTimeRangePreset,
+                        deviceMapCustomRangeMinutes,
                         mapLiveNowEpochMs,
                         movingOnlyOnDeviceMap,
                         sinceSnapshotOnlyOnDeviceMap,
@@ -8094,16 +8109,12 @@ private fun DetectionPage(
                                     }
                                 }
                                 .filter { pin ->
-                                    if (!deviceMapLiveOnlyEnabled) {
-                                        true
-                                    } else {
-                                        isMapPinLiveNow(
-                                            pin = pin,
-                                            nowEpochMs = nowEpochMs,
-                                            sourceScanIntervals = sourceScanIntervals,
-                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                                        )
-                                    }
+                                    isMapPinWithinSelectedRange(
+                                        pinTimestampEpochMs = pin.timestampEpochMs,
+                                        nowEpochMs = nowEpochMs,
+                                        preset = deviceMapTimeRangePreset,
+                                        customRangeMinutes = deviceMapCustomRangeMinutes
+                                    )
                                 }
                                 .filter { pin ->
                                     if (!movingOnlyOnDeviceMap) true else pin.motionBadge == "MOVING"
@@ -8120,7 +8131,7 @@ private fun DetectionPage(
 
                             val stickyScopedPins = if (
                                 stickyCompassMapEnabled &&
-                                    deviceMapLiveOnlyEnabled &&
+                                    deviceMapTimeRangePreset != MapTimeRangePreset.ALL &&
                                     deviceMapCurrentLocation != null &&
                                     basePins.isNotEmpty()
                             ) {
@@ -8156,88 +8167,95 @@ private fun DetectionPage(
                     LaunchedEffect(deviceMapPins) {
                         RuntimeUiListMemoryGauge.updateActiveDeviceMapPins(deviceMapPins)
                     }
-                    DetectionMapPage(
-                        mapTitle = "Device Map",
-                        mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
-                        showTrafficLayer = mapTrafficEnabled,
-                        currentLocationOverride = deviceMapCurrentLocation,
-                        noFlyZones = noFlyZoneOverlays,
-                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
-                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
-                        pins = deviceMapPins,
-                        additionalDiagnostics = listOf(
-                            "Device map mode: ${if (allModeEnabled) "ALL" else "FILTERED"}",
-                            "Candidates prepared: ${allDeviceCandidates.size} (ready=${if (deviceCandidatesPrepared) "yes" else "no"})",
-                            "Resolve status: ${if (deviceMapResolveInProgress) "running" else "idle"}",
-                            "Resolve progress: ${deviceMapResolveProcessedCandidates}/${deviceMapResolveTotalCandidates}",
-                            "Published pins: ${deviceMapResolvePublishedPins}",
-                            "Resolve elapsed: ${resolveElapsedMs} ms"
-                        ),
-                        pinLimit = cellDevicePinLimit,
-                        onPinLimitChange = { cellDevicePinLimit = it },
-                        mapClusteringEnabled = mapClusteringEnabled,
-                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
-                        mapClusterRangeLevel = mapClusterRangeLevel,
-                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
-                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
-                        mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
-                        onPinDetailsClick = { pin ->
-                            if (pin.motionBadge == "MOVING") {
-                                onMovingDeviceMapPinClick(pin.source, pin.primaryId)
-                            } else {
-                                onDeviceMapPinClick(
-                                    pin.source,
-                                    pin.primaryId,
-                                    pin.position.latitude,
-                                    pin.position.longitude,
-                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
-                                )
-                            }
-                        },
-                        useSourceOnlyPinColors = true,
-                        enableVerticalScroll = true,
-                        showLiveOnlyControl = true,
-                        liveOnlyEnabled = deviceMapLiveOnlyEnabled,
-                        onLiveOnlyEnabledChange = { liveOnlyOnDeviceMap = it },
-                        identityModeEnabled = identityModeOnDeviceMap,
-                        onIdentityModeEnabledChange = { identityModeOnDeviceMap = it },
-                        identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
-                        onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
-                        showRadiusControl = true,
-                        radiusMiles = deviceMapAircraftRadiusMiles,
-                        onRadiusMilesChange = { miles ->
-                            val safeMiles = miles.coerceIn(25, 75)
-                            deviceMapAircraftRadiusMiles = safeMiles
-                            flightMapRadiusMiles = safeMiles
-                            ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
-                        },
-                        radiusControlLabel = "Aircraft Radius (mi)",
-                        radiusOptions = listOf(25, 50, 75),
-                        showMovingOnlyControl = true,
-                        movingOnlyEnabled = movingOnlyOnDeviceMap,
-                        onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
-                        showSinceSnapshotControl = true,
-                        sinceSnapshotEnabled = sinceSnapshotOnlyOnDeviceMap,
-                        snapshotEpochMs = deviceMapSnapshotEpochMs,
-                        onSinceSnapshotEnabledChange = { enabled ->
-                            sinceSnapshotOnlyOnDeviceMap = enabled
-                            if (enabled && deviceMapSnapshotEpochMs == null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MapTimeRangeSelector(
+                            selectedPreset = deviceMapTimeRangePreset,
+                            onPresetChanged = { deviceMapTimeRangePreset = it },
+                            customRangeMinutes = deviceMapCustomRangeMinutes,
+                            onCustomRangeMinutesChanged = { deviceMapCustomRangeMinutes = it }
+                        )
+                        DetectionMapPage(
+                            mapTitle = "Device Map",
+                            mapDescription = "Live pins show what is currently nearby; recent pins are faded for short-lived context. Click the items in the Pin Color Legend box to filter.",
+                            showTrafficLayer = mapTrafficEnabled,
+                            currentLocationOverride = deviceMapCurrentLocation,
+                            noFlyZones = noFlyZoneOverlays,
+                            showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                            noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                            pins = deviceMapPins,
+                            additionalDiagnostics = listOf(
+                                "Device map mode: ${if (allModeEnabled) "ALL" else "FILTERED"}",
+                                "Candidates prepared: ${allDeviceCandidates.size} (ready=${if (deviceCandidatesPrepared) "yes" else "no"})",
+                                "Resolve status: ${if (deviceMapResolveInProgress) "running" else "idle"}",
+                                "Resolve progress: ${deviceMapResolveProcessedCandidates}/${deviceMapResolveTotalCandidates}",
+                                "Published pins: ${deviceMapResolvePublishedPins}",
+                                "Resolve elapsed: ${resolveElapsedMs} ms"
+                            ),
+                            pinLimit = cellDevicePinLimit,
+                            onPinLimitChange = { cellDevicePinLimit = it },
+                            mapClusteringEnabled = mapClusteringEnabled,
+                            onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                            mapClusterRangeLevel = mapClusterRangeLevel,
+                            onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                            mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                            mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
+                            onPinDetailsClick = { pin ->
+                                if (pin.motionBadge == "MOVING") {
+                                    onMovingDeviceMapPinClick(pin.source, pin.primaryId)
+                                } else {
+                                    onDeviceMapPinClick(
+                                        pin.source,
+                                        pin.primaryId,
+                                        pin.position.latitude,
+                                        pin.position.longitude,
+                                        pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
+                                    )
+                                }
+                            },
+                            useSourceOnlyPinColors = true,
+                            enableVerticalScroll = true,
+                            showLiveOnlyControl = false,
+                            identityModeEnabled = identityModeOnDeviceMap,
+                            onIdentityModeEnabledChange = { identityModeOnDeviceMap = it },
+                            identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
+                            onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
+                            showRadiusControl = true,
+                            radiusMiles = deviceMapAircraftRadiusMiles,
+                            onRadiusMilesChange = { miles ->
+                                val safeMiles = miles.coerceIn(25, 75)
+                                deviceMapAircraftRadiusMiles = safeMiles
+                                flightMapRadiusMiles = safeMiles
+                                ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
+                            },
+                            radiusControlLabel = "Aircraft Radius (mi)",
+                            radiusOptions = listOf(25, 50, 75),
+                            showMovingOnlyControl = true,
+                            movingOnlyEnabled = movingOnlyOnDeviceMap,
+                            onMovingOnlyEnabledChange = { movingOnlyOnDeviceMap = it },
+                            showSinceSnapshotControl = true,
+                            sinceSnapshotEnabled = sinceSnapshotOnlyOnDeviceMap,
+                            snapshotEpochMs = deviceMapSnapshotEpochMs,
+                            onSinceSnapshotEnabledChange = { enabled ->
+                                sinceSnapshotOnlyOnDeviceMap = enabled
+                                if (enabled && deviceMapSnapshotEpochMs == null) {
+                                    deviceMapSnapshotEpochMs = System.currentTimeMillis()
+                                }
+                            },
+                            onCaptureSnapshot = {
                                 deviceMapSnapshotEpochMs = System.currentTimeMillis()
-                            }
-                        },
-                        onCaptureSnapshot = {
-                            deviceMapSnapshotEpochMs = System.currentTimeMillis()
-                        },
-                        mapOnlyPresentation = mapOnlyMode,
-                        externalZoomCommandNonce = pipZoomCommandNonce,
-                        externalZoomCommandDelta = pipZoomCommandDelta,
-                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                    )
+                            },
+                            mapOnlyPresentation = mapOnlyMode,
+                            externalZoomCommandNonce = pipZoomCommandNonce,
+                            externalZoomCommandDelta = pipZoomCommandDelta,
+                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                        )
+                    }
                 } else if (selectedMapSubTab == 1) {
                     val bluetoothMapPins by produceState(
                         estimatedDeviceLocationPins,
                         bluetoothMapPinLimit,
-                        liveOnlyOnBluetoothMap,
+                        bluetoothMapTimeRangePreset,
+                        bluetoothMapCustomRangeMinutes,
                         mapLiveNowEpochMs,
                         movingOnlyOnBluetoothMap,
                         sinceSnapshotOnlyOnBluetoothMap,
@@ -8253,16 +8271,12 @@ private fun DetectionPage(
                                         pin.source == EncounterSource.BLUETOOTH_LE_SWEEP.name
                                 }
                                 .filter { pin ->
-                                    if (!liveOnlyOnBluetoothMap) {
-                                        true
-                                    } else {
-                                        isMapPinLiveNow(
-                                            pin = pin,
-                                            nowEpochMs = nowEpochMs,
-                                            sourceScanIntervals = sourceScanIntervals,
-                                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                                        )
-                                    }
+                                    isMapPinWithinSelectedRange(
+                                        pinTimestampEpochMs = pin.timestampEpochMs,
+                                        nowEpochMs = nowEpochMs,
+                                        preset = bluetoothMapTimeRangePreset,
+                                        customRangeMinutes = bluetoothMapCustomRangeMinutes
+                                    )
                                 }
                                 .filter { pin ->
                                     if (!movingOnlyOnBluetoothMap) true else pin.motionBadge == "MOVING"
@@ -8291,62 +8305,68 @@ private fun DetectionPage(
                         }
                     }
 
-                    DetectionMapPage(
-                        mapTitle = "Bluetooth Map",
-                        mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
-                        currentLocationOverride = bluetoothMapCurrentLocation,
-                        noFlyZones = noFlyZoneOverlays,
-                        showNoFlyZoneControl = mapNoFlyZonesEnabled,
-                        noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
-                        pins = bluetoothMapPins,
-                        pinLimit = bluetoothMapPinLimit,
-                        onPinLimitChange = { bluetoothMapPinLimit = it },
-                        mapClusteringEnabled = mapClusteringEnabled,
-                        onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
-                        mapClusterRangeLevel = mapClusterRangeLevel,
-                        onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
-                        mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
-                        mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
-                        onPinDetailsClick = { pin ->
-                            if (pin.motionBadge == "MOVING") {
-                                onMovingDeviceMapPinClick(pin.source, pin.primaryId)
-                            } else {
-                                onDeviceMapPinClick(
-                                    pin.source,
-                                    pin.primaryId,
-                                    pin.position.latitude,
-                                    pin.position.longitude,
-                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
-                                )
-                            }
-                        },
-                        useSourceOnlyPinColors = true,
-                        enableVerticalScroll = true,
-                        showLiveOnlyControl = true,
-                        liveOnlyEnabled = liveOnlyOnBluetoothMap,
-                        onLiveOnlyEnabledChange = { liveOnlyOnBluetoothMap = it },
-                        identityModeEnabled = identityModeOnBluetoothMap,
-                        onIdentityModeEnabledChange = { identityModeOnBluetoothMap = it },
-                        identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
-                        onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
-                        showMovingOnlyControl = true,
-                        movingOnlyEnabled = movingOnlyOnBluetoothMap,
-                        onMovingOnlyEnabledChange = { movingOnlyOnBluetoothMap = it },
-                        showSinceSnapshotControl = true,
-                        sinceSnapshotEnabled = sinceSnapshotOnlyOnBluetoothMap,
-                        snapshotEpochMs = bluetoothMapSnapshotEpochMs,
-                        onSinceSnapshotEnabledChange = { enabled ->
-                            sinceSnapshotOnlyOnBluetoothMap = enabled
-                            if (enabled && bluetoothMapSnapshotEpochMs == null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MapTimeRangeSelector(
+                            selectedPreset = bluetoothMapTimeRangePreset,
+                            onPresetChanged = { bluetoothMapTimeRangePreset = it },
+                            customRangeMinutes = bluetoothMapCustomRangeMinutes,
+                            onCustomRangeMinutesChanged = { bluetoothMapCustomRangeMinutes = it }
+                        )
+                        DetectionMapPage(
+                            mapTitle = "Bluetooth Map",
+                            mapDescription = "Bluetooth-only pins (LE + Classic). Identity mode defaults on. Classification badges show detected tracker family.",
+                            currentLocationOverride = bluetoothMapCurrentLocation,
+                            noFlyZones = noFlyZoneOverlays,
+                            showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                            noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                            pins = bluetoothMapPins,
+                            pinLimit = bluetoothMapPinLimit,
+                            onPinLimitChange = { bluetoothMapPinLimit = it },
+                            mapClusteringEnabled = mapClusteringEnabled,
+                            onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                            mapClusterRangeLevel = mapClusterRangeLevel,
+                            onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                            mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                            mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
+                            onPinDetailsClick = { pin ->
+                                if (pin.motionBadge == "MOVING") {
+                                    onMovingDeviceMapPinClick(pin.source, pin.primaryId)
+                                } else {
+                                    onDeviceMapPinClick(
+                                        pin.source,
+                                        pin.primaryId,
+                                        pin.position.latitude,
+                                        pin.position.longitude,
+                                        pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
+                                    )
+                                }
+                            },
+                            useSourceOnlyPinColors = true,
+                            enableVerticalScroll = true,
+                            showLiveOnlyControl = false,
+                            identityModeEnabled = identityModeOnBluetoothMap,
+                            onIdentityModeEnabledChange = { identityModeOnBluetoothMap = it },
+                            identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
+                            onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
+                            showMovingOnlyControl = true,
+                            movingOnlyEnabled = movingOnlyOnBluetoothMap,
+                            onMovingOnlyEnabledChange = { movingOnlyOnBluetoothMap = it },
+                            showSinceSnapshotControl = true,
+                            sinceSnapshotEnabled = sinceSnapshotOnlyOnBluetoothMap,
+                            snapshotEpochMs = bluetoothMapSnapshotEpochMs,
+                            onSinceSnapshotEnabledChange = { enabled ->
+                                sinceSnapshotOnlyOnBluetoothMap = enabled
+                                if (enabled && bluetoothMapSnapshotEpochMs == null) {
+                                    bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
+                                }
+                            },
+                            onCaptureSnapshot = {
                                 bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
-                            }
-                        },
-                        onCaptureSnapshot = {
-                            bluetoothMapSnapshotEpochMs = System.currentTimeMillis()
-                        },
-                        showTrackerFamilyBadge = true,
-                        liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                    )
+                            },
+                            showTrackerFamilyBadge = true,
+                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                        )
+                    }
                 } else if (selectedMapSubTab == 2) {
                     val flightSensorsEnabled = ScanSettings.isAviationAdsbSensorEnabled(context) ||
                         ScanSettings.isAviationPublicSensorEnabled(context)
@@ -8372,7 +8392,8 @@ private fun DetectionPage(
                         val flightMapPins by produceState(
                             allTrackedAircraftPins,
                             allTrackedAircraftPins,
-                            liveOnlyOnFlightMap,
+                            flightMapTimeRangePreset,
+                            flightMapCustomRangeMinutes,
                             flightMapCurrentLocation,
                             flightDisplayRadiusMeters,
                             sinceSnapshotOnlyOnFlightMap,
@@ -8382,19 +8403,21 @@ private fun DetectionPage(
                                 allTrackedAircraftPins
                                     .asSequence()
                                     .filter { pin ->
-                                        if (!liveOnlyOnFlightMap) {
-                                            true
-                                        } else {
-                                            val withinRadius = flightMapCurrentLocation?.let { loc ->
-                                                distanceFromLocationMeters(
-                                                    fromLat = loc.lat,
-                                                    fromLon = loc.lon,
-                                                    toLat = pin.position.latitude,
-                                                    toLon = pin.position.longitude
-                                                )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
-                                            } ?: true
-                                            pin.isLive && withinRadius
-                                        }
+                                        val withinRange = isMapPinWithinSelectedRange(
+                                            pinTimestampEpochMs = pin.timestampEpochMs,
+                                            nowEpochMs = mapLiveNowEpochMs,
+                                            preset = flightMapTimeRangePreset,
+                                            customRangeMinutes = flightMapCustomRangeMinutes
+                                        )
+                                        val withinRadius = flightMapCurrentLocation?.let { loc ->
+                                            distanceFromLocationMeters(
+                                                fromLat = loc.lat,
+                                                fromLon = loc.lon,
+                                                toLat = pin.position.latitude,
+                                                toLon = pin.position.longitude
+                                            )?.let { distance -> distance <= flightDisplayRadiusMeters } ?: false
+                                        } ?: true
+                                        withinRange && withinRadius
                                     }
                                     .filter { pin ->
                                         if (!sinceSnapshotOnlyOnFlightMap) {
@@ -8407,66 +8430,72 @@ private fun DetectionPage(
                                     .toList()
                             }
                         }
-                        DetectionMapPage(
-                            mapTitle = "Aircraft Map",
-                            mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use Live Only for the freshest tracks.",
-                            currentLocationOverride = flightMapCurrentLocation,
-                            centerOnAircraftCoverageOnOpen = true,
-                            noFlyZones = noFlyZoneOverlays,
-                            showNoFlyZoneControl = mapNoFlyZonesEnabled,
-                            noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
-                            pins = flightMapPins,
-                            pinLimit = flightMapPinLimit,
-                            onPinLimitChange = { flightMapPinLimit = it },
-                            mapClusteringEnabled = mapClusteringEnabled,
-                            onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
-                            mapClusterRangeLevel = mapClusterRangeLevel,
-                            onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
-                            mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
-                            mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
-                            onPinDetailsClick = { pin ->
-                                onDeviceMapPinClick(
-                                    pin.source,
-                                    pin.primaryId,
-                                    pin.position.latitude,
-                                    pin.position.longitude,
-                                    pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
-                                )
-                            },
-                            useSourceOnlyPinColors = true,
-                            enableVerticalScroll = true,
-                            showLiveOnlyControl = true,
-                            liveOnlyEnabled = liveOnlyOnFlightMap,
-                            onLiveOnlyEnabledChange = { liveOnlyOnFlightMap = it },
-                            identityModeEnabled = identityModeOnFlightMap,
-                            onIdentityModeEnabledChange = { identityModeOnFlightMap = it },
-                            identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
-                            onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
-                            showRadiusControl = true,
-                            radiusMiles = flightMapRadiusMiles,
-                            onRadiusMilesChange = { miles ->
-                                val safeMiles = miles.coerceIn(10, 1000)
-                                flightMapRadiusMiles = safeMiles
-                                deviceMapAircraftRadiusMiles = safeMiles.coerceIn(25, 75)
-                                ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
-                            },
-                            radiusControlLabel = "Radius (mi)",
-                            radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
-                            showMovingOnlyControl = false,
-                            showSinceSnapshotControl = true,
-                            sinceSnapshotEnabled = sinceSnapshotOnlyOnFlightMap,
-                            snapshotEpochMs = flightMapSnapshotEpochMs,
-                            onSinceSnapshotEnabledChange = { enabled ->
-                                sinceSnapshotOnlyOnFlightMap = enabled
-                                if (enabled && flightMapSnapshotEpochMs == null) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            MapTimeRangeSelector(
+                                selectedPreset = flightMapTimeRangePreset,
+                                onPresetChanged = { flightMapTimeRangePreset = it },
+                                customRangeMinutes = flightMapCustomRangeMinutes,
+                                onCustomRangeMinutesChanged = { flightMapCustomRangeMinutes = it }
+                            )
+                            DetectionMapPage(
+                                mapTitle = "Aircraft Map",
+                                mapDescription = "Aircraft-only view from public radar and ADS-B ingest. Use time range presets to scope active history.",
+                                currentLocationOverride = flightMapCurrentLocation,
+                                centerOnAircraftCoverageOnOpen = true,
+                                noFlyZones = noFlyZoneOverlays,
+                                showNoFlyZoneControl = mapNoFlyZonesEnabled,
+                                noFlyRenderQualityLevel = mapNoFlyRenderQualityLevel,
+                                pins = flightMapPins,
+                                pinLimit = flightMapPinLimit,
+                                onPinLimitChange = { flightMapPinLimit = it },
+                                mapClusteringEnabled = mapClusteringEnabled,
+                                onMapClusteringEnabledChange = onMapClusteringEnabledChanged,
+                                mapClusterRangeLevel = mapClusterRangeLevel,
+                                onMapClusterRangeLevelChange = onMapClusterRangeLevelChanged,
+                                mapScannerSweepAnimationEnabled = mapScannerSweepAnimationEnabled,
+                                mapScannerSweepAnimationSpeedPreset = mapScannerSweepAnimationSpeedPreset,
+                                onPinDetailsClick = { pin ->
+                                    onDeviceMapPinClick(
+                                        pin.source,
+                                        pin.primaryId,
+                                        pin.position.latitude,
+                                        pin.position.longitude,
+                                        pin.encounterTimestampEpochMs ?: pin.timestampEpochMs
+                                    )
+                                },
+                                useSourceOnlyPinColors = true,
+                                enableVerticalScroll = true,
+                                showLiveOnlyControl = false,
+                                identityModeEnabled = identityModeOnFlightMap,
+                                onIdentityModeEnabledChange = { identityModeOnFlightMap = it },
+                                identityShowFullNamesEnabled = mapIdentityFullNamesEnabled,
+                                onIdentityShowFullNamesEnabledChange = onMapIdentityFullNamesEnabledChanged,
+                                showRadiusControl = true,
+                                radiusMiles = flightMapRadiusMiles,
+                                onRadiusMilesChange = { miles ->
+                                    val safeMiles = miles.coerceIn(10, 1000)
+                                    flightMapRadiusMiles = safeMiles
+                                    deviceMapAircraftRadiusMiles = safeMiles.coerceIn(25, 75)
+                                    ScanSettings.setAviationPublicRadiusMiles(context, safeMiles)
+                                },
+                                radiusControlLabel = "Radius (mi)",
+                                radiusOptions = listOf(10, 25, 50, 100, 200, 300, 500, 750, 1000),
+                                showMovingOnlyControl = false,
+                                showSinceSnapshotControl = true,
+                                sinceSnapshotEnabled = sinceSnapshotOnlyOnFlightMap,
+                                snapshotEpochMs = flightMapSnapshotEpochMs,
+                                onSinceSnapshotEnabledChange = { enabled ->
+                                    sinceSnapshotOnlyOnFlightMap = enabled
+                                    if (enabled && flightMapSnapshotEpochMs == null) {
+                                        flightMapSnapshotEpochMs = System.currentTimeMillis()
+                                    }
+                                },
+                                onCaptureSnapshot = {
                                     flightMapSnapshotEpochMs = System.currentTimeMillis()
-                                }
-                            },
-                            onCaptureSnapshot = {
-                                flightMapSnapshotEpochMs = System.currentTimeMillis()
-                            },
-                            liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
-                        )
+                                },
+                                liveMapUpdateIntervalSeconds = liveMapUpdateIntervalSeconds
+                            )
+                        }
                     }
                 } else {
                     val magneticMapSamples = remember(meshInsightEncounters, magneticMapPinLimit) {
@@ -21295,6 +21324,92 @@ private fun orderedEncounterSourceOptions(sources: Set<String>): List<String> {
     val preferredOrder = SOURCE_TYPE_UI_META_ORDERED.map { it.source }
     return preferredOrder.filter { it in sources } +
         sources.filterNot { it in preferredOrder }.sorted()
+}
+
+private fun mapTimeRangeCutoffEpochMs(
+    nowEpochMs: Long,
+    preset: MapTimeRangePreset,
+    customRangeMinutes: Long
+): Long? {
+    val durationMs = when (preset) {
+        MapTimeRangePreset.PAST_MINUTE -> 60_000L
+        MapTimeRangePreset.PAST_5_MINUTES -> 5 * 60_000L
+        MapTimeRangePreset.PAST_HOUR -> 60 * 60_000L
+        MapTimeRangePreset.PAST_DAY -> 24 * 60 * 60_000L
+        MapTimeRangePreset.PAST_WEEK -> 7 * 24 * 60 * 60_000L
+        MapTimeRangePreset.CUSTOM -> customRangeMinutes.coerceIn(1L, 7L * 24L * 60L) * 60_000L
+        MapTimeRangePreset.ALL -> return null
+    }
+    return nowEpochMs - durationMs
+}
+
+private fun isMapPinWithinSelectedRange(
+    pinTimestampEpochMs: Long,
+    nowEpochMs: Long,
+    preset: MapTimeRangePreset,
+    customRangeMinutes: Long
+): Boolean {
+    val cutoff = mapTimeRangeCutoffEpochMs(nowEpochMs, preset, customRangeMinutes) ?: return true
+    return pinTimestampEpochMs >= cutoff
+}
+
+@Composable
+private fun MapTimeRangeSelector(
+    selectedPreset: MapTimeRangePreset,
+    onPresetChanged: (MapTimeRangePreset) -> Unit,
+    customRangeMinutes: Long,
+    onCustomRangeMinutesChanged: (Long) -> Unit
+) {
+    var customRangeExpanded by remember { mutableStateOf(false) }
+    val customOptionsMinutes = listOf(1L, 5L, 15L, 30L, 60L, 180L, 360L, 720L, 1440L, 2880L, 10080L)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Map Time Range", fontWeight = FontWeight.SemiBold)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MapTimeRangePreset.entries.forEach { preset ->
+                    FilterChip(
+                        selected = selectedPreset == preset,
+                        onClick = { onPresetChanged(preset) },
+                        label = { Text(preset.label) }
+                    )
+                }
+            }
+            if (selectedPreset == MapTimeRangePreset.CUSTOM) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Text("Custom window: ${ScanSettings.formatInterval(customRangeMinutes * 60L)}")
+                    Button(onClick = { customRangeExpanded = true }) {
+                        Text("Change")
+                    }
+                    DropdownMenu(
+                        expanded = customRangeExpanded,
+                        onDismissRequest = { customRangeExpanded = false }
+                    ) {
+                        customOptionsMinutes.forEach { optionMinutes ->
+                            DropdownMenuItem(
+                                text = { Text(ScanSettings.formatInterval(optionMinutes * 60L)) },
+                                onClick = {
+                                    onCustomRangeMinutesChanged(optionMinutes)
+                                    customRangeExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
