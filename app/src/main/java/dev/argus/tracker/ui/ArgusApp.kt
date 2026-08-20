@@ -379,24 +379,28 @@ private val LOCAL_DEVICE_CLASSIFIER_VENDOR_SIGNATURES = listOf(
         category = "Router / Access Point",
         vendorKeywords = setOf("ubiquiti", "tp-link", "netgear", "linksys", "asus", "fritz", "eero", "arris", "technicolor"),
         ouiPrefixes = setOf("24A43C", "F09FC2", "3C37E4", "2C30F2", "6C5AB5"),
+        manufacturerCompanyIds = emptySet(),
         sourceHints = setOf("WIFI")
     ),
     DeviceClassifierVendorSignature(
         category = "Smart TV / Streaming",
         vendorKeywords = setOf("samsung", "lg", "sony", "tcl", "hisense", "roku", "amazon", "apple"),
         ouiPrefixes = setOf("FCF136", "E8ABFA", "7C6456", "B8D9CE"),
+        manufacturerCompanyIds = setOf(76, 117),
         sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC")
     ),
     DeviceClassifierVendorSignature(
         category = "Washer / Dishwasher Appliance",
         vendorKeywords = setOf("whirlpool", "bosch", "miele", "electrolux", "ge appliances", "lg", "samsung"),
         ouiPrefixes = emptySet(),
+        manufacturerCompanyIds = setOf(117),
         sourceHints = setOf("WIFI", "BLUETOOTH_LE")
     ),
     DeviceClassifierVendorSignature(
         category = "Printer / Scanner",
         vendorKeywords = setOf("hp", "epson", "brother", "canon", "xerox"),
         ouiPrefixes = setOf("3CD92B", "00155D", "9C5C8E"),
+        manufacturerCompanyIds = emptySet(),
         sourceHints = setOf("WIFI", "BLUETOOTH_LE")
     )
 )
@@ -623,6 +627,7 @@ private data class DeviceClassifierVendorSignature(
     val category: String,
     val vendorKeywords: Set<String>,
     val ouiPrefixes: Set<String>,
+    val manufacturerCompanyIds: Set<Int> = emptySet(),
     val sourceHints: Set<String> = emptySet()
 )
 
@@ -6941,7 +6946,7 @@ private fun DetectionPage(
     var flightMapRadiusMiles by rememberSaveable {
         mutableStateOf(ScanSettings.getAviationPublicRadiusMiles(context).coerceIn(10, 1000))
     }
-    val tabs = listOf("Status", "Device", "Flock", "Map", "Mesh")
+    val tabs = listOf("Status", "Devices", "Flock", "Maps", "Mesh")
     var mapLiveNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
     val stickyPipEligible =
         stickyCompassMapEnabled &&
@@ -17783,16 +17788,22 @@ private fun classifyDeviceFromMetadata(
 ): DeviceClassificationResult? {
     val normalizedSource = source.trim().uppercase(Locale.US)
     val classifierMetadata = buildDeviceClassifierMetadata(primaryId, secondaryId, rawPayloadJson)
-    val corpus = classifierMetadata.corpus
-    if (corpus.isBlank()) return null
+    val normalizedText = classifierMetadata.normalizedText
+    if (normalizedText.isBlank()) return null
 
     // Stage 1: exact model/type or explicit identity match.
     val exactMatch = LOCAL_DEVICE_CLASSIFIER_EXACT_SIGNATURES.firstOrNull { signature ->
         (signature.sourceHints.isEmpty() || normalizedSource in signature.sourceHints) &&
-            signature.exactTokens.any { token -> token in classifierMetadata.exactTokenSet }
+            signature.exactTokens.any { token ->
+                val normalizedToken = normalizeClassifierToken(token)
+                normalizedToken in classifierMetadata.tokenSet || normalizedText.contains(normalizedToken)
+            }
     }
     if (exactMatch != null) {
-        val matched = exactMatch.exactTokens.filter { token -> token in classifierMetadata.exactTokenSet }.take(4)
+        val matched = exactMatch.exactTokens.filter { token ->
+            val normalizedToken = normalizeClassifierToken(token)
+            normalizedToken in classifierMetadata.tokenSet || normalizedText.contains(normalizedToken)
+        }.take(4)
         return DeviceClassificationResult(
             category = exactMatch.category,
             confidence = 0.96,
@@ -17807,12 +17818,17 @@ private fun classifyDeviceFromMetadata(
     var bestVendorSignals: List<String> = emptyList()
     LOCAL_DEVICE_CLASSIFIER_VENDOR_SIGNATURES.forEach { signature ->
         if (signature.sourceHints.isNotEmpty() && normalizedSource !in signature.sourceHints) return@forEach
-        val vendorHits = signature.vendorKeywords.filter { keyword -> corpus.contains(keyword) }
+        val vendorHits = signature.vendorKeywords.filter { keyword ->
+            val normalizedKeyword = normalizeClassifierToken(keyword)
+            normalizedKeyword in classifierMetadata.tokenSet || normalizedText.contains(normalizedKeyword)
+        }
         val ouiHit = classifierMetadata.ouiPrefix?.takeIf { it in signature.ouiPrefixes }
-        if (vendorHits.isEmpty() && ouiHit == null) return@forEach
+        val companyIdHits = classifierMetadata.manufacturerCompanyIds.intersect(signature.manufacturerCompanyIds)
+        if (vendorHits.isEmpty() && ouiHit == null && companyIdHits.isEmpty()) return@forEach
 
         var score = vendorHits.size * 1.15
         if (ouiHit != null) score += 1.75
+        score += companyIdHits.size * 2.1
         if (seenCount >= 5) score += 0.1
 
         if (score > bestVendorScore) {
@@ -17821,6 +17837,7 @@ private fun classifyDeviceFromMetadata(
             bestVendorSignals = buildList {
                 addAll(vendorHits)
                 ouiHit?.let { add("OUI:$it") }
+                companyIdHits.forEach { id -> add("MFG_ID:$id") }
             }
         }
     }
@@ -17840,7 +17857,10 @@ private fun classifyDeviceFromMetadata(
 
     LOCAL_DEVICE_CLASSIFIER_SIGNATURES.forEach { signature ->
         if (signature.sourceHints.isNotEmpty() && normalizedSource !in signature.sourceHints) return@forEach
-        val hits = signature.keywords.filter { keyword -> corpus.contains(keyword) }
+        val hits = signature.keywords.filter { keyword ->
+            val normalizedKeyword = normalizeClassifierToken(keyword)
+            normalizedKeyword in classifierMetadata.tokenSet || normalizedText.contains(normalizedKeyword)
+        }
         if (hits.isEmpty()) return@forEach
 
         var score = hits.size * signature.confidenceWeight
@@ -17877,9 +17897,10 @@ private fun classifyDeviceFromMetadata(
 }
 
 private data class DeviceClassifierMetadata(
-    val corpus: String,
-    val exactTokenSet: Set<String>,
-    val ouiPrefix: String?
+    val normalizedText: String,
+    val tokenSet: Set<String>,
+    val ouiPrefix: String?,
+    val manufacturerCompanyIds: Set<Int>
 )
 
 private fun buildDeviceClassifierMetadata(
@@ -17910,7 +17931,7 @@ private fun buildDeviceClassifierMetadata(
         .filter { it.isNotBlank() }
         .toList()
 
-    val exactTokenSet = buildSet {
+    val tokenSet = buildSet {
         normalizedParts.forEach { value ->
             add(value)
             value.split(' ')
@@ -17921,10 +17942,54 @@ private fun buildDeviceClassifierMetadata(
     }
 
     return DeviceClassifierMetadata(
-        corpus = normalizedParts.joinToString(separator = " "),
-        exactTokenSet = exactTokenSet,
-        ouiPrefix = extractOuiPrefix(primaryId)
+        normalizedText = normalizedParts.joinToString(separator = " "),
+        tokenSet = tokenSet,
+        ouiPrefix = extractOuiPrefix(primaryId),
+        manufacturerCompanyIds = parseManufacturerCompanyIds(payload)
     )
+}
+
+private fun parseManufacturerCompanyIds(payload: JSONObject?): Set<Int> {
+    val source = payload ?: return emptySet()
+    val result = mutableSetOf<Int>()
+
+    fun parseNumericToken(token: String): Int? {
+        val trimmed = token.trim()
+        if (trimmed.isBlank()) return null
+        return when {
+            trimmed.startsWith("0x", ignoreCase = true) -> trimmed.substring(2).toIntOrNull(16)
+            else -> trimmed.toIntOrNull()
+        }
+    }
+
+    val rawCompanyIds = source.opt("manufacturerCompanyIds")
+    when (rawCompanyIds) {
+        is JSONArray -> {
+            for (index in 0 until rawCompanyIds.length()) {
+                val value = rawCompanyIds.opt(index)
+                when (value) {
+                    is Number -> result += value.toInt()
+                    is String -> parseNumericToken(value)?.let(result::add)
+                }
+            }
+        }
+        is Number -> result += rawCompanyIds.toInt()
+        is String -> {
+            Regex("0x[0-9a-fA-F]+|\\d+")
+                .findAll(rawCompanyIds)
+                .mapNotNull { match -> parseNumericToken(match.value) }
+                .forEach(result::add)
+        }
+    }
+
+    source.opt("manufacturerCompanyId")?.let { singleValue ->
+        when (singleValue) {
+            is Number -> result += singleValue.toInt()
+            is String -> parseNumericToken(singleValue)?.let(result::add)
+        }
+    }
+
+    return result.filter { it >= 0 }.toSet()
 }
 
 private fun normalizeClassifierToken(value: String): String {
