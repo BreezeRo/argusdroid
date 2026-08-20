@@ -10451,7 +10451,7 @@ private fun DetectionMapPage(
     var noFlyZonesVisible by rememberSaveable { mutableStateOf(true) }
     var selectedNoFlyZoneId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedMapPin by remember { mutableStateOf<MapPin?>(null) }
-    var deviceTypeFiltersCollapsed by rememberSaveable { mutableStateOf(false) }
+    var deviceTypeFiltersCollapsed by rememberSaveable { mutableStateOf(true) }
     var preciseDotsEnabled by rememberSaveable { mutableStateOf(false) }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapError by remember { mutableStateOf<String?>(null) }
