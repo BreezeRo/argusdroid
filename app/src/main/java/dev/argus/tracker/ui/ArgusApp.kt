@@ -56,6 +56,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9011,11 +9012,11 @@ private fun DetectionLogsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Type", modifier = Modifier.weight(0.9f), fontWeight = FontWeight.Bold)
-                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                            Text("Primary ID", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
-                            Text("Time", modifier = Modifier.weight(1.2f), fontWeight = FontWeight.Bold)
-                            Text("Message", modifier = Modifier.weight(2f), fontWeight = FontWeight.Bold)
+                            Text("Type", modifier = Modifier.width(84.dp), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.width(108.dp), fontWeight = FontWeight.Bold)
+                            Text("Primary ID", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                            Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                            Text("Message", modifier = Modifier.width(380.dp), fontWeight = FontWeight.Bold)
                         }
                         filteredLogs.forEach { entry ->
                             val rowTypeLabel = when (entry.type) {
@@ -9044,11 +9045,11 @@ private fun DetectionLogsPage(
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text(rowTypeLabel, modifier = Modifier.weight(0.9f))
-                                Text(listSourceLabel(entry.source, null), modifier = Modifier.weight(1f))
-                                Text(entry.primaryId, modifier = Modifier.weight(1.3f))
-                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.weight(1.2f))
-                                Text(entry.message.take(120), modifier = Modifier.weight(2f))
+                                Text(rowTypeLabel, modifier = Modifier.width(84.dp))
+                                Text(listSourceLabel(entry.source, null), modifier = Modifier.width(108.dp))
+                                Text(entry.primaryId, modifier = Modifier.width(160.dp))
+                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.width(160.dp))
+                                Text(entry.message.take(120), modifier = Modifier.width(380.dp))
                             }
                         }
                     }
@@ -9248,11 +9249,11 @@ private fun ErrorLogsPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Severity", modifier = Modifier.weight(0.9f), fontWeight = FontWeight.Bold)
-                            Text("Category", modifier = Modifier.weight(1.1f), fontWeight = FontWeight.Bold)
-                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                            Text("Time", modifier = Modifier.weight(1.2f), fontWeight = FontWeight.Bold)
-                            Text("Message", modifier = Modifier.weight(2f), fontWeight = FontWeight.Bold)
+                            Text("Severity", modifier = Modifier.width(96.dp), fontWeight = FontWeight.Bold)
+                            Text("Category", modifier = Modifier.width(140.dp), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
+                            Text("Time", modifier = Modifier.width(160.dp), fontWeight = FontWeight.Bold)
+                            Text("Message", modifier = Modifier.width(420.dp), fontWeight = FontWeight.Bold)
                         }
                         filteredLogs.forEach { entry ->
                             Row(
@@ -9261,11 +9262,11 @@ private fun ErrorLogsPage(
                                     .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text(entry.severity, modifier = Modifier.weight(0.9f))
-                                Text(entry.category, modifier = Modifier.weight(1.1f))
-                                Text(entry.source, modifier = Modifier.weight(1f))
-                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.weight(1.2f))
-                                Text(entry.message.take(140), modifier = Modifier.weight(2f))
+                                Text(entry.severity, modifier = Modifier.width(96.dp))
+                                Text(entry.category, modifier = Modifier.width(140.dp))
+                                Text(entry.source, modifier = Modifier.width(120.dp))
+                                Text(formatEpoch(entry.timestampEpochMs), modifier = Modifier.width(160.dp))
+                                Text(entry.message.take(140), modifier = Modifier.width(420.dp))
                             }
                         }
                     }
@@ -18860,11 +18861,11 @@ private fun DevicesPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text("Source", modifier = Modifier.weight(1.1f), fontWeight = FontWeight.Bold)
-                            Text("Device", modifier = Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
-                            Text("Seen", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold)
-                            Text("Security", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                            Text("Last Seen", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.width(130.dp), fontWeight = FontWeight.Bold)
+                            Text("Device", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            Text("Seen", modifier = Modifier.width(64.dp), fontWeight = FontWeight.Bold)
+                            Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
+                            Text("Last Seen", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
                         pagedDevices.forEach { device ->
                             Row(
@@ -18876,25 +18877,25 @@ private fun DevicesPage(
                             ) {
                                 Text(
                                     text = listSourceLabel(device.source, null),
-                                    modifier = Modifier.weight(1.1f)
+                                    modifier = Modifier.width(130.dp)
                                 )
                                 Text(
                                     text = device.primaryId,
-                                    modifier = Modifier.weight(1.5f)
+                                    modifier = Modifier.width(200.dp)
                                 )
                                 Text(
                                     text = device.seenCount.toString(),
-                                    modifier = Modifier.weight(0.7f)
+                                    modifier = Modifier.width(64.dp)
                                 )
                                 Text(
                                     text = if (device.connectionSecurity?.isInsecure == true) "Insecure" else "Secure",
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier.width(100.dp),
                                     color = if (device.connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
                                     text = formatEpoch(device.lastSeenEpochMs),
-                                    modifier = Modifier.weight(1.3f)
+                                    modifier = Modifier.width(170.dp)
                                 )
                             }
                         }
@@ -19488,11 +19489,11 @@ private fun EncountersPage(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("Source", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                            Text("Primary ID", modifier = Modifier.weight(1.4f), fontWeight = FontWeight.Bold)
-                            Text("Security", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                            Text("RSSI", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold)
-                            Text("Timestamp", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold)
+                            Text("Source", modifier = Modifier.width(120.dp), fontWeight = FontWeight.Bold)
+                            Text("Primary ID", modifier = Modifier.width(200.dp), fontWeight = FontWeight.Bold)
+                            Text("Security", modifier = Modifier.width(100.dp), fontWeight = FontWeight.Bold)
+                            Text("RSSI", modifier = Modifier.width(70.dp), fontWeight = FontWeight.Bold)
+                            Text("Timestamp", modifier = Modifier.width(170.dp), fontWeight = FontWeight.Bold)
                         }
                         pagedEncounters.forEach { encounter ->
                             val connectionSecurity = analyzeConnectionSecurity(
@@ -19508,25 +19509,25 @@ private fun EncountersPage(
                             ) {
                                 Text(
                                     text = listSourceLabel(encounter.source.name, null),
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.width(120.dp)
                                 )
                                 Text(
                                     text = encounter.primaryId,
-                                    modifier = Modifier.weight(1.4f)
+                                    modifier = Modifier.width(200.dp)
                                 )
                                 Text(
                                     text = if (connectionSecurity?.isInsecure == true) "Insecure" else "Secure",
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier.width(100.dp),
                                     color = if (connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
                                     text = encounter.rssiDbm?.toString() ?: "n/a",
-                                    modifier = Modifier.weight(0.7f)
+                                    modifier = Modifier.width(70.dp)
                                 )
                                 Text(
                                     text = formatEpoch(encounter.timestampEpochMs),
-                                    modifier = Modifier.weight(1.3f)
+                                    modifier = Modifier.width(170.dp)
                                 )
                             }
                         }
