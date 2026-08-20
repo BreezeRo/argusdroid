@@ -19555,7 +19555,7 @@ private fun EncountersPage(
                 "secondary" -> (a.secondaryId ?: "").compareTo(b.secondaryId ?: "")
                 "security" -> aSecurity.compareTo(bSecurity)
                 "rssi" -> (a.rssiDbm ?: Int.MIN_VALUE).compareTo(b.rssiDbm ?: Int.MIN_VALUE)
-                "freq" -> (a.frequencyMhz ?: Double.NEGATIVE_INFINITY).compareTo(b.frequencyMhz ?: Double.NEGATIVE_INFINITY)
+                "freq" -> (a.frequencyMhz ?: Int.MIN_VALUE).compareTo(b.frequencyMhz ?: Int.MIN_VALUE)
                 "lat" -> (a.lat ?: Double.NEGATIVE_INFINITY).compareTo(b.lat ?: Double.NEGATIVE_INFINITY)
                 "lon" -> (a.lon ?: Double.NEGATIVE_INFINITY).compareTo(b.lon ?: Double.NEGATIVE_INFINITY)
                 "payload" -> a.rawPayloadJson.compareTo(b.rawPayloadJson)
