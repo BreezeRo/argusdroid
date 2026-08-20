@@ -352,6 +352,80 @@ private const val EXTRA_NO_FLY_LAT = "extra_no_fly_lat"
 private const val EXTRA_NO_FLY_LON = "extra_no_fly_lon"
 private const val EXTRA_NO_FLY_ZONE_IDS = "extra_no_fly_zone_ids"
 private const val EXTRA_MAGNETIC_OPEN_POPUP = "extra_magnetic_open_popup"
+private val LOCAL_DEVICE_CLASSIFIER_SIGNATURES = listOf(
+    DeviceClassifierSignature(
+        category = "Router / Access Point",
+        keywords = listOf("router", "gateway", "ap-", "access point", "mesh", "ssid", "guest", "ubiquiti", "unifi", "netgear", "linksys", "tp-link", "eero", "fritz"),
+        sourceHints = setOf("WIFI"),
+        confidenceWeight = 1.15
+    ),
+    DeviceClassifierSignature(
+        category = "Smart TV / Streaming",
+        keywords = listOf("smarttv", "smart tv", "roku", "chromecast", "firetv", "apple tv", "android tv", "bravia", "webos", "tizen"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC"),
+        confidenceWeight = 1.1
+    ),
+    DeviceClassifierSignature(
+        category = "Washer / Dishwasher Appliance",
+        keywords = listOf("washer", "washing", "dishwasher", "laundry", "dryer", "appliance", "whirlpool", "lg thinq", "smartthings"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE"),
+        confidenceWeight = 1.2
+    ),
+    DeviceClassifierSignature(
+        category = "Security Camera",
+        keywords = listOf("camera", "cam", "ring", "arlo", "wyze", "reolink", "hikvision", "dahua", "nest cam"),
+        sourceHints = setOf("WIFI", "CAMERA", "BLUETOOTH_LE"),
+        confidenceWeight = 1.15
+    ),
+    DeviceClassifierSignature(
+        category = "Printer / Scanner",
+        keywords = listOf("printer", "print", "epson", "hp", "brother", "canon", "scanner"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE"),
+        confidenceWeight = 1.1
+    ),
+    DeviceClassifierSignature(
+        category = "Smart Speaker",
+        keywords = listOf("alexa", "echo", "google home", "nest mini", "homepod", "speaker"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC"),
+        confidenceWeight = 1.05
+    ),
+    DeviceClassifierSignature(
+        category = "Smart Plug / Switch",
+        keywords = listOf("smart plug", "plug", "kasa", "wemo", "tapo", "switch", "outlet"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE"),
+        confidenceWeight = 1.0
+    ),
+    DeviceClassifierSignature(
+        category = "Thermostat / HVAC",
+        keywords = listOf("thermostat", "ecobee", "nest thermostat", "hvac", "climate"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE"),
+        confidenceWeight = 1.05
+    ),
+    DeviceClassifierSignature(
+        category = "Robot Vacuum",
+        keywords = listOf("roomba", "vacuum", "deebot", "robovac", "dreame"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE"),
+        confidenceWeight = 1.1
+    ),
+    DeviceClassifierSignature(
+        category = "Phone / Tablet",
+        keywords = listOf("iphone", "ipad", "pixel", "galaxy", "oneplus", "android", "xiaomi", "huawei", "phone", "tablet"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC"),
+        confidenceWeight = 0.95
+    ),
+    DeviceClassifierSignature(
+        category = "Laptop / PC",
+        keywords = listOf("macbook", "thinkpad", "laptop", "desktop", "workstation", "windows", "ubuntu", "raspberry"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC"),
+        confidenceWeight = 0.95
+    ),
+    DeviceClassifierSignature(
+        category = "Gaming Console",
+        keywords = listOf("playstation", "ps5", "xbox", "nintendo", "switch", "steamdeck"),
+        sourceHints = setOf("WIFI", "BLUETOOTH_LE", "BLUETOOTH_CLASSIC"),
+        confidenceWeight = 1.05
+    )
+)
 private const val GOOGLE_MAP_DARK_STYLE_JSON = """
 [
     {"elementType":"geometry","stylers":[{"color":"#212121"}]},
@@ -484,6 +558,21 @@ private data class SensorBatteryUsageEstimate(
     val meterFraction: Float
 )
 
+private data class DeviceClassifierSignature(
+    val category: String,
+    val keywords: List<String>,
+    val sourceHints: Set<String> = emptySet(),
+    val confidenceWeight: Double = 1.0
+)
+
+private data class DeviceClassificationResult(
+    val category: String,
+    val confidence: Double,
+    val matchedSignals: List<String>
+) {
+    fun summaryLabel(): String = "Likely $category (${(confidence * 100.0).roundToInt()}%)"
+}
+
 private data class DeviceItem(
     val source: String,
     val primaryId: String,
@@ -513,7 +602,8 @@ private data class DeviceItem(
     val gpsSpoofSuspected: Boolean,
     val trackerRisk: TrackerRiskSignal?,
     val cellThreat: CellThreatSignal?,
-    val connectionSecurity: ConnectionSecuritySignal?
+    val connectionSecurity: ConnectionSecuritySignal?,
+    val deviceClassification: DeviceClassificationResult?
 )
 
 private data class DeviceDetailComputed(
@@ -13434,6 +13524,10 @@ private fun estimateDeviceItemHeapBytes(item: DeviceItem): Long {
     bytes += estimateStringHeapBytes(item.lastProvenanceNodeId)
     bytes += estimateStringHeapBytes(item.lastProvenanceOriginNodeId)
     bytes += estimateStringHeapBytes(item.lastProvenancePathNodeIds)
+    bytes += estimateStringHeapBytes(item.deviceClassification?.category)
+    item.deviceClassification?.matchedSignals?.forEach { signal ->
+        bytes += estimateStringHeapBytes(signal)
+    }
     bytes += 40L
     return bytes
 }
@@ -17609,6 +17703,86 @@ private fun computeRfTextureScore(encounters: List<Encounter>): Double {
 private fun parseEncounterPayload(encounter: Encounter): JSONObject? =
     runCatching { JSONObject(encounter.rawPayloadJson) }.getOrNull()
 
+private fun classifyDeviceFromMetadata(
+    source: String,
+    primaryId: String,
+    secondaryId: String?,
+    rawPayloadJson: String?,
+    seenCount: Int
+): DeviceClassificationResult? {
+    val normalizedSource = source.trim().uppercase(Locale.US)
+    val corpus = buildDeviceClassifierCorpus(primaryId, secondaryId, rawPayloadJson)
+    if (corpus.isBlank()) return null
+
+    var bestSignature: DeviceClassifierSignature? = null
+    var bestScore = 0.0
+    var bestHits: List<String> = emptyList()
+
+    LOCAL_DEVICE_CLASSIFIER_SIGNATURES.forEach { signature ->
+        if (signature.sourceHints.isNotEmpty() && normalizedSource !in signature.sourceHints) return@forEach
+        val hits = signature.keywords.filter { keyword -> corpus.contains(keyword) }
+        if (hits.isEmpty()) return@forEach
+
+        var score = hits.size * signature.confidenceWeight
+        val ssidText = secondaryId?.lowercase(Locale.US).orEmpty()
+        if (ssidText.isNotBlank() && hits.any { ssidText.contains(it) }) {
+            score += 0.35
+        }
+        if (seenCount >= 5) {
+            score += 0.15
+        }
+        if (signature.category == "Router / Access Point" &&
+            (ssidText.contains("_5g") || ssidText.contains("-5g") || ssidText.contains("guest"))
+        ) {
+            score += 0.55
+        }
+
+        if (score > bestScore) {
+            bestScore = score
+            bestSignature = signature
+            bestHits = hits
+        }
+    }
+
+    val signature = bestSignature ?: return null
+    if (bestScore < 1.05) return null
+
+    val confidence = (0.36 + (bestScore / 6.0)).coerceIn(0.36, 0.95)
+    return DeviceClassificationResult(
+        category = signature.category,
+        confidence = confidence,
+        matchedSignals = bestHits.distinct().take(4)
+    )
+}
+
+private fun buildDeviceClassifierCorpus(
+    primaryId: String,
+    secondaryId: String?,
+    rawPayloadJson: String?
+): String {
+    val parts = mutableListOf<String>()
+    parts += primaryId
+    secondaryId?.let(parts::add)
+    rawPayloadJson?.take(4000)?.let(parts::add)
+
+    val payload = rawPayloadJson
+        ?.takeIf { it.isNotBlank() }
+        ?.let { runCatching { JSONObject(it) }.getOrNull() }
+    val payloadKeys = listOf(
+        "ssid", "name", "deviceName", "friendlyName", "hostname", "host",
+        "vendor", "manufacturer", "brand", "model", "product", "category", "type",
+        "bluetoothName", "serviceName"
+    )
+    payloadKeys.forEach { key ->
+        payload?.optStringOrNull(key)?.let(parts::add)
+    }
+
+    return parts
+        .asSequence()
+        .map { it.lowercase(Locale.US) }
+        .joinToString(separator = " ")
+}
+
 private fun standardDeviation(values: List<Double>): Double {
     if (values.size < 2) return 0.0
     val mean = values.average()
@@ -18815,6 +18989,7 @@ private fun DevicesPage(
                 "secondary" -> (a.secondaryId ?: "").compareTo(b.secondaryId ?: "")
                 "seen" -> a.seenCount.compareTo(b.seenCount)
                 "security" -> (a.connectionSecurity?.isInsecure == true).compareTo(b.connectionSecurity?.isInsecure == true)
+                "classification" -> (a.deviceClassification?.category ?: "").compareTo(b.deviceClassification?.category ?: "")
                 "rssi" -> (a.lastRssiDbm ?: Int.MIN_VALUE).compareTo(b.lastRssiDbm ?: Int.MIN_VALUE)
                 "freq" -> (a.lastFrequencyMhz ?: Int.MIN_VALUE).compareTo(b.lastFrequencyMhz ?: Int.MIN_VALUE)
                 "owned" -> a.isOwned.compareTo(b.isOwned)
@@ -19029,6 +19204,7 @@ private fun DevicesPage(
                             }
                             SortableTableHeaderCell("Seen", 64.dp, "seen", tableSortKey, tableSortAscending, onTableSort)
                             SortableTableHeaderCell("Security", 100.dp, "security", tableSortKey, tableSortAscending, onTableSort)
+                            SortableTableHeaderCell("Class", 170.dp, "classification", tableSortKey, tableSortAscending, onTableSort)
                             if (!compactTableView) {
                                 SortableTableHeaderCell("RSSI", 70.dp, "rssi", tableSortKey, tableSortAscending, onTableSort)
                                 SortableTableHeaderCell("Freq", 70.dp, "freq", tableSortKey, tableSortAscending, onTableSort)
@@ -19077,6 +19253,12 @@ private fun DevicesPage(
                                     color = if (device.connectionSecurity?.isInsecure == true) Color(0xFFB3261E) else Color(0xFF2E7D32),
                                     fontWeight = FontWeight.Medium
                                 )
+                                Text(
+                                    text = device.deviceClassification?.summaryLabel() ?: "Unknown",
+                                    modifier = Modifier.width(170.dp),
+                                    color = if (device.deviceClassification != null) Color(0xFF1565C0) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = if (device.deviceClassification != null) FontWeight.Medium else FontWeight.Normal
+                                )
                                 if (!compactTableView) {
                                     Text(
                                         text = device.lastRssiDbm?.toString() ?: "n/a",
@@ -19121,6 +19303,16 @@ private fun DevicesPage(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("${listSourceLabel(device.source, device.secondaryId)} • ${device.primaryId}")
+                        device.deviceClassification?.let { classification ->
+                            Text(
+                                text = "Classification: ${classification.summaryLabel()}",
+                                color = Color(0xFF1565C0),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (classification.matchedSignals.isNotEmpty()) {
+                                Text("Signals: ${classification.matchedSignals.joinToString()}")
+                            }
+                        }
                         if (device.hasChainLinkedData) {
                             val label = if (device.chainLinkedPeerCount > 1) {
                                 "CHAIN-LINKED (${device.chainLinkedPeerCount} peers)"
@@ -20070,6 +20262,13 @@ private fun buildDeviceItemForGroup(
     val gpsSpoofSuspected =
         source == EncounterSource.REMOTE_ID.name &&
             isLikelyRemoteIdLocationSpoofed(groupedEncounters)
+    val metadataClassification = classifyDeviceFromMetadata(
+        source = source,
+        primaryId = primaryId,
+        secondaryId = latest.secondaryId,
+        rawPayloadJson = latest.rawPayloadJson,
+        seenCount = groupedEncounters.size
+    )
 
     return DeviceItem(
         source = source,
@@ -20108,7 +20307,8 @@ private fun buildDeviceItemForGroup(
         gpsSpoofSuspected = gpsSpoofSuspected,
         trackerRisk = trackerRisk,
         cellThreat = if (isCellSource) analyzeCellThreat(groupedEncounters) else null,
-        connectionSecurity = connectionSecurity
+        connectionSecurity = connectionSecurity,
+        deviceClassification = metadataClassification
     )
 }
 
@@ -20891,6 +21091,12 @@ private fun DeviceDetailPage(
                 )
                 DetailRow("Primary ID", item.primaryId)
                 DetailRow("Secondary ID", item.secondaryId ?: "n/a")
+                item.deviceClassification?.let { classification ->
+                    DetailRow("Likely Device Class", classification.summaryLabel())
+                    if (classification.matchedSignals.isNotEmpty()) {
+                        DetailRow("Classification Signals", classification.matchedSignals.joinToString())
+                    }
+                }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
