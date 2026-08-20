@@ -11331,7 +11331,13 @@ private fun DetectionMapPage(
                             }
                             FilterChip(
                                 selected = controlsVisible,
-                                onClick = { controlsVisible = !controlsVisible },
+                                onClick = {
+                                    val nextVisible = !controlsVisible
+                                    controlsVisible = nextVisible
+                                    if (nextVisible && deviceTypeFiltersCollapsed) {
+                                        deviceTypeFiltersCollapsed = false
+                                    }
+                                },
                                 label = { Text("Panels", style = MaterialTheme.typography.labelSmall) }
                             )
                             AssistChip(
